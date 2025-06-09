@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { View, StyleSheet } from 'react-native';
 import GarageFrontEnd from './components/GarageFrontEnd';
 import HomeHeader from './components/HomeHeader';
+import ServiceBox from './components/ServiceBox';
 
 export default function App() {
   const [vehicle, setVehicle] = useState(null); // placeholder: no vehicle yet
@@ -24,6 +25,7 @@ export default function App() {
     <View style={styles.container}>
       <HomeHeader garageName={garageName} setGarageName={setGarageName} />
       <GarageFrontEnd vehicle={vehicle} onAddPress={handleAddVehicle} />
+      <ServiceBox />
 
     </View>
   );

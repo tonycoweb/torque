@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -14,14 +14,19 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.gomezant002.TorqueTheMechanic"
+      "bundleIdentifier": "com.gomezant002.TorqueTheMechanic",
+      "infoPlist": {
+        "NSCameraUsageDescription": "We need access to your camera to allow you to take photos of your receipts or car parts for diagnosis.",
+        "NSPhotoLibraryUsageDescription": "We need access to your photo library to allow you to select existing photos of receipts or car parts for diagnosis."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.gomezant002.TorqueTheMechanic"
     },
     "web": {
       "favicon": "./assets/favicon.png"

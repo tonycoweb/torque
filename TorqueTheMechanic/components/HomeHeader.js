@@ -1,13 +1,32 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Modal, TextInput } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function HomeHeader({ garageName, setGarageName }) {
   const [modalVisible, setModalVisible] = useState(false);
   const [inputName, setInputName] = useState('');
 
-  const handleSave = () => {
-    setGarageName(inputName.trim());
+  useEffect(() => {
+    const loadName = async () => {
+      try {
+        const savedName = await AsyncStorage.getItem('garageName');
+        if (savedName) {
+          setGarageName(savedName);
+        }
+      } catch (err) {
+        console.error('Failed to load garage name:', err);
+      }
+    };
+    loadName();
+  }, []);
+
+  const handleSave = async () => {
+    const trimmedName = inputName.trim();
+    if (trimmedName) {
+      setGarageName(trimmedName);
+      await AsyncStorage.setItem('garageName', trimmedName);
+    }
     setModalVisible(false);
   };
 
@@ -45,6 +64,7 @@ export default function HomeHeader({ garageName, setGarageName }) {
     </View>
   );
 }
+
 
 const styles = StyleSheet.create({
   container: {

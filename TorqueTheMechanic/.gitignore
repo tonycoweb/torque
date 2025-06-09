@@ -8,6 +8,8 @@ node_modules/
 dist/
 web-build/
 expo-env.d.ts
+ios/
+android/
 
 # Native
 .kotlin/
@@ -35,3 +37,19 @@ yarn-error.*
 
 # typescript
 *.tsbuildinfo
+
+# Build artifacts
+*.xcworkspace
+*.xcuserstate
+*.xcodeproj
+*.DS_Store
+*.expo/
+.expo-shared/
+dist/
+build/
+
+# Secrets
+.env
+.env.local
+.env.production
+
