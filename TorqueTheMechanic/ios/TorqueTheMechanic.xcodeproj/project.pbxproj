@@ -7,26 +7,26 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		136ED50F1E1EE7B92D506C8F /* libPods-TorqueTheMechanic.a in Frameworks */ = {isa = PBXBuildFile; fileRef = EBFC1EF127AF06DB715CD409 /* libPods-TorqueTheMechanic.a */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
-		2E9055FDF40F13BF06A534B8 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = EAFE2FD8A468D6250C339AFB /* PrivacyInfo.xcprivacy */; };
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
-		57A160CCE1D780449C5E49C1 /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 739AE7AC92667F79C477E5FC /* ExpoModulesProvider.swift */; };
+		6DDEB2CF9C842BF314697D91 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 02D8E77454EEC35E9C335816 /* PrivacyInfo.xcprivacy */; };
+		8C7214EF52EA56EC75DB94A4 /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93EAFC1075AAC98F24E20263 /* ExpoModulesProvider.swift */; };
 		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
 		F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11748412D0307B40044C1D9 /* AppDelegate.swift */; };
-		F1F8AB513C00501914785773 /* libPods-TorqueTheMechanic.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3DEF544F12490F6C21E10CCF /* libPods-TorqueTheMechanic.a */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		02D8E77454EEC35E9C335816 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xml; name = PrivacyInfo.xcprivacy; path = TorqueTheMechanic/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		13B07F961A680F5B00A75B9A /* TorqueTheMechanic.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TorqueTheMechanic.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = TorqueTheMechanic/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = TorqueTheMechanic/Info.plist; sourceTree = "<group>"; };
-		3DEF544F12490F6C21E10CCF /* libPods-TorqueTheMechanic.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-TorqueTheMechanic.a"; sourceTree = BUILT_PRODUCTS_DIR; };
-		5EA0C81360BA932ACE7E479B /* Pods-TorqueTheMechanic.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-TorqueTheMechanic.debug.xcconfig"; path = "Target Support Files/Pods-TorqueTheMechanic/Pods-TorqueTheMechanic.debug.xcconfig"; sourceTree = "<group>"; };
-		739AE7AC92667F79C477E5FC /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-TorqueTheMechanic/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
+		93EAFC1075AAC98F24E20263 /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-TorqueTheMechanic/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
 		AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = SplashScreen.storyboard; path = TorqueTheMechanic/SplashScreen.storyboard; sourceTree = "<group>"; };
-		BAD6E4021B4860E0D8089083 /* Pods-TorqueTheMechanic.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-TorqueTheMechanic.release.xcconfig"; path = "Target Support Files/Pods-TorqueTheMechanic/Pods-TorqueTheMechanic.release.xcconfig"; sourceTree = "<group>"; };
+		AADB0DEAC8C8CF76D2F2A5DC /* Pods-TorqueTheMechanic.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-TorqueTheMechanic.debug.xcconfig"; path = "Target Support Files/Pods-TorqueTheMechanic/Pods-TorqueTheMechanic.debug.xcconfig"; sourceTree = "<group>"; };
 		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
-		EAFE2FD8A468D6250C339AFB /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xml; name = PrivacyInfo.xcprivacy; path = TorqueTheMechanic/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		C520331A74E2342A0C8598C2 /* Pods-TorqueTheMechanic.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-TorqueTheMechanic.release.xcconfig"; path = "Target Support Files/Pods-TorqueTheMechanic/Pods-TorqueTheMechanic.release.xcconfig"; sourceTree = "<group>"; };
+		EBFC1EF127AF06DB715CD409 /* libPods-TorqueTheMechanic.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-TorqueTheMechanic.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F11748412D0307B40044C1D9 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = TorqueTheMechanic/AppDelegate.swift; sourceTree = "<group>"; };
 		F11748442D0722820044C1D9 /* TorqueTheMechanic-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "TorqueTheMechanic-Bridging-Header.h"; path = "TorqueTheMechanic/TorqueTheMechanic-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -37,13 +37,21 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F1F8AB513C00501914785773 /* libPods-TorqueTheMechanic.a in Frameworks */,
+				136ED50F1E1EE7B92D506C8F /* libPods-TorqueTheMechanic.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		0BB80C76B5C0BD17839CA0BA /* ExpoModulesProviders */ = {
+			isa = PBXGroup;
+			children = (
+				9BCD3C3476424BE96FA69B6C /* TorqueTheMechanic */,
+			);
+			name = ExpoModulesProviders;
+			sourceTree = "<group>";
+		};
 		13B07FAE1A68108700A75B9A /* TorqueTheMechanic */ = {
 			isa = PBXGroup;
 			children = (
@@ -53,7 +61,7 @@
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */,
-				EAFE2FD8A468D6250C339AFB /* PrivacyInfo.xcprivacy */,
+				02D8E77454EEC35E9C335816 /* PrivacyInfo.xcprivacy */,
 			);
 			name = TorqueTheMechanic;
 			sourceTree = "<group>";
@@ -62,16 +70,16 @@
 			isa = PBXGroup;
 			children = (
 				ED297162215061F000B7C4FE /* JavaScriptCore.framework */,
-				3DEF544F12490F6C21E10CCF /* libPods-TorqueTheMechanic.a */,
+				EBFC1EF127AF06DB715CD409 /* libPods-TorqueTheMechanic.a */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
-		658DC8C105002E3314CB60BB /* Pods */ = {
+		3EA37F6E0A5FFAE9DE293A9C /* Pods */ = {
 			isa = PBXGroup;
 			children = (
-				5EA0C81360BA932ACE7E479B /* Pods-TorqueTheMechanic.debug.xcconfig */,
-				BAD6E4021B4860E0D8089083 /* Pods-TorqueTheMechanic.release.xcconfig */,
+				AADB0DEAC8C8CF76D2F2A5DC /* Pods-TorqueTheMechanic.debug.xcconfig */,
+				C520331A74E2342A0C8598C2 /* Pods-TorqueTheMechanic.release.xcconfig */,
 			);
 			path = Pods;
 			sourceTree = "<group>";
@@ -90,8 +98,8 @@
 				832341AE1AAA6A7D00B99B32 /* Libraries */,
 				83CBBA001A601CBA00E9B192 /* Products */,
 				2D16E6871FA4F8E400B85C8A /* Frameworks */,
-				658DC8C105002E3314CB60BB /* Pods */,
-				DB9F7809B2CF77B073958155 /* ExpoModulesProviders */,
+				3EA37F6E0A5FFAE9DE293A9C /* Pods */,
+				0BB80C76B5C0BD17839CA0BA /* ExpoModulesProviders */,
 			);
 			indentWidth = 2;
 			sourceTree = "<group>";
@@ -106,10 +114,10 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		8EADFC301B863AC223F6EC65 /* TorqueTheMechanic */ = {
+		9BCD3C3476424BE96FA69B6C /* TorqueTheMechanic */ = {
 			isa = PBXGroup;
 			children = (
-				739AE7AC92667F79C477E5FC /* ExpoModulesProvider.swift */,
+				93EAFC1075AAC98F24E20263 /* ExpoModulesProvider.swift */,
 			);
 			name = TorqueTheMechanic;
 			sourceTree = "<group>";
@@ -123,14 +131,6 @@
 			path = TorqueTheMechanic/Supporting;
 			sourceTree = "<group>";
 		};
-		DB9F7809B2CF77B073958155 /* ExpoModulesProviders */ = {
-			isa = PBXGroup;
-			children = (
-				8EADFC301B863AC223F6EC65 /* TorqueTheMechanic */,
-			);
-			name = ExpoModulesProviders;
-			sourceTree = "<group>";
-		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -139,13 +139,13 @@
 			buildConfigurationList = 13B07F931A680F5B00A75B9A /* Build configuration list for PBXNativeTarget "TorqueTheMechanic" */;
 			buildPhases = (
 				08A4A3CD28434E44B6B9DE2E /* [CP] Check Pods Manifest.lock */,
-				B39CB1CF50C578942DFFEC17 /* [Expo] Configure project */,
+				17A91CB9C0E27A1A12489A4A /* [Expo] Configure project */,
 				13B07F871A680F5B00A75B9A /* Sources */,
 				13B07F8C1A680F5B00A75B9A /* Frameworks */,
 				13B07F8E1A680F5B00A75B9A /* Resources */,
 				00DD1BFF1BD5951E006B06BC /* Bundle React Native code and images */,
 				800E24972A6A228C8D4807E9 /* [CP] Copy Pods Resources */,
-				D47343DB3C73FB3ABD7174C4 /* [CP] Embed Pods Frameworks */,
+				A38EEAA640F4DCC910126453 /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
@@ -195,7 +195,7 @@
 				BB2F792D24A3F905000567C9 /* Expo.plist in Resources */,
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */,
-				2E9055FDF40F13BF06A534B8 /* PrivacyInfo.xcprivacy in Resources */,
+				6DDEB2CF9C842BF314697D91 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -238,6 +238,25 @@
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
+		};
+		17A91CB9C0E27A1A12489A4A /* [Expo] Configure project */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "[Expo] Configure project";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# This script configures Expo modules and generates the modules provider file.\nbash -l -c \"./Pods/Target\\ Support\\ Files/Pods-TorqueTheMechanic/expo-configure-project.sh\"\n";
 		};
 		800E24972A6A228C8D4807E9 /* [CP] Copy Pods Resources */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -313,26 +332,7 @@
 			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-TorqueTheMechanic/Pods-TorqueTheMechanic-resources.sh\"\n";
 			showEnvVarsInLog = 0;
 		};
-		B39CB1CF50C578942DFFEC17 /* [Expo] Configure project */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			name = "[Expo] Configure project";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "# This script configures Expo modules and generates the modules provider file.\nbash -l -c \"./Pods/Target\\ Support\\ Files/Pods-TorqueTheMechanic/expo-configure-project.sh\"\n";
-		};
-		D47343DB3C73FB3ABD7174C4 /* [CP] Embed Pods Frameworks */ = {
+		A38EEAA640F4DCC910126453 /* [CP] Embed Pods Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -358,7 +358,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */,
-				57A160CCE1D780449C5E49C1 /* ExpoModulesProvider.swift in Sources */,
+				8C7214EF52EA56EC75DB94A4 /* ExpoModulesProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -367,7 +367,7 @@
 /* Begin XCBuildConfiguration section */
 		13B07F941A680F5B00A75B9A /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 5EA0C81360BA932ACE7E479B /* Pods-TorqueTheMechanic.debug.xcconfig */;
+			baseConfigurationReference = AADB0DEAC8C8CF76D2F2A5DC /* Pods-TorqueTheMechanic.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
@@ -404,7 +404,7 @@
 		};
 		13B07F951A680F5B00A75B9A /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = BAD6E4021B4860E0D8089083 /* Pods-TorqueTheMechanic.release.xcconfig */;
+			baseConfigurationReference = C520331A74E2342A0C8598C2 /* Pods-TorqueTheMechanic.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
