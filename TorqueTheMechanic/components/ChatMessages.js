@@ -1,91 +1,66 @@
 import React, { useRef, useEffect } from 'react';
-import { ScrollView, View, Text, Image, StyleSheet, ActivityIndicator } from 'react-native';
+import { ScrollView, View, Text, StyleSheet } from 'react-native';
 
-export default function ChatMessages({ messages, isTyping }) {
+export default function ChatMessages({ messages }) {
   const scrollViewRef = useRef();
+  const prevMessageCount = useRef(0);
 
   useEffect(() => {
-    if (scrollViewRef.current) {
+    if (scrollViewRef.current && messages.length > prevMessageCount.current) {
       scrollViewRef.current.scrollToEnd({ animated: true });
+      prevMessageCount.current = messages.length;
     }
-  }, [messages, isTyping]);
+  }, [messages]);
 
   return (
     <ScrollView
       ref={scrollViewRef}
       contentContainerStyle={styles.messagesContainer}
+      removeClippedSubviews={true}
     >
       {messages.map((msg, index) => (
         <View
           key={index}
           style={[
-            styles.messageBlock,
-            msg.sender === 'user' ? styles.userBlock : styles.apiBlock,
+            styles.messageBubble,
+            msg.sender === 'user' ? styles.userBubble : styles.responseBubble,
           ]}
         >
-          {msg.type === 'image' ? (
-            <Image
-              source={{ uri: msg.uri }}
-              style={styles.messageImage}
-              resizeMode="contain"
-            />
-          ) : (
-            <Text style={styles.messageText}>{msg.text}</Text>
-          )}
+          <Text style={styles.messageText}>{msg.text}</Text>
         </View>
       ))}
-
-      {/* Optional typing indicator */}
-      {isTyping && (
-        <View style={styles.typingBlock}>
-          <ActivityIndicator size="small" color="#aaa" />
-          <Text style={styles.typingText}>Torque is typing...</Text>
-        </View>
-      )}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   messagesContainer: {
-    paddingVertical: 12,
-    paddingHorizontal: 12,
+    padding: 12,
+    paddingBottom: 20,
   },
-  messageBlock: {
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginVertical: 6,
-    maxWidth: '100%',
+  messageBubble: {
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 12,
+    maxWidth: '90%',
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    elevation: 3,
   },
-  userBlock: {
+  userBubble: {
     alignSelf: 'flex-end',
-    backgroundColor: 'transparent', // GPT style: user text is plain text
+    backgroundColor: '#4CAF50',
   },
-  apiBlock: {
+  responseBubble: {
     alignSelf: 'flex-start',
-    backgroundColor: '#1e1e1e', // subtle GPT AI block
+    backgroundColor: '#1f1f1f',
+    borderColor: '#333',
+    borderWidth: 1,
   },
   messageText: {
     color: '#fff',
     fontSize: 16,
     lineHeight: 22,
-  },
-  messageImage: {
-    width: 250,
-    height: 250,
-    borderRadius: 8,
-    backgroundColor: '#000', // subtle background behind image
-  },
-  typingBlock: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 8,
-    marginLeft: 4,
-  },
-  typingText: {
-    color: '#aaa',
-    marginLeft: 8,
-    fontSize: 14,
   },
 });

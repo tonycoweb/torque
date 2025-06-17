@@ -11,7 +11,7 @@ import {
 import { Ionicons, MaterialIcons, Entypo } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 
-export default function ChatBoxFixed({ onSend, onAttachImage, onAttachDocument }) {
+export default function ChatBoxFixed({ onSend, onAttachImage, onAttachDocument, onFocus }) {
   const [inputText, setInputText] = useState('');
 
   const handleSend = () => {
@@ -46,7 +46,6 @@ export default function ChatBoxFixed({ onSend, onAttachImage, onAttachDocument }
       keyboardVerticalOffset={60}
       style={styles.chatBoxContainer}
     >
-      {/* TEXT INPUT */}
       <View style={styles.textInputArea}>
         <TextInput
           placeholder="Message Torque..."
@@ -56,10 +55,10 @@ export default function ChatBoxFixed({ onSend, onAttachImage, onAttachDocument }
           onChangeText={setInputText}
           style={styles.textInput}
           underlineColorAndroid="transparent"
+          onFocus={onFocus}
         />
       </View>
 
-      {/* ICONS ROW */}
       <View style={styles.iconsRow}>
         <TouchableOpacity onPress={handleMicrophone} style={styles.iconButton}>
           <Ionicons name="mic-outline" size={24} color="#aaa" />
@@ -96,7 +95,6 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 6,
     paddingVertical: 8,
-    marginBottom: 33,
   },
   textInputArea: {
     flex: 1,
@@ -110,7 +108,7 @@ const styles = StyleSheet.create({
     flex: 1,
     color: '#fff',
     fontSize: 16,
-    textAlignVertical: 'top', // this forces text to stay at top like GPT
+    textAlignVertical: 'top',
   },
   iconsRow: {
     flexDirection: 'row',

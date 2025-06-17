@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, Animated, Easing } from 'react-native';
 import LottieView from 'lottie-react-native';
 
-
 export default function RobotAssistant({ isChatting }) {
   const phrases = [
     "I'm a master mechanic! You can ask me anything.",
@@ -13,66 +12,93 @@ export default function RobotAssistant({ isChatting }) {
   ];
 
   const [currentPhraseIndex, setCurrentPhraseIndex] = useState(0);
+
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const rotateAnim = useRef(new Animated.Value(0)).current;
+  const loopAnimRef = useRef(null);
+  const phraseIntervalRef = useRef(null);
 
   useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(scaleAnim, {
-          toValue: 1.05,
-          duration: 1500,
-          easing: Easing.inOut(Easing.ease),
-          useNativeDriver: true,
-        }),
-        Animated.timing(scaleAnim, {
-          toValue: 1,
-          duration: 1500,
-          easing: Easing.inOut(Easing.ease),
-          useNativeDriver: true,
-        }),
-      ])
-    ).start();
-  }, [scaleAnim]);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (isChatting) return; // stop changing phrase when chatting starts
-
-      Animated.parallel([
-        Animated.timing(fadeAnim, {
-          toValue: 0,
-          duration: 400,
-          useNativeDriver: true,
-        }),
+    if (!isChatting) {
+      // Start pulsing
+      loopAnimRef.current = Animated.loop(
         Animated.sequence([
-          Animated.timing(rotateAnim, {
-            toValue: 1,
-            duration: 400,
-            easing: Easing.out(Easing.ease),
+          Animated.timing(scaleAnim, {
+            toValue: 1.05,
+            duration: 1500,
+            easing: Easing.inOut(Easing.ease),
             useNativeDriver: true,
           }),
-          Animated.timing(rotateAnim, {
+          Animated.timing(scaleAnim, {
+            toValue: 1,
+            duration: 1500,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+        ])
+      );
+
+      loopAnimRef.current.start();
+
+      // Start phrase rotation
+      phraseIntervalRef.current = setInterval(() => {
+        Animated.parallel([
+          Animated.timing(fadeAnim, {
             toValue: 0,
             duration: 400,
-            easing: Easing.in(Easing.ease),
             useNativeDriver: true,
           }),
-        ]),
-      ]).start(() => {
-        setCurrentPhraseIndex((prevIndex) => (prevIndex + 1) % phrases.length);
+          Animated.sequence([
+            Animated.timing(rotateAnim, {
+              toValue: 1,
+              duration: 400,
+              easing: Easing.out(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(rotateAnim, {
+              toValue: 0,
+              duration: 400,
+              easing: Easing.in(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
+        ]).start(() => {
+          setCurrentPhraseIndex((prevIndex) => (prevIndex + 1) % phrases.length);
 
-        Animated.timing(fadeAnim, {
-          toValue: 1,
-          duration: 600,
-          useNativeDriver: true,
-        }).start();
-      });
-    }, 7000);
+          Animated.timing(fadeAnim, {
+            toValue: 1,
+            duration: 600,
+            useNativeDriver: true,
+          }).start();
+        });
+      }, 7000);
+    } else {
+      // Chatting → pause animations
+      if (loopAnimRef.current) {
+        loopAnimRef.current.stop();
+        loopAnimRef.current = null;
+      }
 
-    return () => clearInterval(interval);
-  }, [fadeAnim, rotateAnim, isChatting]);
+      if (phraseIntervalRef.current) {
+        clearInterval(phraseIntervalRef.current);
+        phraseIntervalRef.current = null;
+      }
+    }
+
+    return () => {
+      // Cleanup when component unmounts or isChatting changes
+      if (loopAnimRef.current) {
+        loopAnimRef.current.stop();
+        loopAnimRef.current = null;
+      }
+
+      if (phraseIntervalRef.current) {
+        clearInterval(phraseIntervalRef.current);
+        phraseIntervalRef.current = null;
+      }
+    };
+  }, [isChatting]);
 
   return (
     <View style={styles.container}>
@@ -92,7 +118,7 @@ export default function RobotAssistant({ isChatting }) {
         <LottieView
           source={require('../assets/lottie/robotResting.json')}
           autoPlay
-          loop
+          loop={!isChatting} // Only loop in resting mode
           style={styles.robot}
         />
       </Animated.View>
@@ -110,7 +136,6 @@ export default function RobotAssistant({ isChatting }) {
     </View>
   );
 }
-
 
 const styles = StyleSheet.create({
   container: {
