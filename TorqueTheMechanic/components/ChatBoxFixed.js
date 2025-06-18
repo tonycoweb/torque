@@ -83,7 +83,7 @@ export default function ChatBoxFixed({ onSend, onAttachImage, onAttachDocument, 
 const styles = StyleSheet.create({
   chatBoxContainer: {
     width: '100%',
-    height: Dimensions.get('window').height * 0.20,
+    height: Dimensions.get('window').height * 0.26,
     backgroundColor: '#121212',
     paddingHorizontal: 12,
     borderTopLeftRadius: 15,
@@ -114,6 +114,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    paddingBottom: 24,
   },
   iconButton: {
     padding: 6,

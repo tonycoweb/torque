@@ -33,7 +33,7 @@ const styles = StyleSheet.create({
   },
   placeholder: {
     backgroundColor: '#444',
-    padding: 30,
+    padding: 32,
     borderRadius: 15,
     alignItems: 'center',
     borderColor: '#888',
@@ -50,7 +50,7 @@ const styles = StyleSheet.create({
   },
   card: {
     backgroundColor: '#333',
-    padding: 20,
+    padding: 32,
     borderRadius: 15,
     alignItems: 'center',
   },

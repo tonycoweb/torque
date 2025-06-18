@@ -16,6 +16,21 @@ import RobotAssistant from './components/RobotAssistant';
 import ChatMessages from './components/ChatMessages';
 import ChatBoxFixed from './components/ChatBoxFixed';
 import SavedChatsPanel from './components/SavedChatsPanel';
+import { sendToGPT } from './components/GptService';import { LogBox, LayoutAnimation, UIManager } from 'react-native';
+
+// Enable LayoutAnimation on Android (required)
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+// Monkey patch to prevent runaway callbacks (ONLY if you’re not using LayoutAnimation yourself)
+LayoutAnimation.configureNext = () => {};
+
+// Ignore React Native’s internal callback spam warning
+LogBox.ignoreLogs([
+  'Excessive number of pending callbacks',
+]);
+
 
 export default function App() {
   const [vehicle, setVehicle] = useState(null);
@@ -41,15 +56,16 @@ export default function App() {
     }).start();
   }, [isChatting]);
 
-  const handleSend = (text) => {
-    if (!isChatting) setIsChatting(true);
-
+  const handleSend = async (text) => {
+    if (!text.trim()) return;
+  
     setMessages((prev) => [...prev, { sender: 'user', text }]);
-
-    setTimeout(() => {
-      setMessages((prev) => [...prev, { sender: 'api', text: `Response to: ${text}` }]);
-    }, 1000);
+  
+    const reply = await sendToGPT(text, 'free'); //change free to variable when verifying revenuecat
+  
+    setMessages((prev) => [...prev, { sender: 'api', text: reply }]);
   };
+  
 
   const handleAttachImage = (uri) => {
     setMessages((prev) => [
@@ -162,7 +178,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#121212',
-    paddingTop: 60,
+    paddingVertical: 50,
     paddingHorizontal: 20,
   },
   chatMessagesArea: {
@@ -171,7 +187,6 @@ const styles = StyleSheet.create({
   },
   robotWrapper: {
     alignItems: 'center',
-    marginBottom: 10,
   },
   exitButton: {
     marginBottom: 8,

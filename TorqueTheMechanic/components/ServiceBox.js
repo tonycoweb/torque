@@ -449,7 +449,7 @@ export default function ServiceBox() {
     container: {
       backgroundColor: '#333',
       borderRadius: 12,
-      padding: 16,
+      padding: 32,
       alignItems: 'center',
       marginVertical: 10,
     },
