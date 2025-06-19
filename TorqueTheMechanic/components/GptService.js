@@ -3,6 +3,7 @@
 import { getTorquePrompt } from './TorquePrompt';
 
  // Update to deployed URL later
+ const API_URL = 'http://192.168.1.***:3001/chat';
 
 export async function sendToGPT(message, tier = 'free') {
   const system = getTorquePrompt(tier);

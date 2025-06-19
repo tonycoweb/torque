@@ -8,7 +8,9 @@ import {
   KeyboardAvoidingView,
   Platform,
   Keyboard,
+  ActivityIndicator,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import GarageFrontEnd from './components/GarageFrontEnd';
 import HomeHeader from './components/HomeHeader';
 import ServiceBox from './components/ServiceBox';
@@ -16,21 +18,16 @@ import RobotAssistant from './components/RobotAssistant';
 import ChatMessages from './components/ChatMessages';
 import ChatBoxFixed from './components/ChatBoxFixed';
 import SavedChatsPanel from './components/SavedChatsPanel';
-import { sendToGPT } from './components/GptService';import { LogBox, LayoutAnimation, UIManager } from 'react-native';
+import { sendToGPT } from './components/GptService';
+import LoginScreen from './components/LoginScreen';
+import { LogBox, LayoutAnimation, UIManager } from 'react-native';
 
 // Enable LayoutAnimation on Android (required)
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
-
-// Monkey patch to prevent runaway callbacks (ONLY if you’re not using LayoutAnimation yourself)
 LayoutAnimation.configureNext = () => {};
-
-// Ignore React Native’s internal callback spam warning
-LogBox.ignoreLogs([
-  'Excessive number of pending callbacks',
-]);
-
+LogBox.ignoreLogs(['Excessive number of pending callbacks']);
 
 export default function App() {
   const [vehicle, setVehicle] = useState(null);
@@ -38,10 +35,36 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [isChatting, setIsChatting] = useState(false);
   const [showSavedChats, setShowSavedChats] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(null);
 
   const robotTranslateY = useRef(new Animated.Value(0)).current;
   const robotScale = useRef(new Animated.Value(1)).current;
 
+  // 🔐 Check if user is logged in
+  useEffect(() => {
+    const checkLogin = async () => {
+      const user = await AsyncStorage.getItem('user');
+      setIsLoggedIn(!!user);
+    };
+    checkLogin();
+  }, []);
+
+  const handleLogin = () => setIsLoggedIn(true);
+
+  // 🎯 Only show LoginScreen if not logged in
+  if (isLoggedIn === null) {
+    return (
+      <View style={styles.loading}>
+        <ActivityIndicator size="large" />
+      </View>
+    );
+  }
+
+  if (!isLoggedIn) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  // 🎬 Animations
   useEffect(() => {
     Animated.timing(robotTranslateY, {
       toValue: isChatting ? -80 : 0,
@@ -58,21 +81,16 @@ export default function App() {
 
   const handleSend = async (text) => {
     if (!text.trim()) return;
-  
     setMessages((prev) => [...prev, { sender: 'user', text }]);
-  
-    const reply = await sendToGPT(text, 'free'); //change free to variable when verifying revenuecat
-  
+    const reply = await sendToGPT(text, 'free');
     setMessages((prev) => [...prev, { sender: 'api', text: reply }]);
   };
-  
 
   const handleAttachImage = (uri) => {
     setMessages((prev) => [
       ...prev,
       { sender: 'user', text: `📷 Image attached: ${uri}` },
     ]);
-
     if (!isChatting) setIsChatting(true);
   };
 
@@ -81,7 +99,6 @@ export default function App() {
       ...prev,
       { sender: 'user', text: `📄 Document attached: ${file.name}` },
     ]);
-
     if (!isChatting) setIsChatting(true);
   };
 
@@ -181,6 +198,11 @@ const styles = StyleSheet.create({
     paddingVertical: 50,
     paddingHorizontal: 20,
   },
+  loading: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   chatMessagesArea: {
     flex: 1,
     marginBottom: 10,
@@ -203,7 +225,7 @@ const styles = StyleSheet.create({
   savedChatsButton: {
     position: 'absolute',
     right: 24,
-    bottom: Platform.OS === 'ios' ? 140 : 120, // above ChatBoxFixed
+    bottom: Platform.OS === 'ios' ? 140 : 120,
     backgroundColor: '#333',
     padding: 12,
     borderRadius: 30,
