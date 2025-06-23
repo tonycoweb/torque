@@ -32,12 +32,16 @@ export default function LoginScreen({ onLogin }) {
     "🧰 I can walk you through car repairs step by step.",
     "🚗 Save all your vehicles and build a full repair history.",
     "🔍 Ask me about a sound or symptom — I’ll help diagnose it.",
-    "🎤 Let me hear that weird noise — I can help diagnose issues from sound too.",
-    "📘 I can pull your car’s oil type, fluid specs, or torque settings fast.*",
+    "🎙 Let me hear that weird noise — I can help diagnose issues from sound too.",
+    "📚 I can pull your car’s oil type, fluid specs, or torque settings fast.*",
     "🔧 Need a part number? I’ll look it up for you — fast.",
     "💸 Think a mechanic is ripping you off? Ask me! I'll always stay truthful.",
     "🧰 Having trouble finding car info online? Ask me! I'm like the internet, but better!",
   ];
+
+  useEffect(() => {
+    AsyncStorage.removeItem('user'); // clear stored session for fresh login
+  }, []);
 
   useEffect(() => {
     Animated.parallel([
@@ -62,7 +66,6 @@ export default function LoginScreen({ onLogin }) {
   }, []);
 
   useEffect(() => {
-    // Start typing animation when phrase changes
     fullTextRef.current = phrases[phraseIndex];
     setDisplayedText('');
     clearTimeout(typingTimeout.current);
@@ -71,7 +74,6 @@ export default function LoginScreen({ onLogin }) {
 
   const typeText = (i) => {
     if (i === 1) {
-      // Start bubble pulse animation
       Animated.loop(
         Animated.sequence([
           Animated.timing(bubblePulse, {
@@ -92,7 +94,7 @@ export default function LoginScreen({ onLogin }) {
       setDisplayedText(fullTextRef.current.slice(0, i));
       typingTimeout.current = setTimeout(() => typeText(i + 1), 24);
     } else {
-      bubblePulse.stopAnimation(); // stop after typing finishes
+      bubblePulse.stopAnimation();
     }
   };
 
@@ -101,8 +103,8 @@ export default function LoginScreen({ onLogin }) {
   };
 
   const handleAppleLogin = async () => {
+    setLoading(true);
     try {
-      setLoading(true);
       const credential = await AppleAuthentication.signInAsync({
         requestedScopes: [
           AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
@@ -110,17 +112,23 @@ export default function LoginScreen({ onLogin }) {
         ],
       });
 
-      await AsyncStorage.setItem('user', JSON.stringify({
-        userId: credential.user,
-        email: credential.email || '',
-        name: credential.fullName?.givenName || '',
-      }));
+      if (!credential?.user) throw new Error('No Apple user ID');
 
+      const previous = await AsyncStorage.getItem('user');
+      const fallback = previous ? JSON.parse(previous) : {};
+
+      const userToSave = {
+        userId: credential.user,
+        email: credential.email ?? fallback.email ?? '',
+        name: credential.fullName?.givenName ?? fallback.name ?? '',
+      };
+
+      await AsyncStorage.setItem('user', JSON.stringify(userToSave));
       onLogin();
     } catch (e) {
+      console.error('❌ Apple Login Error:', e);
       if (e.code !== 'ERR_CANCELED') {
-        console.error('Apple Login Error:', e);
-        Alert.alert('Login Failed', 'Please try again.');
+        Alert.alert('Login Failed', e.message || 'Try again or restart app.');
       }
     } finally {
       setLoading(false);
@@ -134,17 +142,31 @@ export default function LoginScreen({ onLogin }) {
       {loading ? (
         <ActivityIndicator size="large" color="#4CAF50" style={{ marginTop: 40 }} />
       ) : (
-        <AppleAuthentication.AppleAuthenticationButton
-          buttonType={AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN}
-          buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.BLACK}
-          cornerRadius={10}
-          style={styles.appleButton}
-          onPress={handleAppleLogin}
-        />
-      )}
-      
+        <>
+          <AppleAuthentication.AppleAuthenticationButton
+            buttonType={AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN}
+            buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.BLACK}
+            cornerRadius={10}
+            style={styles.appleButton}
+            onPress={handleAppleLogin}
+          />
 
-      {/* Torque + intro section */}
+          {/* Temporary dev bypass */}
+          <TouchableOpacity
+            onPress={async () => {
+              await AsyncStorage.setItem('user', JSON.stringify({
+                userId: 'bypass-dev-user',
+                email: 'dev@bypass.com',
+                name: 'Bypass User',
+              }));
+              onLogin();
+            }}
+          >
+            <Text style={styles.bypassText}>Bypass Login (Dev Only)</Text>
+          </TouchableOpacity>
+        </>
+      )}
+
       <View style={styles.torqueIntroSection}>
         <Animated.View style={{ transform: [{ translateX: torqueSlideIn }] }}>
           <LottieView
@@ -185,7 +207,13 @@ const styles = StyleSheet.create({
   appleButton: {
     width: 260,
     height: 50,
-    marginBottom: 60,
+    marginBottom: 20,
+  },
+  bypassText: {
+    marginTop: 10,
+    color: '#bbb',
+    fontSize: 14,
+    textDecorationLine: 'underline',
   },
   torqueIntroSection: {
     flexDirection: 'row',

@@ -1,12 +1,13 @@
 {
   "expo": {
-    "name": "TorqueTheMechanic",
-    "slug": "TorqueTheMechanic",
-    "version": "1.0.0",
+    "name": "Pocket Mechanic",
+    "slug": "pocket-mechanic",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": false,
+    "plugins": ["expo-apple-authentication"],
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -14,7 +15,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.gomezant002.TorqueTheMechanic",
+      "bundleIdentifier": "com.gomezant002.pocketmechanic",
       "usesAppleSignIn": true,
       "infoPlist": {
         "NSCameraUsageDescription": "We need access to your camera to allow you to take photos of your receipts or car parts for diagnosis.",
@@ -27,7 +28,7 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.gomezant002.TorqueTheMechanic"
+      "package": "com.gomezant002.pocketmechanic"
     },
     "web": {
       "favicon": "./assets/favicon.png"

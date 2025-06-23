@@ -1,7 +1,9 @@
 import React, { useRef, useEffect } from 'react';
-import { ScrollView, View, Text, StyleSheet } from 'react-native';
+import { ScrollView, View, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import Markdown from 'react-native-markdown-display';
+import Icon from 'react-native-vector-icons/FontAwesome';
 
-export default function ChatMessages({ messages }) {
+export default function ChatMessages({ messages, loading }) {
   const scrollViewRef = useRef();
   const prevMessageCount = useRef(0);
 
@@ -19,16 +21,21 @@ export default function ChatMessages({ messages }) {
       removeClippedSubviews={true}
     >
       {messages.map((msg, index) => (
-        <View
-          key={index}
-          style={[
-            styles.messageBubble,
-            msg.sender === 'user' ? styles.userBubble : styles.responseBubble,
-          ]}
-        >
-          <Text style={styles.messageText}>{msg.text}</Text>
+        <View key={index} style={msg.sender === 'user' ? styles.userBubble : styles.assistantContainer}>
+          {msg.sender === 'user' ? (
+            <Text style={styles.userText}>{msg.text}</Text>
+          ) : (
+            <Markdown style={markdownStyle}>{msg.text}</Markdown>
+          )}
         </View>
       ))}
+
+      {loading && (
+        <View style={styles.loadingContainer}>
+          <Icon name="gear" size={24} color="#ccc" style={{ transform: [{ rotate: '45deg' }] }} />
+          <Text style={styles.loadingText}>Torque’s thinking...</Text>
+        </View>
+      )}
     </ScrollView>
   );
 }
@@ -36,31 +43,53 @@ export default function ChatMessages({ messages }) {
 const styles = StyleSheet.create({
   messagesContainer: {
     padding: 12,
-    paddingBottom: 20,
-  },
-  messageBubble: {
-    borderRadius: 16,
-    padding: 14,
-    marginBottom: 12,
-    maxWidth: '90%',
-    shadowColor: '#000',
-    shadowOpacity: 0.1,
-    shadowRadius: 6,
-    elevation: 3,
+    paddingBottom: 30,
   },
   userBubble: {
     alignSelf: 'flex-end',
     backgroundColor: '#4CAF50',
+    borderRadius: 16,
+    padding: 12,
+    marginBottom: 12,
+    maxWidth: '90%',
   },
-  responseBubble: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#1f1f1f',
-    borderColor: '#333',
-    borderWidth: 1,
-  },
-  messageText: {
+  userText: {
     color: '#fff',
     fontSize: 16,
     lineHeight: 22,
   },
+  assistantContainer: {
+    alignSelf: 'stretch',
+    backgroundColor: '#1c1c1c',
+    padding: 14,
+    marginBottom: 12,
+    borderRadius: 12,
+  },
+  loadingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    gap: 8,
+  },
+  loadingText: {
+    color: '#aaa',
+    fontStyle: 'italic',
+  },
 });
+
+const markdownStyle = {
+  body: {
+    color: '#fff',
+    fontSize: 16,
+    lineHeight: 24,
+  },
+  heading1: { fontSize: 22, fontWeight: 'bold', marginBottom: 8 },
+  heading2: { fontSize: 18, fontWeight: 'bold', marginBottom: 6 },
+  list_item: { marginBottom: 6 },
+  code_block: {
+    backgroundColor: '#333',
+    padding: 8,
+    borderRadius: 6,
+    fontFamily: 'Courier',
+  },
+};

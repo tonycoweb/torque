@@ -1,3 +1,4 @@
+// Updated App.js integration with autosave
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
@@ -7,7 +8,6 @@ import {
   Text,
   KeyboardAvoidingView,
   Platform,
-  Keyboard,
   ActivityIndicator,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -20,9 +20,11 @@ import ChatBoxFixed from './components/ChatBoxFixed';
 import SavedChatsPanel from './components/SavedChatsPanel';
 import { sendToGPT } from './components/GptService';
 import LoginScreen from './components/LoginScreen';
+import { saveChat, getAllChats } from './utils/storage';
 import { LogBox, LayoutAnimation, UIManager } from 'react-native';
 
-// Enable LayoutAnimation on Android (required)
+
+
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
@@ -36,11 +38,13 @@ export default function App() {
   const [isChatting, setIsChatting] = useState(false);
   const [showSavedChats, setShowSavedChats] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(null);
+  const [chatHistory, setChatHistory] = useState([]);
+  const [chatID, setChatID] = useState(null);
+  const [loading, setLoading] = useState(false); // ✅ loading state
 
   const robotTranslateY = useRef(new Animated.Value(0)).current;
   const robotScale = useRef(new Animated.Value(1)).current;
 
-  // 🔐 Check if user is logged in
   useEffect(() => {
     const checkLogin = async () => {
       const user = await AsyncStorage.getItem('user');
@@ -49,22 +53,6 @@ export default function App() {
     checkLogin();
   }, []);
 
-  const handleLogin = () => setIsLoggedIn(true);
-
-  // 🎯 Only show LoginScreen if not logged in
-  if (isLoggedIn === null) {
-    return (
-      <View style={styles.loading}>
-        <ActivityIndicator size="large" />
-      </View>
-    );
-  }
-
-  if (!isLoggedIn) {
-    return <LoginScreen onLogin={handleLogin} />;
-  }
-
-  // 🎬 Animations
   useEffect(() => {
     Animated.timing(robotTranslateY, {
       toValue: isChatting ? -80 : 0,
@@ -79,28 +67,54 @@ export default function App() {
     }).start();
   }, [isChatting]);
 
+
+  const trimTurns = (history, maxTurns = 6) => {
+    const turns = [];
+    for (let i = history.length - 1; i >= 0 && turns.length < maxTurns * 2; i--) {
+      const msg = history[i];
+      if (msg.role === 'user' || msg.role === 'assistant') {
+        turns.unshift(msg);
+      }
+    }
+    return turns;
+  };
+  
+
   const handleSend = async (text) => {
     if (!text.trim()) return;
+  
+    if (/new issue|start over|reset/i.test(text)) {
+      setChatHistory([]);
+      setMessages([]);
+      setChatID(null);
+      return;
+    }
+  
+    let newHistory = [...chatHistory];
+  
+    newHistory.push({ role: 'user', content: text });
+
+    
+  
+    setChatHistory(newHistory);
     setMessages((prev) => [...prev, { sender: 'user', text }]);
-    const reply = await sendToGPT(text, 'free');
+    setLoading(true); // ⏳ show loader
+  
+  
+    const trimmedHistory = trimTurns(newHistory);
+const reply = await sendToGPT('free', trimmedHistory);
+
+    const updatedHistory = [...newHistory, { role: 'assistant', content: reply }];
+  
+    setChatHistory(updatedHistory);
     setMessages((prev) => [...prev, { sender: 'api', text: reply }]);
+    setLoading(false);
+  
+    const id = chatID || Date.now().toString();
+    setChatID(id);
+    await saveChat(id, updatedHistory);
   };
-
-  const handleAttachImage = (uri) => {
-    setMessages((prev) => [
-      ...prev,
-      { sender: 'user', text: `📷 Image attached: ${uri}` },
-    ]);
-    if (!isChatting) setIsChatting(true);
-  };
-
-  const handleAttachDocument = (file) => {
-    setMessages((prev) => [
-      ...prev,
-      { sender: 'user', text: `📄 Document attached: ${file.name}` },
-    ]);
-    if (!isChatting) setIsChatting(true);
-  };
+  
 
   const handleAddVehicle = () => {
     setVehicle({
@@ -117,6 +131,8 @@ export default function App() {
   const handleExitChat = () => {
     setIsChatting(false);
     setMessages([]);
+    setChatHistory([]);
+    setChatID(null);
     setShowSavedChats(false);
   };
 
@@ -124,71 +140,116 @@ export default function App() {
     if (!isChatting) setIsChatting(true);
   };
 
-  return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.container}
-    >
-      <HomeHeader garageName={garageName} setGarageName={setGarageName} />
+  const renderContent = () => {
+    if (isLoggedIn === null) {
+      return (
+        <View style={styles.loading}>
+          <ActivityIndicator size="large" />
+        </View>
+      );
+    }
 
-      {!isChatting && (
-        <>
-          <GarageFrontEnd vehicle={vehicle} onAddPress={handleAddVehicle} />
-          <ServiceBox />
-        </>
-      )}
+    if (!isLoggedIn) {
+      return <LoginScreen onLogin={() => setIsLoggedIn(true)} />;
+    }
 
-      {!isChatting && (
-        <Animated.View
-          style={[
-            styles.robotWrapper,
-            {
-              marginTop: isChatting ? 60 : 20,
-              transform: [
-                { translateY: robotTranslateY },
-                { scale: robotScale },
-              ],
-            },
-          ]}
-        >
-          <RobotAssistant isChatting={isChatting} />
-        </Animated.View>
-      )}
+    return (
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.container}
+      >
+        <HomeHeader garageName={garageName} setGarageName={setGarageName} />
 
-      {isChatting && (
-        <TouchableOpacity
-          style={styles.exitButton}
-          onPress={handleExitChat}
-        >
-          <Text style={styles.exitButtonText}>Exit Chat</Text>
-        </TouchableOpacity>
-      )}
+        {!isChatting && (
+          <>
+            <GarageFrontEnd vehicle={vehicle} onAddPress={handleAddVehicle} />
+            <ServiceBox />
+          </>
+        )}
 
-      <View style={styles.chatMessagesArea}>
-        <ChatMessages messages={messages} />
-      </View>
+        {!isChatting && (
+          <Animated.View
+            style={[
+              styles.robotWrapper,
+              {
+                marginTop: isChatting ? 60 : 20,
+                transform: [
+                  { translateY: robotTranslateY },
+                  { scale: robotScale },
+                ],
+              },
+            ]}
+          >
+            <RobotAssistant isChatting={isChatting} />
+          </Animated.View>
+        )}
 
-      {isChatting && showSavedChats && (
-        <SavedChatsPanel onClose={() => setShowSavedChats(false)} />
-      )}
+        {isChatting && (
+          <TouchableOpacity
+            style={styles.exitButton}
+            onPress={handleExitChat}
+          >
+            <Text style={styles.exitButtonText}>Exit Chat</Text>
+          </TouchableOpacity>
+        )}
 
-      {isChatting && (
-        <TouchableOpacity
-          style={styles.savedChatsButton}
-          onPress={() => setShowSavedChats((prev) => !prev)}
-        >
-          <Text style={styles.savedChatsIcon}>📝</Text>
-        </TouchableOpacity>
-      )}
+        <View style={styles.chatMessagesArea}>
+          <ChatMessages messages={messages} loading={loading}  />
+        </View>
 
-      <ChatBoxFixed
-        onSend={handleSend}
-        onAttachImage={handleAttachImage}
-        onAttachDocument={handleAttachDocument}
-        onFocus={handleChatFocus}
-      />
-    </KeyboardAvoidingView>
-  );
+        {isChatting && showSavedChats && (
+          <SavedChatsPanel
+  onClose={() => setShowSavedChats(false)}
+  onSelect={(chat) => {
+    if (!chat) {
+      // Handle "New Chat"
+      setChatID(null);
+      setChatHistory([]);
+      setMessages([]);
+      setShowSavedChats(false);
+      return;
+    }
+
+    setChatID(chat.id);
+    setChatHistory(chat.messages);
+    setMessages(
+      chat.messages.map((m) => ({
+        sender: m.role === 'user' ? 'user' : 'api',
+        text: m.content,
+      }))
+    );
+    setShowSavedChats(false);
+  }}
+/>
+
+
+ 
+        )}
+
+        {isChatting && (
+          <TouchableOpacity
+            style={styles.savedChatsButton}
+            onPress={() => setShowSavedChats((prev) => !prev)}
+          >
+            <Text style={styles.savedChatsIcon}>📝</Text>
+          </TouchableOpacity>
+        )}
+
+        <ChatBoxFixed
+          onSend={handleSend}
+          onAttachImage={(uri) =>
+            setMessages((prev) => [...prev, { sender: 'user', text: `📷 ${uri}` }])
+          }
+          onAttachDocument={(file) =>
+            setMessages((prev) => [...prev, { sender: 'user', text: `📄 ${file.name}` }])
+          }
+          onFocus={handleChatFocus}
+        />
+      </KeyboardAvoidingView>
+    );
+  };
+
+  return renderContent();
 }
 
 const styles = StyleSheet.create({
