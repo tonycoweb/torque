@@ -1,5 +1,12 @@
 import React, { useRef, useEffect } from 'react';
-import { ScrollView, View, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import {
+  ScrollView,
+  View,
+  Text,
+  StyleSheet,
+  Animated,
+  Easing,
+} from 'react-native';
 import Markdown from 'react-native-markdown-display';
 import Icon from 'react-native-vector-icons/FontAwesome';
 
@@ -20,23 +27,67 @@ export default function ChatMessages({ messages, loading }) {
       contentContainerStyle={styles.messagesContainer}
       removeClippedSubviews={true}
     >
-      {messages.map((msg, index) => (
-        <View key={index} style={msg.sender === 'user' ? styles.userBubble : styles.assistantContainer}>
-          {msg.sender === 'user' ? (
+      {messages.map((msg, index) =>
+        msg.sender === 'user' ? (
+          <View key={index} style={styles.userBubble}>
             <Text style={styles.userText}>{msg.text}</Text>
-          ) : (
-            <Markdown style={markdownStyle}>{msg.text}</Markdown>
-          )}
-        </View>
-      ))}
+          </View>
+        ) : (
+          <AnimatedReply key={index} text={msg.text} />
+        )
+      )}
 
       {loading && (
         <View style={styles.loadingContainer}>
-          <Icon name="gear" size={24} color="#ccc" style={{ transform: [{ rotate: '45deg' }] }} />
+          <AnimatedGear />
           <Text style={styles.loadingText}>Torque’s thinking...</Text>
         </View>
       )}
     </ScrollView>
+  );
+}
+
+function AnimatedReply({ text }) {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 300,
+      useNativeDriver: true,
+    }).start();
+  }, []);
+
+  return (
+    <Animated.View style={[styles.assistantContainer, { opacity: fadeAnim }]}>
+      <Markdown style={markdownStyle}>{text}</Markdown>
+    </Animated.View>
+  );
+}
+
+function AnimatedGear() {
+  const spinValue = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.loop(
+      Animated.timing(spinValue, {
+        toValue: 1,
+        duration: 1500,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      })
+    ).start();
+  }, []);
+
+  const spin = spinValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
+
+  return (
+    <Animated.View style={{ transform: [{ rotate: spin }] }}>
+      <Icon name="gear" size={24} color="#ccc" />
+    </Animated.View>
   );
 }
 
@@ -74,6 +125,7 @@ const styles = StyleSheet.create({
   loadingText: {
     color: '#aaa',
     fontStyle: 'italic',
+    marginLeft: 8,
   },
 });
 
