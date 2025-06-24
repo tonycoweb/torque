@@ -5,7 +5,8 @@ require('dotenv').config();
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // or '20mb' if needed
+
 
 // Efficient Torque prompts
 const getTorquePrompt = (tier = 'free') => {
@@ -98,6 +99,82 @@ app.post('/chat', async (req, res) => {
     res.status(500).json({ error: 'Something went wrong with OpenAI' });
   }
 });
+
+app.post('/decode-vin', async (req, res) => {
+  const { base64Image } = req.body;
+  if (!base64Image) {
+    return res.status(400).json({ error: 'Missing base64Image in request body.' });
+  }
+
+  try {
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: `
+You are an expert VIN decoder and vehicle data estimator. Your job is to extract the 17-character VIN from the image and decode the vehicle details.
+
+Then, return a JSON object with as many of the following keys as possible:
+- vin  
+- year  
+- make  
+- model  
+- trim  
+- engine  
+- transmission (thoroughly determine and state: automatic or manual)  
+- drive_type (FWD, RWD, AWD, 4WD)  
+- body_style (sedan, coupe, SUV, etc.)  
+- fuel_type (gasoline, diesel, electric, hybrid)  
+- country (country of manufacture)  
+- mpg (estimate based on year/make/model/engine if needed)  
+- horsepower (estimate from known trim/engine specs)  
+- gross_vehicle_weight_rating (GVWR or gvw — estimate if needed)  
+- exterior_color (if available or likely from defaults)
+
+Do not explain. Only return a raw JSON object — no markdown, no headings, no descriptions.
+            `.trim(),
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Here is a photo of a VIN. Please extract and decode it:' },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: `data:image/jpeg;base64,${base64Image}`,
+                },
+              },
+            ],
+          },
+        ],
+        temperature: 0.3,
+        max_tokens: 600,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const reply = response.data.choices[0].message.content;
+    const usage = response.data.usage;
+
+    console.log('📦 Full VIN GPT reply:\n' + reply);
+    console.log('🔍 VIN Decode Token Usage:', usage);
+
+    res.json({ result: reply, usage });
+  } catch (error) {
+    console.error('VIN Decode Error:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to decode VIN.' });
+  }
+});
+
+
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
