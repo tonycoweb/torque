@@ -27,7 +27,8 @@ import { saveChat, getAllChats } from './utils/storage';
 import { LogBox, LayoutAnimation, UIManager } from 'react-native';
 import VinCamera from './components/VinCamera';
 import VinPreview from './components/VinPreview';
-import { getVehicleByVin, saveVehicle } from './utils/VehicleStorage';
+import { getVehicleByVin, saveVehicle, getAllVehicles } from './utils/VehicleStorage';
+
 
 
 
@@ -190,6 +191,17 @@ const [vinPhoto, setVinPhoto] = useState(null);
     };
     checkLogin();
   }, []);
+
+  useEffect(() => {
+    const loadLastSelectedVehicle = async () => {
+      const saved = await getAllVehicles();
+      if (saved.length > 0) {
+        setVehicle(saved[0]); // Or use logic to pick most recent, or preferred one
+      }
+    };
+    loadLastSelectedVehicle();
+  }, []);
+  
 
   useEffect(() => {
     Animated.timing(robotTranslateY, {
