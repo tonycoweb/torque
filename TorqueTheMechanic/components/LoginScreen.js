@@ -10,6 +10,7 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import * as AppleAuthentication from 'expo-apple-authentication';
+import * as LocalAuthentication from 'expo-local-authentication';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import LottieView from 'lottie-react-native';
 
@@ -102,6 +103,38 @@ export default function LoginScreen({ onLogin }) {
     setPhraseIndex((prev) => (prev + 1) % phrases.length);
   };
 
+  const handleBiometricFallback = async () => {
+    try {
+      const hasHardware = await LocalAuthentication.hasHardwareAsync();
+      const enrolled = await LocalAuthentication.isEnrolledAsync();
+
+      if (!hasHardware || !enrolled) {
+        Alert.alert('Unavailable', 'Biometric authentication is not available on this device.');
+        return;
+      }
+
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: 'Use Face ID / Touch ID to log in',
+        fallbackLabel: 'Use Passcode',
+      });
+
+      if (result.success) {
+        const fallbackUser = {
+          userId: 'biometric-fallback-user',
+          email: 'biometric@fallback.com',
+          name: 'Biometric User',
+        };
+        await AsyncStorage.setItem('user', JSON.stringify(fallbackUser));
+        onLogin();
+      } else {
+        Alert.alert('Authentication Failed', 'Biometric authentication was not successful.');
+      }
+    } catch (err) {
+      console.error('Biometric auth error:', err);
+      Alert.alert('Error', 'Something went wrong with biometric login.');
+    }
+  };
+
   const handleAppleLogin = async () => {
     setLoading(true);
     try {
@@ -120,7 +153,11 @@ export default function LoginScreen({ onLogin }) {
       const userToSave = {
         userId: credential.user,
         email: credential.email ?? fallback.email ?? '',
-        name: credential.fullName?.givenName ?? fallback.name ?? '',
+        name:
+          (credential.fullName?.givenName || '') +
+          (credential.fullName?.familyName ? ' ' + credential.fullName.familyName : '') ||
+          fallback.name ||
+          'User',
       };
 
       await AsyncStorage.setItem('user', JSON.stringify(userToSave));
@@ -128,7 +165,10 @@ export default function LoginScreen({ onLogin }) {
     } catch (e) {
       console.error('❌ Apple Login Error:', e);
       if (e.code !== 'ERR_CANCELED') {
-        Alert.alert('Login Failed', e.message || 'Try again or restart app.');
+        Alert.alert('Apple Login Failed', 'Try biometric login instead?', [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Try Biometric', onPress: handleBiometricFallback },
+        ]);
       }
     } finally {
       setLoading(false);
@@ -151,7 +191,10 @@ export default function LoginScreen({ onLogin }) {
             onPress={handleAppleLogin}
           />
 
-          {/* Temporary dev bypass */}
+          <TouchableOpacity onPress={handleBiometricFallback}>
+            <Text style={styles.bypassText}>Login with Face ID / Touch ID</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity
             onPress={async () => {
               await AsyncStorage.setItem('user', JSON.stringify({

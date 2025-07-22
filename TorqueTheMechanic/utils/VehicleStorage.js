@@ -22,6 +22,15 @@ export async function getAllVehicles() {
   return raw ? JSON.parse(raw) : [];
 }
 
+export async function deleteVehicleByVin(vin) {
+    const raw = await AsyncStorage.getItem(VEHICLE_KEY);
+    if (!raw) return;
+    const vehicles = JSON.parse(raw);
+    const updated = vehicles.filter(v => v.vin !== vin);
+    await AsyncStorage.setItem(VEHICLE_KEY, JSON.stringify(updated));
+  }
+  
+
 export async function getVehicleByVin(vin) {
   const raw = await AsyncStorage.getItem(VEHICLE_KEY);
   if (!raw) return null;

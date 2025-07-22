@@ -3,7 +3,8 @@ import { View, Text, StyleSheet, TouchableOpacity, Modal, TextInput } from 'reac
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export default function HomeHeader({ garageName, setGarageName }) {
+export default function HomeHeader({ garageName, setGarageName, onSettingsPress }) {
+
   const [modalVisible, setModalVisible] = useState(false);
   const [inputName, setInputName] = useState('');
 
@@ -40,9 +41,10 @@ export default function HomeHeader({ garageName, setGarageName }) {
         {garageName ? `${garageName}'s Garage` : 'Garage'}
       </Text>
 
-      <TouchableOpacity>
-        <Ionicons name="settings-outline" size={24} color="#fff" />
-      </TouchableOpacity>
+      <TouchableOpacity onPress={onSettingsPress}>
+  <Ionicons name="settings-outline" size={24} color="#fff" />
+</TouchableOpacity>
+
 
       <Modal visible={modalVisible} transparent animationType="slide">
         <View style={styles.modalWrapper}>

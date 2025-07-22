@@ -174,6 +174,80 @@ Do not explain. Only return a raw JSON object — no markdown, no headings, no d
   }
 });
 
+// ✅ BACKEND: /validate-manual
+app.post('/validate-manual', async (req, res) => {
+  const { year, make, model, engine } = req.body;
+
+  try {
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: `
+You are a precise vehicle decoder. A user will input partial information (like year, make, model, or engine). Your job is to:
+
+1. Use the provided fields as-is and do not change them.
+2. Identify which fields are **missing** or ambiguous.
+3. For each missing or uncertain field, return a list of valid options as an array.
+4. For fields that are certain or known (e.g., fixed by the user), return them as strings.
+5. Do NOT return multiple full vehicle variants.
+6. Do NOT return markdown or explanations — only raw JSON.
+
+Only return a flat object. Example (for understanding only):
+If a user enters "2004 Infiniti", you might return:
+{
+  "year": 2004,
+  "make": "Infiniti",
+  "model": ["G35", "FX35", "QX56"],
+  "engine": ["3.5L V6", "4.5L V8"]
+}
+
+Return ONLY clean JSON. No markdown or explanations. Fill in the expected keys if possible based off data
+or once its validated properly and you can infer the vehicle exists and thus return the expected keys filled.
+
+Expected keys:
+- year
+- make
+- model
+- engine
+- transmission
+- drive_type
+- body_style
+- fuel_type
+- mpg
+- horsepower
+- gvw
+- trim (optional)
+- variants (optional array of differing configurations)
+            `.trim(),
+          },
+          {
+            role: 'user',
+            content: `Year: ${year}, Make: ${make}, Model: ${model}, Engine: ${engine || '(blank)'}`,
+          },
+        ],
+        temperature: 0.3,
+        max_tokens: 600,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const reply = response.data.choices[0].message.content.trim();
+    console.log('✅ Manual Validation GPT Reply:', reply);
+    res.json({ result: reply });
+  } catch (error) {
+    console.error('Manual Validation Error:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to validate vehicle.' });
+  }
+});
 
 
 const PORT = process.env.PORT || 3001;
