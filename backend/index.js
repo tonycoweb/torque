@@ -5,8 +5,7 @@ require('dotenv').config();
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '10mb' })); // or '20mb' if needed
-
+app.use(express.json({ limit: '10mb' }));
 
 // Efficient Torque prompts
 const getTorquePrompt = (tier = 'free') => {
@@ -36,8 +35,6 @@ You must process as an automotive expert and Organize your replies in a mechanic
 Bring off-topic chats back with humor.
   `.trim();
 };
-
-
 
 // Max token ceilings
 const MAX_TOTAL_TOKENS = {
@@ -79,7 +76,7 @@ app.post('/chat', async (req, res) => {
         model: 'gpt-4o',
         messages: finalMessages,
         temperature: tier === 'pro' ? 0.7 : 0.5,
-        max_tokens: 600, // Controlled response length
+        max_tokens: 600,
       },
       {
         headers: {
@@ -93,7 +90,7 @@ app.post('/chat', async (req, res) => {
     const usage = response.data.usage;
 
     console.log('🧮 Token Usage:', usage);
-    res.json({ reply, usage }); // Optional: return token info to client
+    res.json({ reply, usage });
   } catch (error) {
     console.error('OpenAI Error:', error.response?.data || error.message);
     res.status(500).json({ error: 'Something went wrong with OpenAI' });
@@ -174,7 +171,6 @@ Do not explain. Only return a raw JSON object — no markdown, no headings, no d
   }
 });
 
-// ✅ BACKEND: /validate-manual
 app.post('/validate-manual', async (req, res) => {
   const { year, make, model, engine } = req.body;
 
@@ -244,8 +240,103 @@ Expected keys:
     console.log('✅ Manual Validation GPT Reply:', reply);
     res.json({ result: reply });
   } catch (error) {
-    console.error('Manual Validation Error:', error.response?.data || error.message);
+    console.error(`Manual Validation Error:`, error.response?.data || error.message);
     res.status(500).json({ error: 'Failed to validate vehicle.' });
+  }
+});
+
+app.post('/generate-service-recommendations', async (req, res) => {
+  const { vehicle, currentMileage } = req.body;
+  if (!vehicle || !vehicle.year || !vehicle.make || !vehicle.model) {
+    return res.status(400).json({ error: 'Missing required vehicle data (year, make, model).' });
+  }
+
+  try {
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: `
+You are a certified master mechanic. Your job is to generate a maintenance schedule for a given vehicle based on its year, make, model, engine, and current mileage.
+
+Return a JSON array of service recommendations. Each recommendation must include:
+- text: short description of the service and its interval (e.g. "Oil Change - 7,500 miles")
+- priority: "high", "medium", or "low" depending on how close the service is to due
+- mileage: the service interval in miles as a number
+- parts: an object with realistic part information — including oil type, filters, plugs, belts, etc.
+
+Use trusted service data or your own expert consensus. If you can't find the exact OEM part number, include a well-known equivalent (e.g. Bosch, Fram, NGK, Mobil 1).
+
+try not to return an empty parts object. If unsure, make your best guess for typical vehicles of that type.
+
+Decide priority as follows:
+- "high" = within 5,000 miles of current mileage or overdue
+- "medium" = within 10,000–20,000 miles
+- "low" = more than 20,000 miles away
+
+Return only valid JSON. Do not explain, do not include markdown. Just output a raw JSON array.
+Example:
+[
+  {
+    "text": "Oil Change - 7,500 miles",
+    "priority": "high",
+    "mileage": 7500,
+    "parts": {
+      "oilType": "5W-30 Full Synthetic",
+      "oilFilter": "Bosch 3323"
+    }
+  },
+  {
+    "text": "Air Filter Replacement - 15,000 miles",
+    "priority": "medium",
+    "mileage": 15000,
+    "parts": {
+      "engineAirFilter": "Fram CA4309"
+    }
+  }
+]
+            `.trim(),
+          },
+          {
+            role: 'user',
+            content: `Generate service recommendations for a ${vehicle.year} ${vehicle.make} ${vehicle.model}${vehicle.engine ? ` with ${vehicle.engine}` : ''}${currentMileage ? `, current mileage: ${currentMileage}` : ''}. Include realistic part info.`,
+          },
+        ],
+        temperature: 0.3,
+        max_tokens: 1500,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const reply = response.data.choices[0].message.content;
+    const usage = response.data.usage;
+
+    console.log('📋 Service Recommendations GPT Reply:', reply);
+    console.log('🔍 Service Recommendations Token Usage:', usage);
+
+    let result;
+    try {
+      result = JSON.parse(reply);
+      if (!Array.isArray(result)) {
+        throw new Error('Response is not an array');
+      }
+    } catch (error) {
+      console.error('Parse Error:', error.message);
+      return res.status(500).json({ error: 'Failed to parse service recommendations.' });
+    }
+
+    res.json({ result, usage });
+  } catch (error) {
+    console.error('Service Recommendations Error:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to generate service recommendations.' });
   }
 });
 

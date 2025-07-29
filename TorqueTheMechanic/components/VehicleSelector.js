@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,9 +9,40 @@ import {
   Alert,
   TextInput,
   SafeAreaView,
+  Image,
+  ScrollView,
 } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  withSpring,
+} from 'react-native-reanimated';
 import { getAllVehicles, deleteVehicleByVin, saveVehicle } from '../utils/VehicleStorage';
 import ManualVehicleEntry from './ManualVehicleEntry';
+
+const vinLocations = [
+  {
+    id: '1',
+    label: 'Registration Card',
+    image: require('../assets/vin_registration_card.png'),
+  },
+  {
+    id: '2',
+    label: 'Insurance Document',
+    image: require('../assets/vin_insurance.png'),
+  },
+  {
+    id: '3',
+    label: 'Driver-Side Door Sticker',
+    image: require('../assets/vin_door_sticker.png'),
+  },
+  {
+    id: '4',
+    label: 'Windshield Corner',
+    image: require('../assets/vin_windshield.png'),
+  },
+];
 
 export default function VehicleSelector({ selectedVehicle = null, onSelectVehicle, triggerVinCamera }) {
   const [modalVisible, setModalVisible] = useState(false);
@@ -20,10 +51,38 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
   const [vehicles, setVehicles] = useState([]);
   const [editableVehicle, setEditableVehicle] = useState(null);
   const [showManualEntry, setShowManualEntry] = useState(false);
+  const scrollRef = useRef(null);
+
+  const modalOpacity = useSharedValue(0);
+  const modalTranslateY = useSharedValue(100);
 
   useEffect(() => {
     if (modalVisible) loadGarage();
   }, [modalVisible]);
+
+  useEffect(() => {
+    const isOpen = modalVisible || showVinModal || editMode || showManualEntry;
+    modalOpacity.value = withTiming(isOpen ? 1 : 0, { duration: 250 });
+    modalTranslateY.value = withSpring(isOpen ? 0 : 100, {
+      damping: 18,
+      stiffness: 120,
+    });
+  }, [modalVisible, showVinModal, editMode, showManualEntry]);
+
+  useEffect(() => {
+    if (showVinModal && scrollRef.current) {
+      scrollRef.current.scrollTo({ y: 0, animated: false });
+    }
+  }, [showVinModal]);
+
+  useEffect(() => {
+    console.log('Selected vehicle:', selectedVehicle);
+  }, [selectedVehicle]);
+
+  const animatedModalStyle = useAnimatedStyle(() => ({
+    opacity: modalOpacity.value,
+    transform: [{ translateY: modalTranslateY.value }],
+  }));
 
   const loadGarage = async () => {
     const saved = await getAllVehicles();
@@ -64,7 +123,6 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
   const handleEdit = (vehicle) => {
     setModalVisible(false);
     setTimeout(() => {
-      // Parse mpg string into city and highway for editing
       let city = '';
       let highway = '';
       if (vehicle.mpg && typeof vehicle.mpg === 'string') {
@@ -151,80 +209,96 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
       )}
 
       <Modal visible={modalVisible} animationType="slide">
-        <SafeAreaView style={styles.modalContainer}>
-          <Text style={styles.modalTitle}>Your Garage</Text>
-          <FlatList
-            data={vehicles}
-            keyExtractor={(item) => item.vin || Math.random().toString()}
-            renderItem={renderVehicle}
-            contentContainerStyle={{ paddingBottom: 40 }}
-          />
-          <TouchableOpacity style={styles.addNewButton} onPress={handleAddNew}>
-            <Text style={styles.addNewText}>+ Add Vehicle (Manual or VIN Image)</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.closeButton} onPress={() => setModalVisible(false)}>
-            <Text style={styles.closeText}>Close</Text>
-          </TouchableOpacity>
-        </SafeAreaView>
+        <Animated.View style={[styles.EditModalContainer, animatedModalStyle]}>
+          <SafeAreaView style={styles.modalContainer}>
+            <TouchableOpacity style={styles.closeIconMod} onPress={() => setModalVisible(false)}>
+              <Text style={styles.closeIconTextMod}>✖</Text>
+            </TouchableOpacity>
+            <Text style={styles.modalTitle}>Your Garage</Text>
+            <FlatList
+              data={vehicles}
+              keyExtractor={(item) => item.vin || Math.random().toString()}
+              renderItem={renderVehicle}
+              contentContainerStyle={{ paddingBottom: 40 }}
+            />
+            <TouchableOpacity style={styles.addNewButton} onPress={handleAddNew}>
+              <Text style={styles.addNewText}>+ Add Vehicle (Manual or VIN Image)</Text>
+            </TouchableOpacity>
+          </SafeAreaView>
+        </Animated.View>
       </Modal>
 
-      {showVinModal && (
-        <Modal transparent={true} animationType="slide">
-          <View style={styles.vinModalContainer}>
-            <View style={styles.vinModalBox}>
+      <Modal visible={showVinModal} animationType="none" transparent>
+        <Animated.View style={[styles.vinModalContainer, animatedModalStyle]}>
+          <SafeAreaView style={styles.vinModalContent}>
+            <ScrollView ref={scrollRef} contentContainerStyle={styles.vinScrollContent}>
               <TouchableOpacity onPress={() => setShowVinModal(false)} style={styles.closeIcon}>
-                <Text style={{ color: '#ccc', fontSize: 20 }}>✖</Text>
+                <Text style={styles.closeIconText}>✖</Text>
               </TouchableOpacity>
-              <Text style={styles.modalTitle}>Add a Vehicle</Text>
-              <TouchableOpacity style={styles.optionBtn} onPress={handleCaptureVin}>
-                <Text style={styles.optionText}>📷 Use Camera to Scan VIN</Text>
+              <Text style={styles.modalTitle}>Add Your Vehicle</Text>
+              <TouchableOpacity style={styles.optionButton} onPress={handleCaptureVin}>
+                <Text style={styles.optionButtonText}>📷 Snap VIN Photo</Text>
+                <Text style={styles.optionSubText}>Fastest way to add your car.</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.optionBtn} onPress={handleManualEntry}>
-                <Text style={styles.optionText}>📝 Enter Vehicle Details Manually</Text>
+              <TouchableOpacity style={styles.optionButton} onPress={handleManualEntry}>
+                <Text style={styles.optionButtonText}>📝 Enter Manually</Text>
+                <Text style={styles.optionSubText}>Input year, make, model, etc.</Text>
               </TouchableOpacity>
-              <View style={styles.divider} />
-              <Text style={styles.hintTitle}>🧾 Where to find your VIN?</Text>
-              <Text style={styles.hintText}>
-                {`• Registration card\n• Vehicle title\n• Insurance paper\n• Driver-side door sticker\n• Front windshield (bottom corner)`}
+              <Text style={styles.modalSubtitle}>What’s a VIN?</Text>
+              <Text style={styles.helperText}>
+                A VIN (Vehicle Identification Number) is a unique 17-digit code that identifies your car.
               </Text>
-              <Text style={styles.helperNote}>❓ Not sure? Just tap the camera and we’ll help detect it automatically.</Text>
-            </View>
-          </View>
-        </Modal>
-      )}
+              <Text style={styles.sectionTitle}>Where to Find Your VIN</Text>
+              {vinLocations.map((item) => (
+                <View key={item.id} style={styles.vinCardWrapper}>
+                  <View style={styles.vinCardStacked}>
+                    <Text style={styles.vinLabelLarge}>{item.label}</Text>
+                    <Image source={item.image} style={styles.vinImageLarge} />
+                  </View>
+                </View>
+              ))}
+              <Text style={[styles.helperText, { marginTop: 12 }]}>
+                Snap a clear photo of any of these VIN locations, and we’ll do the rest. 🚗
+              </Text>
+            </ScrollView>
+          </SafeAreaView>
+        </Animated.View>
+      </Modal>
 
       {editMode && editableVehicle && (
         <Modal visible={editMode} animationType="slide">
-          <View style={styles.modalContainer}>
-            <Text style={styles.modalTitle}>Edit Vehicle</Text>
-            {[
-              { key: 'year', label: 'Year' },
-              { key: 'make', label: 'Make' },
-              { key: 'model', label: 'Model' },
-              { key: 'engine', label: 'Engine' },
-              { key: 'mpgCity', label: 'MPG (City)' },
-              { key: 'mpgHighway', label: 'MPG (Highway)' },
-              { key: 'hp', label: 'Horsepower (HP)' },
-              { key: 'gvw', label: 'GVW (Gross Vehicle Weight)' },
-            ].map(({ key, label }) => (
-              <View key={key} style={{ marginBottom: 12 }}>
-                <Text style={styles.inputLabel}>{label}</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder={label}
-                  placeholderTextColor="#777"
-                  value={editableVehicle[key]?.toString() || ''}
-                  onChangeText={(text) => setEditableVehicle({ ...editableVehicle, [key]: text })}
-                />
-              </View>
-            ))}
-            <TouchableOpacity onPress={handleSaveEdit} style={styles.addNewButton}>
-              <Text style={styles.addNewText}>💾 Save Changes</Text>
+          <Animated.View style={[styles.EditModalContainer, animatedModalStyle]}>
+            <TouchableOpacity onPress={() => setEditMode(false)} style={styles.closeIconMod}>
+              <Text style={styles.closeIconTextMod}>✖</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setEditMode(false)} style={styles.closeButton}>
-              <Text style={styles.closeText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
+            <View style={styles.modalContainer}>
+              <Text style={styles.modalTitle}>Edit Vehicle</Text>
+              {[
+                { key: 'year', label: 'Year' },
+                { key: 'make', label: 'Make' },
+                { key: 'model', label: 'Model' },
+                { key: 'engine', label: 'Engine' },
+                { key: 'mpgCity', label: 'MPG (City)' },
+                { key: 'mpgHighway', label: 'MPG (Highway)' },
+                { key: 'hp', label: 'Horsepower (HP)' },
+                { key: 'gvw', label: 'GVW (Gross Vehicle Weight)' },
+              ].map(({ key, label }) => (
+                <View key={key} style={{ marginBottom: 12 }}>
+                  <Text style={styles.inputLabel}>{label}</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder={label}
+                    placeholderTextColor="#777"
+                    value={editableVehicle[key]?.toString() || ''}
+                    onChangeText={(text) => setEditableVehicle({ ...editableVehicle, [key]: text })}
+                  />
+                </View>
+              ))}
+              <TouchableOpacity onPress={handleSaveEdit} style={styles.addNewButton}>
+                <Text style={styles.addNewText}>💾 Save Changes</Text>
+              </TouchableOpacity>
+            </View>
+          </Animated.View>
         </Modal>
       )}
 
@@ -247,33 +321,202 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
 }
 
 const styles = StyleSheet.create({
-  container: { width: '100%', paddingVertical: 20 },
-  placeholder: { backgroundColor: '#444', padding: 32, borderRadius: 15, alignItems: 'center', borderColor: '#888', borderWidth: 1 },
+  container: {
+    width: '100%',
+    paddingVertical: 20,
+    alignSelf: 'center',
+  },
+  placeholder: {
+    backgroundColor: '#444',
+    padding: 32,
+    borderRadius: 15,
+    alignItems: 'center',
+    borderColor: '#888',
+    borderWidth: 1,
+  },
   plus: { fontSize: 40, color: '#ccc' },
   label: { fontSize: 16, color: '#aaa', marginTop: 8 },
-  selectedCard: { backgroundColor: '#333', padding: 28, borderRadius: 15, alignItems: 'center' },
+  selectedCard: {
+    backgroundColor: '#333',
+    padding: 28,
+    borderRadius: 15,
+    alignItems: 'center',
+  },
   title: { fontSize: 20, fontWeight: 'bold', color: '#fff' },
   details: { fontSize: 14, color: '#ccc', marginVertical: 4 },
   stats: { fontSize: 12, color: '#aaa' },
-  modalContainer: { flex: 1, backgroundColor: '#121212', padding: 30, paddingTop: 50 },
-  modalTitle: { fontSize: 24, fontWeight: 'bold', color: '#fff', marginBottom: 24, alignSelf: 'center' },
-  vehicleCard: { backgroundColor: '#222', padding: 20, marginBottom: 14, borderRadius: 12 },
-  inlineBtns: { flexDirection: 'row', justifyContent: 'space-around', marginTop: 12 },
-  actionBtn: { padding: 10, backgroundColor: '#333', borderRadius: 10 },
+  modalContainer: {
+    flex: 1,
+    backgroundColor: '#121212',
+    padding: 30,
+    paddingTop: 50,
+  },
+  modalTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 16,
+    alignSelf: 'center',
+  },
+  modalSubtitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#eee',
+    marginTop: 10,
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  vehicleCard: {
+    backgroundColor: '#222',
+    padding: 20,
+    marginBottom: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  inlineBtns: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 12,
+  },
+  actionBtn: {
+    padding: 10,
+    backgroundColor: '#333',
+    borderRadius: 10,
+  },
   smallText: { fontSize: 16, color: '#fff' },
-  addNewButton: { marginTop: 30, padding: 16, backgroundColor: '#4CAF50', borderRadius: 12, alignItems: 'center' },
+  addNewButton: {
+    marginTop: 30,
+    padding: 16,
+    backgroundColor: '#4CAF50',
+    borderRadius: 12,
+    alignItems: 'center',
+    width: '80%',
+    alignSelf: 'center',
+  },
   addNewText: { color: '#fff', fontSize: 17 },
-  closeButton: { marginTop: 20, paddingVertical: 12, borderRadius: 10, alignItems: 'center' },
-  closeText: { fontSize: 16, color: '#ccc' },
-  vinModalContainer: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center' },
-  vinModalBox: { backgroundColor: '#1c1c1c', padding: 24, borderRadius: 16, width: '85%' },
-  closeIcon: { position: 'absolute', top: 10, right: 10, padding: 8 },
-  optionBtn: { backgroundColor: '#333', padding: 14, borderRadius: 12, marginBottom: 14 },
-  optionText: { color: '#fff', fontSize: 16 },
-  divider: { borderBottomWidth: 1, borderBottomColor: '#444', marginVertical: 16 },
-  hintTitle: { color: '#ccc', fontWeight: 'bold', marginBottom: 8 },
-  hintText: { color: '#aaa', lineHeight: 22 },
-  helperNote: { color: '#888', marginTop: 12, fontStyle: 'italic' },
-  input: { backgroundColor: '#222', color: '#fff', padding: 10, borderRadius: 8, borderColor: '#444', borderWidth: 1 },
-  inputLabel: { color: '#ccc', marginBottom: 4, fontSize: 14 },
+  vinModalContainer: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingTop: 50,
+  },
+  vinModalContent: {
+    backgroundColor: 'rgba(0,0,0,0.9)',
+    borderRadius: 20,
+    width: '92%',
+    maxHeight: '94%',
+    paddingVertical: 24,
+    paddingHorizontal: 20,
+  },
+  vinScrollContent: {
+    paddingBottom: 60,
+    alignItems: 'center',
+  },
+  closeIcon: {
+    position: 'absolute',
+    right: 16,
+    zIndex: 10,
+    backgroundColor: '#fff',
+    borderRadius: 20,
+  },
+  closeIconText: {
+    fontSize: 22,
+    color: '#000',
+    fontWeight: 'bold',
+  },
+  optionButton: {
+    backgroundColor: '#22c55e',
+    paddingVertical: 20,
+    paddingHorizontal: 24,
+    borderRadius: 14,
+    marginBottom: 18,
+    width: '100%',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  optionButtonText: {
+    color: '#0f172a',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  optionSubText: {
+    color: '#14532d',
+    fontSize: 13,
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  helperText: {
+    color: '#94a3b8',
+    fontSize: 14,
+    textAlign: 'center',
+    marginVertical: 10,
+    lineHeight: 20,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    color: '#eee',
+    fontWeight: '600',
+    marginTop: 18,
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  vinCardWrapper: {
+    width: '100%',
+  },
+  vinCardStacked: {
+    alignItems: 'center',
+    backgroundColor: '#1e293b',
+    padding: 20,
+    borderRadius: 16,
+    marginBottom: 20,
+    width: '100%',
+  },
+  vinImageLarge: {
+    width: '100%',
+    height: 180,
+    resizeMode: 'contain',
+    marginTop: 12,
+    borderRadius: 8,
+  },
+  vinLabelLarge: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: '#e2e8f0',
+    textAlign: 'center',
+  },
+  input: {
+    backgroundColor: '#222',
+    color: '#fff',
+    padding: 12,
+    borderRadius: 8,
+    borderColor: '#444',
+    borderWidth: 1,
+  },
+  inputLabel: {
+    color: '#ccc',
+    marginBottom: 4,
+    fontSize: 14,
+  },
+  EditModalContainer: {
+    width: '100%',
+    height: '100%',
+  },
+  closeIconMod: {
+    position: 'absolute',
+    right: 16,
+    top: 50,
+    zIndex: 10,
+    backgroundColor: '#fff',
+    borderRadius: 20,
+  },
+  closeIconTextMod: {
+    fontSize: 22,
+    color: '#000',
+    fontWeight: 'bold',
+  },
 });

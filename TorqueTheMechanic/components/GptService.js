@@ -1,4 +1,4 @@
-const API_URL = 'http://192.168.1.***:3001/chat';
+const API_URL = 'http://192.168.1.246:3001/chat';
 
 export async function sendToGPT(tier = 'free', chatHistory = []) {
   const trimmed = trimLastTurns(chatHistory, 2); // Only keep 2 user+assistant turns

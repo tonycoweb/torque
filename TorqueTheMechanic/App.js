@@ -61,7 +61,7 @@ export default function App() {
     initAdMob();
   }, []);
 
-      const showRewardedAd = async () => {
+  const showRewardedAd = async () => {
     console.log('🎬 Attempting to show test ad...');
 
     return new Promise((resolve) => {
@@ -74,7 +74,6 @@ export default function App() {
         rewarded.removeAllListeners();
       };
 
-      // Log available event types for debugging
       console.log('🔍 RewardedAdEventType:', Object.keys(RewardedAdEventType));
 
       let timeoutId = setTimeout(() => {
@@ -85,7 +84,7 @@ export default function App() {
 
       rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
         console.log('🚀 Test ad loaded!');
-        clearTimeout(timeoutId); // Clear timeout on load
+        clearTimeout(timeoutId);
         try {
           rewarded.show();
         } catch (error) {
@@ -97,7 +96,7 @@ export default function App() {
 
       rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => {
         console.log('✅ Test ad reward earned!');
-        clearTimeout(timeoutId); // Clear timeout on reward
+        clearTimeout(timeoutId);
         cleanup();
         resolve(true);
       });
@@ -108,7 +107,7 @@ export default function App() {
         rewardedRef.current = rewarded;
       } catch (error) {
         console.error('❌ Test ad load error:', error);
-        clearTimeout(timeoutId); // Clear timeout on error
+        clearTimeout(timeoutId);
         cleanup();
         resolve(false);
       }
@@ -258,12 +257,10 @@ export default function App() {
     }
 
     console.log('🔍 parseVinReply output:', data);
-    // Relax condition to return data if VIN is present
     return data.vin ? data : null;
   };
 
-
-    const decodeVinWithAd = async (base64Image) => {
+  const decodeVinWithAd = async (base64Image) => {
     console.log('📸 decodeVinWithAd STARTED');
     setShowDecodingModal(true);
 
@@ -279,11 +276,10 @@ export default function App() {
         setShowDecodingModal(false);
       };
 
-      // Use a Promise to store VIN decode result
       let decodePromise = new Promise((resolveDecode) => {
         const decodeVin = async () => {
           try {
-            const response = await fetch('http://192.168.1.***:3001/decode-vin', {
+            const response = await fetch('http://192.168.1.246:3001/decode-vin', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ base64Image }),
@@ -302,7 +298,6 @@ export default function App() {
         decodeVin();
       });
 
-      // Log available event types for debugging
       console.log('🔍 RewardedAdEventType:', Object.keys(RewardedAdEventType));
 
       let timeoutId = setTimeout(() => {
@@ -314,7 +309,7 @@ export default function App() {
 
       rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
         console.log('🚀 Ad loaded!');
-        clearTimeout(timeoutId); // Clear timeout on load
+        clearTimeout(timeoutId);
         try {
           rewarded.show();
         } catch (err) {
@@ -326,13 +321,11 @@ export default function App() {
 
       rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, async () => {
         console.log('✅ Reward earned. Proceeding with VIN decode.');
-        clearTimeout(timeoutId); // Clear timeout on reward
+        clearTimeout(timeoutId);
 
-        // Wait for decode result
         const decodeResult = await decodePromise;
         console.log('🔍 Processing decodeResult:', decodeResult);
 
-        // Process the decode result
         if (decodeResult && decodeResult.vin && decodeResult.make && decodeResult.model) {
           const cached = await getVehicleByVin(decodeResult.vin);
           const newVehicle = cached || { id: Date.now().toString(), ...decodeResult };
@@ -360,16 +353,16 @@ export default function App() {
       try {
         rewarded.load();
         rewardedRef.current = rewarded;
-      } catch (err) {
-        console.error('❌ Ad load error:', err);
-        Alert.alert('❌ Ad error', err.message || 'Unknown error');
-        clearTimeout(timeoutId); // Clear timeout on error
+      } catch (error) {
+        console.error('❌ Ad load error:', error);
+        Alert.alert('❌ Ad error', error.message || 'Unknown error');
+        clearTimeout(timeoutId);
         cleanup();
         resolve();
       }
     });
   };
-  
+
   useEffect(() => {
     const checkLogin = async () => {
       const user = await AsyncStorage.getItem('user');
@@ -381,12 +374,23 @@ export default function App() {
   useEffect(() => {
     const loadLastSelectedVehicle = async () => {
       const saved = await getAllVehicles();
+      console.log('Loaded vehicles from AsyncStorage:', saved);
       if (saved.length > 0) {
         setVehicle(saved[0]);
+        console.log('Set initial vehicle:', saved[0]);
       }
     };
     loadLastSelectedVehicle();
   }, []);
+
+  useEffect(() => {
+    console.log('App.js vehicle state updated:', vehicle);
+    if (vehicle) {
+      AsyncStorage.setItem('selectedVehicle', JSON.stringify(vehicle))
+        .then(() => console.log('Vehicle saved to AsyncStorage:', vehicle))
+        .catch(e => console.error('Failed to save vehicle:', e));
+    }
+  }, [vehicle]);
 
   const robotTranslateY = useRef(new Animated.Value(0)).current;
   const robotScale = useRef(new Animated.Value(1)).current;
@@ -487,8 +491,7 @@ export default function App() {
               onSelectVehicle={setVehicle}
               triggerVinCamera={() => setShowCamera(true)}
             />
-           
-            <ServiceBox />
+            <ServiceBox selectedVehicle={vehicle} />
           </>
         )}
 
