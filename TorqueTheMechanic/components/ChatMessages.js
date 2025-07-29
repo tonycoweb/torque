@@ -6,11 +6,13 @@ import {
   StyleSheet,
   Animated,
   Easing,
+  TouchableWithoutFeedback,
+  Keyboard, // Import Keyboard
 } from 'react-native';
 import Markdown from 'react-native-markdown-display';
 import Icon from 'react-native-vector-icons/FontAwesome';
 
-export default function ChatMessages({ messages, loading }) {
+export default function ChatMessages({ messages, loading, onExitChat }) {
   const scrollViewRef = useRef();
   const prevMessageCount = useRef(0);
 
@@ -21,29 +23,43 @@ export default function ChatMessages({ messages, loading }) {
     }
   }, [messages]);
 
-  return (
-    <ScrollView
-      ref={scrollViewRef}
-      contentContainerStyle={styles.messagesContainer}
-      removeClippedSubviews={true}
-    >
-      {messages.map((msg, index) =>
-        msg.sender === 'user' ? (
-          <View key={index} style={styles.userBubble}>
-            <Text style={styles.userText}>{msg.text}</Text>
-          </View>
-        ) : (
-          <AnimatedReply key={index} text={msg.text} />
-        )
-      )}
+  // Function to handle keyboard dismissal
+  const dismissKeyboard = () => {
+    Keyboard.dismiss();
+  };
 
-      {loading && (
-        <View style={styles.loadingContainer}>
-          <AnimatedGear />
-          <Text style={styles.loadingText}>Torque’s thinking...</Text>
-        </View>
-      )}
-    </ScrollView>
+  // Handle Exit Chat action
+  const handleExitChat = () => {
+    dismissKeyboard(); // Dismiss keyboard when exiting chat
+    if (onExitChat) onExitChat(); // Call the passed onExitChat handler
+  };
+
+  return (
+    <TouchableWithoutFeedback onPress={dismissKeyboard}>
+      <ScrollView
+        ref={scrollViewRef}
+        contentContainerStyle={styles.messagesContainer}
+        removeClippedSubviews={true}
+        keyboardShouldPersistTaps="handled" // Ensure taps handle keyboard dismissal
+      >
+        {messages.map((msg, index) =>
+          msg.sender === 'user' ? (
+            <View key={index} style={styles.userBubble}>
+              <Text style={styles.userText}>{msg.text}</Text>
+            </View>
+          ) : (
+            <AnimatedReply key={index} text={msg.text} />
+          )
+        )}
+
+        {loading && (
+          <View style={styles.loadingContainer}>
+            <AnimatedGear />
+            <Text style={styles.loadingText}>Torque’s thinking...</Text>
+          </View>
+        )}
+      </ScrollView>
+    </TouchableWithoutFeedback>
   );
 }
 

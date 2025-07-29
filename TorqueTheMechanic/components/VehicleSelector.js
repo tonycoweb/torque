@@ -21,6 +21,7 @@ import Animated, {
 import { getAllVehicles, deleteVehicleByVin, saveVehicle } from '../utils/VehicleStorage';
 import ManualVehicleEntry from './ManualVehicleEntry';
 
+// vinLocations array remains unchanged
 const vinLocations = [
   {
     id: '1',
@@ -44,6 +45,7 @@ const vinLocations = [
   },
 ];
 
+// Rest of the component (state, useEffect, functions) remains unchanged
 export default function VehicleSelector({ selectedVehicle = null, onSelectVehicle, triggerVinCamera }) {
   const [modalVisible, setModalVisible] = useState(false);
   const [showVinModal, setShowVinModal] = useState(false);
@@ -132,7 +134,12 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
           highway = match[2];
         }
       }
-      setEditableVehicle({ ...vehicle, mpgCity: city, mpgHighway: highway });
+      setEditableVehicle({
+        ...vehicle,
+        mpgCity: city,
+        mpgHighway: highway,
+        transmission: vehicle.transmission || 'Automatic',
+      });
       setEditMode(true);
     }, 300);
   };
@@ -175,7 +182,7 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
     >
       <Text style={styles.title}>{item.year} {item.make} {item.model}</Text>
       <Text style={styles.details}>
-        {item.engine || '—'} • {item.hp || '--'} HP • {renderMpg(item.mpg)} MPG • GVW {item.gvw || '--'}
+        {item.engine || '—'} • {item.transmission || '—'} • {item.hp || '--'} HP • {renderMpg(item.mpg)} MPG • GVW {item.gvw || '--'}
       </Text>
       <View style={styles.inlineBtns}>
         <TouchableOpacity onPress={() => handleEdit(item)} style={styles.actionBtn}>
@@ -198,7 +205,7 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
           <Text style={styles.title}>{selectedVehicle.year} {selectedVehicle.make}</Text>
           <Text style={styles.details}>{selectedVehicle.model} ({selectedVehicle.engine})</Text>
           <Text style={styles.stats}>
-            MPG: {renderMpg(selectedVehicle.mpg)} • HP: {selectedVehicle.hp || '--'} • GVW: {selectedVehicle.gvw || '--'}
+             • MPG: {renderMpg(selectedVehicle.mpg)} • HP: {selectedVehicle.hp || '--'} • GVW: {selectedVehicle.gvw || '--'}
           </Text>
         </TouchableOpacity>
       ) : (
@@ -278,6 +285,7 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
                 { key: 'make', label: 'Make' },
                 { key: 'model', label: 'Model' },
                 { key: 'engine', label: 'Engine' },
+                { key: 'transmission', label: 'Transmission' },
                 { key: 'mpgCity', label: 'MPG (City)' },
                 { key: 'mpgHighway', label: 'MPG (Highway)' },
                 { key: 'hp', label: 'Horsepower (HP)' },
@@ -285,13 +293,50 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
               ].map(({ key, label }) => (
                 <View key={key} style={{ marginBottom: 12 }}>
                   <Text style={styles.inputLabel}>{label}</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder={label}
-                    placeholderTextColor="#777"
-                    value={editableVehicle[key]?.toString() || ''}
-                    onChangeText={(text) => setEditableVehicle({ ...editableVehicle, [key]: text })}
-                  />
+                  {key === 'transmission' ? (
+                    <View style={styles.transmissionSelector}>
+                      <TouchableOpacity
+                        style={[
+                          styles.transmissionButton,
+                          editableVehicle.transmission === 'Automatic' && styles.transmissionButtonSelected,
+                        ]}
+                        onPress={() => setEditableVehicle({ ...editableVehicle, transmission: 'Automatic' })}
+                      >
+                        <Text
+                          style={[
+                            styles.transmissionButtonText,
+                            editableVehicle.transmission === 'Automatic' && styles.transmissionButtonTextSelected,
+                          ]}
+                        >
+                          Automatic
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.transmissionButton,
+                          editableVehicle.transmission === 'Manual' && styles.transmissionButtonSelected,
+                        ]}
+                        onPress={() => setEditableVehicle({ ...editableVehicle, transmission: 'Manual' })}
+                      >
+                        <Text
+                          style={[
+                            styles.transmissionButtonText,
+                            editableVehicle.transmission === 'Manual' && styles.transmissionButtonTextSelected,
+                          ]}
+                        >
+                          Manual
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    <TextInput
+                      style={styles.input}
+                      placeholder={label}
+                      placeholderTextColor="#777"
+                      value={editableVehicle[key]?.toString() || ''}
+                      onChangeText={(text) => setEditableVehicle({ ...editableVehicle, [key]: text })}
+                    />
+                  )}
                 </View>
               ))}
               <TouchableOpacity onPress={handleSaveEdit} style={styles.addNewButton}>
@@ -501,6 +546,33 @@ const styles = StyleSheet.create({
     color: '#ccc',
     marginBottom: 4,
     fontSize: 14,
+  },
+  transmissionSelector: {
+    flexDirection: 'row',
+    backgroundColor: '#222',
+    borderRadius: 8,
+    borderColor: '#444',
+    borderWidth: 1,
+    height: 44,
+    overflow: 'hidden',
+  },
+  transmissionButton: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#222',
+  },
+  transmissionButtonSelected: {
+    backgroundColor: '#4CAF50',
+  },
+  transmissionButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  transmissionButtonTextSelected: {
+    color: '#fff',
+    fontWeight: 'bold',
   },
   EditModalContainer: {
     width: '100%',
