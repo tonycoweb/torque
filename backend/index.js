@@ -260,49 +260,25 @@ app.post('/generate-service-recommendations', async (req, res) => {
           {
             role: 'system',
             content: `
-You are a certified master mechanic. Your job is to generate a maintenance schedule for a given vehicle based on its year, make, model, engine, and current mileage.
+You are a certified master mechanic. Generate a maintenance schedule by using vehicles specific user manual specs, and 
+online trusted sources while double checking for accuracy.
 
-Return a JSON array of service recommendations. Each recommendation must include:
-- text: short description of the service and its interval (e.g. "Oil Change - 7,500 miles")
-- priority: "high", "medium", or "low" depending on how close the service is to due
-- mileage: the service interval in miles as a number
-- parts: an object with realistic part information — including oil type, filters, plugs, belts, etc.
+STRICT OUTPUT SHAPE:
+- "text": a SHORT SERVICE DESCRIPTION ONLY (no numbers, no "miles", no "every", no hyphenated intervals).
+  Examples of valid text: "Oil Change", "Cabin Air Filter", "Timing Belt"
+  INVALID examples: "Oil Change - 7,500 miles", "Oil Change every 7,500 miles".
+- "priority": "high" | "medium" | "low"
+- "mileage": the recommended interval in miles as a NUMBER (e.g., 7500)
 
-Use trusted service data or your own expert consensus. If you can't find the exact OEM part number, include a well-known equivalent (e.g. Bosch, Fram, NGK, Mobil 1).
+NO extra fields (no parts, no notes, no units). Return ONLY JSON array.
 
-try not to return an empty parts object. If unsure, make your best guess for typical vehicles of that type.
-
-Decide priority as follows:
-- "high" = within 5,000 miles of current mileage or overdue
-- "medium" = within 10,000–20,000 miles
-- "low" = more than 20,000 miles away
-
-Return only valid JSON. Do not explain, do not include markdown. Just output a raw JSON array.
-Example:
-[
-  {
-    "text": "Oil Change - 7,500 miles",
-    "priority": "high",
-    "mileage": 7500,
-    "parts": {
-      "oilType": "5W-30 Full Synthetic",
-      "oilFilter": "Bosch 3323"
-    }
-  },
-  {
-    "text": "Air Filter Replacement - 15,000 miles",
-    "priority": "medium",
-    "mileage": 15000,
-    "parts": {
-      "engineAirFilter": "Fram CA4309"
-    }
-  }
-]
+Priority can consider currentMileage if provided; otherwise base on severity & typical intervals.
+Return only valid JSON. No markdown.
             `.trim(),
           },
           {
             role: 'user',
-            content: `Generate service recommendations for a ${vehicle.year} ${vehicle.make} ${vehicle.model}${vehicle.engine ? ` with ${vehicle.engine}` : ''}${currentMileage ? `, current mileage: ${currentMileage}` : ''}. Include realistic part info.`,
+            content: `Generate service recommendations for a ${vehicle.year} ${vehicle.make} ${vehicle.model}${vehicle.engine ? ` with ${vehicle.engine}` : ''}${currentMileage ? `, current mileage: ${currentMileage}` : ''}.`,
           },
         ],
         temperature: 0.3,
@@ -319,26 +295,41 @@ Example:
     const reply = response.data.choices[0].message.content;
     const usage = response.data.usage;
 
-    console.log('📋 Service Recommendations GPT Reply:', reply);
-    console.log('🔍 Service Recommendations Token Usage:', usage);
-
     let result;
     try {
       result = JSON.parse(reply);
-      if (!Array.isArray(result)) {
-        throw new Error('Response is not an array');
-      }
+      if (!Array.isArray(result)) throw new Error('Response is not an array');
     } catch (error) {
       console.error('Parse Error:', error.message);
       return res.status(500).json({ error: 'Failed to parse service recommendations.' });
     }
 
-    res.json({ result, usage });
+    // Helper: strip any accidental miles/units from text (robust against model slip-ups)
+    const cleanText = (t) => {
+      const s = String(t || '').trim();
+      // Remove patterns like " - 7,500 miles", " – 7500 mi", " every 10k miles"
+      const rx = /\s*(?:[-–—]\s*)?(?:every\s+)?\d[\d,\.kK]*\s*(?:mi|miles?)\s*$/i;
+      return s.replace(rx, '').trim();
+    };
+
+    const sanitized = result.map((item) => {
+      const priority = String(item.priority || '').toLowerCase();
+      const normalizedPriority = ['high','medium','low'].includes(priority) ? priority : 'low';
+      const mileageNum = Number(item.mileage);
+      return {
+        text: cleanText(item.text),               // description only
+        priority: normalizedPriority,
+        mileage: Number.isFinite(mileageNum) ? mileageNum : undefined, // interval
+      };
+    });
+
+    res.json({ result: sanitized, usage });
   } catch (error) {
     console.error('Service Recommendations Error:', error.response?.data || error.message);
     res.status(500).json({ error: 'Failed to generate service recommendations.' });
   }
 });
+
 
 
 const PORT = process.env.PORT || 3001;

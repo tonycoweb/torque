@@ -1,17 +1,9 @@
+// ServiceBox.js — due line shows remaining miles; color always reflects proximity to next due (even if completed)
 import React, { useState, useEffect, useRef } from 'react';
 import { KeyboardAvoidingView, Platform, ActivityIndicator } from 'react-native';
 import DatePicker from 'react-native-date-picker';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  Modal,
-  ScrollView,
-  Alert,
-  Image,
-  Dimensions,
-  TextInput,
+  View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView, Alert, Image, TextInput,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -21,59 +13,152 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { showRewardedAd, preloadRewardedAd } from '../components/RewardedAdManager';
 
-export default function ServiceBox({ selectedVehicle }) {
+export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMileage }) {
   const [modalVisible, setModalVisible] = useState(false);
-  const [imageModal, setImageModal] = useState(null);
-  const [currentIndex, setCurrentIndex] = useState(0);
+
+  // data
   const [services, setServices] = useState([]);
+  const [hasGeneratedServices, setHasGeneratedServices] = useState(false);
+
+  // vehicle mileage
+  const [vehicleMiles, setVehicleMiles] = useState('');
+  const [vehicleMilesInput, setVehicleMilesInput] = useState('');
+
+  // interval inline edit
+  const [editingHeaderId, setEditingHeaderId] = useState(null);
+  const [tempHeaderMiles, setTempHeaderMiles] = useState('');
+  const headerMilesRef = useRef(null);
+
+  // overlays
+  const [overlay, setOverlay] = useState(null); // 'prompt' | 'thinking' | 'edit' | 'image' | 'custom' | null
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  // prompt overlay
+  const [promptMileage, setPromptMileage] = useState('');
+
+  // edit overlay state
   const [editService, setEditService] = useState(null);
   const [tempNotes, setTempNotes] = useState('');
-  const [tempMileage, setTempMileage] = useState('');
+  const [tempCompletedMileage, setTempCompletedMileage] = useState('');
   const [tempDate, setTempDate] = useState('');
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [date, setDate] = useState(new Date());
+
+  // image overlay state
+  const [imageForServiceId, setImageForServiceId] = useState(null);
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  // custom service overlay
+  const [customTitle, setCustomTitle] = useState('');
+  const [customInterval, setCustomInterval] = useState('');
+  const [customPriority, setCustomPriority] = useState('low'); // 'low' | 'medium' | 'high'
+  const [customNotes, setCustomNotes] = useState('');
+
   const [cameraPermission, requestCameraPermission] = ImagePicker.useCameraPermissions();
   const [mediaPermission, requestMediaPermission] = ImagePicker.useMediaLibraryPermissions();
   const scrollViewRef = useRef(null);
-  const screenWidth = Dimensions.get('window').width;
-  const [showDatePicker, setShowDatePicker] = useState(false);
-  const [date, setDate] = useState(new Date());
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showInfoModal, setShowInfoModal] = useState(false);
-  const [showGenerateModal, setShowGenerateModal] = useState(false);
-  const [currentMileage, setCurrentMileage] = useState('');
-  const [customTitle, setCustomTitle] = useState('');
-  const [customMileage, setCustomMileage] = useState('');
-  const [hasGeneratedServices, setHasGeneratedServices] = useState(false);
-  const [showDecodingModal, setShowDecodingModal] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false); // New state to lock UI during generation
+  const saveTimeoutRef = useRef(null);
 
+  // ---------- helpers ----------
+  const digitsOnly = (s) => String(s ?? '').replace(/[^\d]/g, '');
+  const formatThousands = (numStr) => digitsOnly(numStr).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const normalizeNumber = (input) => {
+    const clean = digitsOnly(input);
+    return { display: formatThousands(clean), value: clean ? parseInt(clean, 10) : undefined };
+  };
+  const formatDateDisplay = (d) => {
+    try {
+      const dateObj = typeof d === 'string' ? new Date(d) : d;
+      if (!dateObj || isNaN(dateObj.getTime())) return 'N/A';
+      const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+      const dd = String(dateObj.getDate()).padStart(2, '0');
+      const yyyy = dateObj.getFullYear();
+      return `${mm}/${dd}/${yyyy}`;
+    } catch {
+      return 'N/A';
+    }
+  };
+
+  const getPrefillMileage = async () => {
+    const v = selectedVehicle || {};
+    if (v?.id) {
+      const overridden = await AsyncStorage.getItem(`vehicleMileage_${v.id}`);
+      if (overridden != null) return overridden;
+    }
+    const m = v.currentMileage ?? v.odometer ?? v.mileage ?? '';
+    return String(m || '');
+  };
+
+  // Compute next due ONLY when we have a recorded completion mileage.
+  const computeDueMiles = (svc) => {
+    if (!svc.intervalMiles) return undefined;
+    const completed = svc.completedMileageNumber ?? (svc.completedMileage ? parseInt(digitsOnly(svc.completedMileage), 10) : undefined);
+    if (!Number.isFinite(completed)) return undefined; // no completion recorded => unknown due
+    return completed + svc.intervalMiles;
+  };
+
+  const recalcAllDues = (updatedServices) => {
+    return updatedServices.map((svc) => {
+      const due = computeDueMiles(svc);
+      return {
+        ...svc,
+        dueMilesNumber: due,
+        dueDisplay: due ? `${formatThousands(String(due))} mi` : '—',
+      };
+    });
+  };
+
+  // Remaining miles helper (positive = miles left, 0/neg = overdue)
+  const getRemainingMiles = (svc, currentMilesNumber) => {
+    if (!currentMilesNumber) return undefined;
+    const due = svc.dueMilesNumber ?? computeDueMiles(svc);
+    if (!due) return undefined;
+    return due - currentMilesNumber;
+  };
+
+  /**
+   * Severity rules (completion no longer forces green):
+   * - No completion recorded -> 'red' (assume due now)
+   * - Else use current mileage vs due:
+   *   - remaining <= 0 -> 'red' (overdue)
+   *   - remaining <= 20% of interval (min 500) -> 'yellow'
+   *   - else -> 'green'
+   */
+  const getSeverityForService = (svc, currentMilesNumber) => {
+    if (!svc.completedMileageNumber && !svc.completedMileage) return 'red'; // assume due until first completion logged
+    if (!svc.intervalMiles || !currentMilesNumber) return 'neutral';
+
+    const remaining = getRemainingMiles(svc, currentMilesNumber);
+    if (remaining == null) return 'neutral';
+
+    if (remaining <= 0) return 'red';
+    const threshold = Math.max(500, Math.round(svc.intervalMiles * 0.2));
+    if (remaining <= threshold) return 'yellow';
+    return 'green';
+  };
+
+  // ---------- load/save ----------
   useEffect(() => {
-    console.log('ServiceBox: selectedVehicle prop:', selectedVehicle);
     const loadData = async () => {
       if (!selectedVehicle?.id) {
-        setServices([]);
-        setHasGeneratedServices(false);
+        setServices([]); setHasGeneratedServices(false);
+        setVehicleMiles(''); setVehicleMilesInput('');
         return;
       }
       try {
-        const storageKey = `servicesData_${selectedVehicle.id}`;
-        const generatedKey = `generatedServices_${selectedVehicle.id}`;
-        const [storedServices, generatedFlag] = await Promise.all([
-          AsyncStorage.getItem(storageKey),
-          AsyncStorage.getItem(generatedKey),
+        const [storedServicesStr, generatedFlag, vm] = await Promise.all([
+          AsyncStorage.getItem(`servicesData_${selectedVehicle.id}`),
+          AsyncStorage.getItem(`generatedServices_${selectedVehicle.id}`),
+          getPrefillMileage(),
         ]);
-        if (storedServices) {
-          setServices(JSON.parse(storedServices));
-          console.log(`Loaded services for vehicle ${selectedVehicle.id}:`, JSON.parse(storedServices));
-        } else {
-          setServices([]);
-          console.log(`No services found for vehicle ${selectedVehicle.id}`);
-        }
+        const parsed = storedServicesStr ? JSON.parse(storedServicesStr) : [];
+        const withDues = recalcAllDues(parsed);
+        setServices(withDues);
         setHasGeneratedServices(!!generatedFlag);
-        console.log(`Generated services flag for vehicle ${selectedVehicle.id}:`, !!generatedFlag);
-      } catch (e) {
-        console.error('Failed to load data:', e);
-        setServices([]);
-        setHasGeneratedServices(false);
+        setVehicleMiles(vm || '');
+        setVehicleMilesInput(formatThousands(vm || ''));
+      } catch {
+        setServices([]); setHasGeneratedServices(false);
       }
     };
     loadData();
@@ -81,1201 +166,917 @@ export default function ServiceBox({ selectedVehicle }) {
 
   useEffect(() => {
     if (modalVisible) {
-      console.log('🔄 Preloading ad for ServiceBox modal...');
-      try {
-        preloadRewardedAd();
-      } catch (error) {
-        console.error('❌ Error during ad preloading:', error);
-      }
+      try { preloadRewardedAd(); } catch {}
     }
   }, [modalVisible]);
 
-  let saveTimeout = null;
-  const saveServicesToStorage = async (updatedServices) => {
-    if (!selectedVehicle?.id) {
-      console.warn('No vehicle selected, skipping service save');
-      return;
-    }
-    if (saveTimeout) {
-      clearTimeout(saveTimeout);
-    }
-    saveTimeout = setTimeout(async () => {
-      try {
-        const storageKey = `servicesData_${selectedVehicle.id}`;
-        await AsyncStorage.setItem(storageKey, JSON.stringify(updatedServices));
-        console.log(`Services saved to AsyncStorage for vehicle ${selectedVehicle.id}:`, updatedServices);
-      } catch (e) {
-        console.error('Failed to save services:', e);
-      }
-    }, 500);
+  useEffect(() => () => { if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current); }, []);
+
+  const saveServicesToStorage = async (updated) => {
+    if (!selectedVehicle?.id) return;
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = setTimeout(async () => {
+      try { await AsyncStorage.setItem(`servicesData_${selectedVehicle.id}`, JSON.stringify(updated)); } catch {}
+    }, 150);
   };
 
-  const handleGenerateRecommendations = () => {
-    console.log('handleGenerateRecommendations: selectedVehicle:', selectedVehicle);
-    if (!selectedVehicle) {
-      Alert.alert('No Vehicle Selected', 'Please select a vehicle to generate service recommendations.');
-      return;
-    }
-    setModalVisible(false);
-    setTimeout(() => {
-      setShowGenerateModal(true);
-    }, 200);
+  const persistVehicleMiles = async (value) => {
+    if (!selectedVehicle?.id) return;
+    try { await AsyncStorage.setItem(`vehicleMileage_${selectedVehicle.id}`, String(value ?? '')); } catch {}
   };
 
-  const confirmAndGenerate = async () => {
-    if (isGenerating) return; // Prevent multiple generations
+  // ---------- generate flow ----------
+  const handleGeneratePress = async () => {
+    const pm = await getPrefillMileage();
+    setPromptMileage(pm ? String(pm) : '');
+    setOverlay('prompt');
+  };
+
+  const startGenerationAfterMileage = async () => {
+    if (isGenerating) return;
+    setOverlay('thinking');
     setIsGenerating(true);
-    setShowGenerateModal(false);
-    setShowDecodingModal(true);
-    await handleConfirmGenerate();
-    setIsGenerating(false);
-  };
-
-const handleConfirmGenerate = async () => {
-  console.log('Confirmed generate with current mileage:', currentMileage);
-  try {
-    const payload = { vehicle: selectedVehicle, currentMileage: parseInt(currentMileage) || undefined };
-    console.log('Sending payload to backend:', JSON.stringify(payload, null, 2));
-    
-    const response = await fetch('http://192.168.1.246:3001/generate-service-recommendations', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      console.error('Backend response not OK:', {
-        status: response.status,
-        statusText: response.statusText,
-      });
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    const data = await response.json();
-    console.log('Service recommendations response:', data);
-    if (data.error) {
-      Alert.alert('Error', data.error);
-      setShowDecodingModal(false);
-      setModalVisible(true);
-      return;
-    }
-
-    const newServices = data.result.map((service, index) => {
-      let notes = '';
-      if (service.parts && Object.keys(service.parts).length > 0) {
-        notes = Object.entries(service.parts)
-          .map(([key, value]) => `${key}: ${value}`)
-          .join(', ');
-      }
-      return {
-        id: Date.now().toString() + index,
-        ...service,
-        completed: false,
-        proofUris: [],
-        notes,
-        mileage: '',
-        date: 'N/A',
-      };
-    });
-
-    console.log('Step 1: Setting services...');
-    setServices(newServices);
-    console.log('Step 2: Saving to storage...');
-    await saveServicesToStorage(newServices);
-    console.log('Step 3: Setting async storage flag...');
-    await AsyncStorage.setItem(`generatedServices_${selectedVehicle.id}`, 'true');
-    console.log('Step 4: Setting hasGenerated...');
-    setHasGeneratedServices(true);
-    console.log('Generated services:', newServices);
-
-    console.log('Step 5: Showing rewarded ad...');
     try {
-      const adResult = await showRewardedAd();
-      if (adResult) {
-        console.log('✅ User earned reward from ad');
-      } else {
-        console.log('🔕 Ad was skipped or failed');
-        Alert.alert('Ad Skipped', 'Please watch the ad to proceed with service recommendations.');
-      }
-    } catch (adError) {
-      console.error('❌ Error showing rewarded ad:', adError);
-      Alert.alert('Ad Error', 'Failed to load ad. Proceeding to service recommendations.');
+      let adOK = false;
+      try { adOK = await showRewardedAd(); } catch {}
+      if (!adOK) { Alert.alert('Ad Required', 'Please watch the ad to generate service recommendations.'); setOverlay(null); return; }
+
+      await handleConfirmGenerate();
+      setTimeout(() => scrollViewRef.current?.scrollToEnd?.({ animated: true }), 350);
+    } catch (e) {
+      Alert.alert('Error', String(e?.message || e));
+    } finally {
+      setIsGenerating(false);
+      setOverlay(null);
     }
-
-    console.log('Step 6: Hiding decoding modal...');
-    setShowDecodingModal(false);
-    console.log('Step 7: Re-opening modal...');
-    setTimeout(() => {
-      setModalVisible(true);
-      console.log('✅ Reopened modal after ad and generation');
-    }, 200); // Slight delay to ensure smooth transition
-
-    setTimeout(() => {
-      try {
-        if (scrollViewRef.current?.scrollToEnd) {
-          scrollViewRef.current.scrollToEnd({ animated: true });
-        }
-      } catch (e) {
-        console.warn('⚠️ scrollToEnd failed:', e.message);
-      }
-    }, 300);
-
-    setCurrentMileage('');
-  } catch (error) {
-    console.error('Error generating recommendations:', {
-      message: error.message,
-      stack: error.stack,
-      name: error.name,
-    });
-    setShowDecodingModal(false);
-    setModalVisible(true);
-    Alert.alert('Error', 'Failed to generate service recommendations: ' + error.message);
-  }
-};
-
-  const handleCreateCustomServiceButton = () => {
-    console.log('Add Custom Service button pressed');
-    setModalVisible(false);
-    setImageModal(null);
-    setEditService(null);
-    setShowCreateModal(true);
   };
 
-  const handleCreateCustomService = () => {
-    console.log('handleCreateCustomService:', { customTitle, customMileage });
-    if (!customTitle.trim()) {
-      Alert.alert('Missing Title', 'Please enter a service title.');
-      return;
-    }
+  const handleConfirmGenerate = async () => {
+    const mileageValue = parseInt(digitsOnly(promptMileage)) || undefined;
+    const payload = { vehicle: selectedVehicle, currentMileage: mileageValue };
+    const url = 'http://192.168.1.246:3001/generate-service-recommendations';
 
-    const serviceText = customMileage.trim() ? `${customTitle} - ${customMileage} miles` : customTitle;
-    const newService = {
-      id: Date.now().toString(),
-      text: serviceText,
-      priority: 'low',
+    const resp = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+
+    const sanitized = Array.isArray(data.result)
+      ? data.result.map((item) => ({
+          text: String(item.text || ''),
+          priority: ['high', 'medium', 'low'].includes(String(item.priority || '').toLowerCase())
+            ? String(item.priority).toLowerCase()
+            : 'low',
+          intervalMiles: Number.isFinite(Number(item.mileage)) ? Number(item.mileage) : undefined,
+        }))
+      : [];
+
+    const newServices = sanitized.map((s, i) => ({
+      id: Date.now().toString() + i,
+      text: s.text,
+      priority: s.priority,
+      intervalMiles: s.intervalMiles,
       completed: false,
       proofUris: [],
       notes: '',
-      mileage: '',
+      completedMileage: '',
+      completedMileageNumber: undefined,
       date: 'N/A',
-    };
+      lastCompletedDate: undefined,
+      dueDisplay: '—',       // unknown until first completion is logged
+      dueMilesNumber: undefined,
+    }));
 
-    const updatedServices = [...services, newService];
-    setServices(updatedServices);
-    saveServicesToStorage(updatedServices);
-    console.log('New service added:', newService);
-
-    setCustomTitle('');
-    setCustomMileage('');
-    setShowCreateModal(false);
-    setModalVisible(true);
-
-    setTimeout(() => {
-      if (scrollViewRef.current) {
-        scrollViewRef.current.scrollToEnd({ animated: true });
-      }
-    }, 100);
+    setServices(newServices);
+    await saveServicesToStorage(newServices);
+    if (selectedVehicle?.id) {
+      await AsyncStorage.setItem(`generatedServices_${selectedVehicle.id}`, 'true');
+      await persistVehicleMiles(mileageValue ?? '');
+    }
+    setVehicleMiles(mileageValue ? String(mileageValue) : '');
+    setVehicleMilesInput(formatThousands(mileageValue ? String(mileageValue) : ''));
+    setHasGeneratedServices(true);
   };
 
-  const handleDeleteService = (id) => {
-    Alert.alert(
-      'Delete Service',
-      'Are you sure you want to delete this service?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => {
-            setServices(prev => {
-              const updated = prev.filter(service => service.id !== id);
-              saveServicesToStorage(updated);
-              return updated;
-            });
-          },
-        },
-      ]
-    );
-  };
-
-  useEffect(() => {
-    console.log('Modal states:', { modalVisible, imageModal, showCreateModal, showInfoModal, showGenerateModal, editService, showDecodingModal });
-  }, [modalVisible, imageModal, showCreateModal, showInfoModal, showGenerateModal, editService, showDecodingModal]);
-
-  useEffect(() => {
-    console.log('Services state updated:', services);
-  }, [services]);
-
-  const handleSaveDetails = () => {
-    if (!editService) return;
-
-    setServices(prev => {
-      const updated = prev.map(service =>
-        service.id === editService.id
-          ? { ...service, notes: tempNotes, mileage: tempMileage, date: editService.date }
-          : service
-      );
-      saveServicesToStorage(updated);
-      return updated;
-    });
-
-    setEditService(null);
-    setModalVisible(true);
-  };
-
-  const openEditDetails = (service) => {
-    setModalVisible(false);
-    setEditService(service);
-    setTempNotes(service.notes || '');
-    setTempMileage(service.mileage || '');
-    setTempDate(service.date || '');
-  };
-
+  // ---------- mark complete / unmark ----------
   const handleMarkCompleted = (id) => {
-    setServices(prev => {
-      const updated = prev.map(service =>
-        service.id === id ? { ...service, completed: true } : service
-      );
-      saveServicesToStorage(updated);
-      return updated;
+    setServices((prev) => {
+      const updated = prev.map((s) => (s.id === id ? { ...s, completed: true } : s));
+      const withDues = recalcAllDues(updated);
+      saveServicesToStorage(withDues);
+      return withDues;
     });
-
     setTimeout(() => {
-      Alert.alert(
-        'Attach Receipt',
-        'Would you like to upload proof of service?',
-        [
-          { text: 'Later', style: 'cancel' },
-          { text: 'Yes', onPress: () => handleUploadProof(id) },
-        ]
-      );
-    }, 300);
+      Alert.alert('Attach Receipt', 'Would you like to upload proof of service?', [
+        { text: 'Later', style: 'cancel' },
+        { text: 'Yes', onPress: () => handleUploadProof(id) },
+      ]);
+    }, 200);
   };
 
   const handleUnmarkCompleted = (id) => {
-    Alert.alert(
-      'Unmark Completed',
-      'Are you sure you want to unmark this service?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Yes',
-          onPress: () => {
-            setServices(prev => {
-              const updated = prev.map(service =>
-                service.id === id ? { ...service, completed: false } : service
-              );
-              saveServicesToStorage(updated);
-              return updated;
-            });
-          },
-        },
-      ]
-    );
+    Alert.alert('Unmark Completed', 'Are you sure you want to unmark this service?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Yes', onPress: () => {
+        setServices((prev) => {
+          const updated = prev.map((s) => (s.id === id ? { ...s, completed: false } : s));
+          const withDues = recalcAllDues(updated);
+          saveServicesToStorage(withDues);
+          return withDues;
+        });
+      }},
+    ]);
   };
 
+  // ---------- proofs ----------
   const handleUploadProof = async (serviceId) => {
-    Alert.alert(
-      'Attach Proof',
-      'Choose an option',
-      [
-        {
-          text: 'Camera',
-          onPress: async () => {
-            const cameraStatus = await requestCameraPermission();
-            if (!cameraStatus.granted) {
-              Alert.alert('Camera permission required');
-              return;
-            }
-            const result = await ImagePicker.launchCameraAsync({
-              mediaTypes: ImagePicker.MediaTypeOptions.Images,
-              quality: 0.7,
-            });
-            if (!result.canceled && result.assets?.[0]?.uri) {
-              addProof(serviceId, result.assets[0].uri);
-            }
-          },
+    Alert.alert('Attach Proof', 'Choose an option', [
+      {
+        text: 'Camera',
+        onPress: async () => {
+          const cam = await requestCameraPermission();
+          if (!cam.granted) return Alert.alert('Camera permission required');
+          const result = await ImagePicker.launchCameraAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
+          if (!result.canceled && result.assets?.[0]?.uri) addProof(serviceId, result.assets[0].uri);
         },
-        {
-          text: 'Photo Library',
-          onPress: async () => {
-            const mediaStatus = await requestMediaPermission();
-            if (!mediaStatus.granted) {
-              Alert.alert('Photo library permission required');
-              return;
-            }
-            const result = await ImagePicker.launchImageLibraryAsync({
-              mediaTypes: ImagePicker.MediaTypeOptions.Images,
-              quality: 0.7,
-            });
-            if (!result.canceled && result.assets?.[0]?.uri) {
-              addProof(serviceId, result.assets[0].uri);
-            }
-          },
+      },
+      {
+        text: 'Photo Library',
+        onPress: async () => {
+          const lib = await requestMediaPermission();
+          if (!lib.granted) return Alert.alert('Photo library permission required');
+          const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
+          if (!result.canceled && result.assets?.[0]?.uri) addProof(serviceId, result.assets[0].uri);
         },
-        { text: 'Cancel', style: 'cancel' },
-      ]
-    );
+      },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   };
 
   const addProof = (serviceId, uri) => {
-    setServices(prev => {
-      const updated = prev.map(service =>
-        service.id === serviceId
-          ? { ...service, proofUris: [...service.proofUris, uri] }
-          : service
-      );
-      saveServicesToStorage(updated);
-      return updated;
+    setServices((prev) => {
+      const updated = prev.map((s) => (s.id === serviceId ? { ...s, proofUris: [...s.proofUris, uri] } : s));
+      saveServicesToStorage(updated); return updated;
     });
   };
 
   const deleteImage = (serviceId, index) => {
-    Alert.alert(
-      'Confirm Delete',
-      'Are you sure you want to delete this image?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => {
-            setServices(prev => {
-              const updated = prev.map(service => {
-                if (service.id === serviceId) {
-                  const newUris = [...service.proofUris];
-                  newUris.splice(index, 1);
-                  return { ...service, proofUris: newUris };
-                }
-                return service;
-              });
-              saveServicesToStorage(updated);
-              return updated;
-            });
-            setImageModal(null);
-            setModalVisible(true);
-          },
-        },
-      ]
-    );
+    setServices((prev) => {
+      const updated = prev.map((s) => {
+        if (s.id === serviceId) {
+          const copy = [...s.proofUris]; copy.splice(index, 1);
+          return { ...s, proofUris: copy };
+        }
+        return s;
+      });
+      saveServicesToStorage(updated); return updated;
+    });
+    setCurrentIndex((i) => Math.max(0, i - 1));
   };
 
   const downloadImage = async (uri) => {
     const filename = uri.split('/').pop();
     const newPath = FileSystem.documentDirectory + filename;
-
     try {
-      await FileSystem.copyAsync({
-        from: uri,
-        to: newPath,
-      });
-
+      await FileSystem.copyAsync({ from: uri, to: newPath });
       const asset = await MediaLibrary.createAssetAsync(newPath);
       await MediaLibrary.createAlbumAsync('Download', asset, false);
-
       Alert.alert('Success', 'Image saved to gallery.');
-    } catch (e) {
-      console.log('Error saving image:', e);
-      Alert.alert('Error', 'Failed to save image.');
+    } catch { Alert.alert('Error', 'Failed to save image.'); }
+  };
+
+  // ---------- edit details overlay ----------
+  const openEditDetails = (service) => {
+    setEditService(service);
+    setTempNotes(service.notes || '');
+    const initial = service.completedMileageNumber != null
+      ? String(service.completedMileageNumber)
+      : service.completedMileage || '';
+    setTempCompletedMileage(formatThousands(initial));
+    setTempDate(service.lastCompletedDate ? formatDateDisplay(service.lastCompletedDate) : (service.date && service.date !== 'N/A' ? service.date : ''));
+    setOverlay('edit');
+  };
+
+  const saveEditDetails = () => {
+    if (!editService) return;
+    const { display, value } = normalizeNumber(tempCompletedMileage);
+    let parsedDate;
+    if (tempDate) {
+      const [mm, dd, yyyy] = tempDate.split('/');
+      if (mm && dd && yyyy) parsedDate = new Date(Number(yyyy), Number(mm) - 1, Number(dd));
     }
+
+    setServices((prev) => {
+      const updated = prev.map((svc) => {
+        if (svc.id !== editService.id) return svc;
+
+        const next = {
+          ...svc,
+          notes: tempNotes,
+          completedMileage: display || '',
+          completedMileageNumber: value,
+          date: tempDate || 'N/A',
+          lastCompletedDate: parsedDate ? parsedDate.toISOString() : svc.lastCompletedDate,
+        };
+
+        const due = computeDueMiles(next);
+        next.dueMilesNumber = due;
+        next.dueDisplay = due ? `${formatThousands(String(due))} mi` : '—';
+
+        return next;
+      });
+      saveServicesToStorage(updated);
+      return updated;
+    });
+    setOverlay(null);
+    setEditService(null);
   };
 
-  const sortedServices = [
-    ...services.filter(s => !s.completed),
-    ...services.filter(s => s.completed),
-  ];
-
-  const renderServiceDetails = (service) => {
-    return (
-      <View style={styles.detailsBox}>
-        <Text style={styles.detailText}>Notes: {service.notes || 'N/A'}</Text>
-        <Text style={styles.detailText}>Date: {service.date || 'N/A'}</Text>
-      </View>
-    );
+  // ---------- interval inline save ----------
+  const saveIntervalInline = (serviceId) => {
+    const { value } = normalizeNumber(tempHeaderMiles);
+    setServices((prev) => {
+      const updated = prev.map((s) => (s.id === serviceId ? { ...s, intervalMiles: value } : s));
+      const idx = updated.findIndex((u) => u.id === serviceId);
+      if (idx >= 0) {
+        const due = computeDueMiles(updated[idx]);
+        updated[idx].dueMilesNumber = due;
+        updated[idx].dueDisplay = due ? `${formatThousands(String(due))} mi` : '—';
+      }
+      saveServicesToStorage(updated);
+      return updated;
+    });
+    setEditingHeaderId(null);
+    setTempHeaderMiles('');
   };
 
-  const safeCloseModal = () => {
-    setImageModal(null);
-    setModalVisible(true);
+  // ---------- custom service ----------
+  const openCustomOverlay = () => {
+    setCustomTitle('');
+    setCustomInterval('');
+    setCustomPriority('low');
+    setCustomNotes('');
+    setOverlay('custom');
   };
+
+  const saveCustomService = () => {
+    if (!customTitle.trim()) return Alert.alert('Missing Title', 'Please enter a service title.');
+    const { value: intervalVal } = normalizeNumber(customInterval);
+
+    const newService = {
+      id: Date.now().toString(),
+      text: customTitle.trim(),
+      priority: customPriority,
+      intervalMiles: intervalVal,
+      completed: false,
+      proofUris: [],
+      notes: customNotes.trim(),
+      completedMileage: '',
+      completedMileageNumber: undefined,
+      date: 'N/A',
+      lastCompletedDate: undefined,
+      dueDisplay: '—',        // unknown until completed mileage is recorded
+      dueMilesNumber: undefined,
+    };
+
+    const updated = [...services, newService];
+    setServices(updated);
+    saveServicesToStorage(updated);
+    setOverlay(null);
+    setTimeout(() => scrollViewRef.current?.scrollToEnd?.({ animated: true }), 200);
+  };
+
+  // ---------- vehicle mileage bar ----------
+  const saveVehicleMilesAndRecalc = async () => {
+    const { value } = normalizeNumber(vehicleMilesInput);
+    const display = value ? String(value) : '';
+    setVehicleMiles(display);
+    setVehicleMilesInput(formatThousands(display));
+    await persistVehicleMiles(display);
+    onUpdateVehicleCurrentMileage?.(value); // optional parent callback
+
+    // Repaint severities using new current mileage (dues already derived from completion)
+    const withDues = recalcAllDues(services);
+    setServices(withDues);
+    await saveServicesToStorage(withDues);
+  };
+
+  // ---------- close ----------
+  const closeAll = () => {
+    setOverlay(null);
+    setEditService(null);
+    setImageForServiceId(null);
+    setIsGenerating(false);
+    setModalVisible(false);
+  };
+
+  // ---------- render ----------
+  const sortedServices = [...services.filter((s) => !s.completed), ...services.filter((s) => s.completed)];
+  const vehicleLabel = (() => {
+    const v = selectedVehicle || {};
+    const year = v.year ? String(v.year) : '';
+    const base = [year, v.make, v.model].filter(Boolean).join(' ');
+    return base || 'vehicle';
+  })();
+  const currentMilesNumber = parseInt(digitsOnly(vehicleMiles)) || undefined;
 
   return (
     <>
-      <TouchableOpacity style={styles.container} onPress={() => setModalVisible(true)} disabled={isGenerating}>
+      <TouchableOpacity style={styles.container} onPress={() => setModalVisible(true)} disabled={isGenerating} activeOpacity={0.85}>
         <Text style={styles.label}>Recommended Service:</Text>
         <Text style={styles.mileage}>
-          {services.find(s => !s.completed && s.priority === 'high')?.text ||
-            services.find(s => !s.completed)?.text ||
-            'No pending service'}
+          {services.find((s) => !s.completed && s.priority === 'high')?.text ||
+            services.find((s) => !s.completed)?.text ||
+            `No pending service for your ${vehicleLabel}`}
         </Text>
         <MaterialIcons name="keyboard-arrow-down" size={24} color="#fff" />
       </TouchableOpacity>
 
-      <Modal visible={modalVisible} transparent animationType="none">
-        <View style={styles.modalWrapper}>
-          <View style={styles.modalBox}>
-            <View style={styles.headerRow}>
-  <TouchableOpacity
-    onPress={() => {
-      setModalVisible(false);
-      setTimeout(() => setShowInfoModal(true), 200);
-    }}
-    style={styles.headerButton}
-  >
-    <MaterialIcons name="info-outline" size={24} color="#fff" />
-  </TouchableOpacity>
-  <Text style={styles.modalTitle} numberOfLines={1} adjustsFontSizeToFit>
-    All Service Recommendations
-  </Text>
-  <TouchableOpacity
-    onPress={() => setModalVisible(false)}
-    style={styles.headerButton}
-  >
-    <Text style={styles.modalCloseText}>×</Text>
-  </TouchableOpacity>
-</View>
-            <ScrollView
-              ref={scrollViewRef}
-              contentContainerStyle={styles.scrollContent}
-              initialNumToRender={10} // Optimize rendering
-              windowSize={5} // Reduce active rendering window
-            >
-              {sortedServices.map(service => (
-                <View
-                  key={service.id}
-                  style={[
-                    styles.serviceItem,
-                    service.completed
-                      ? styles.serviceCompleted
-                      : styles[`service${service.priority.charAt(0).toUpperCase() + service.priority.slice(1)}`],
-                  ]}
-                >
-                  <View style={styles.serviceHeader}>
-                    <Text style={styles.serviceText}>{service.text}</Text>
-                    <TouchableOpacity
-                      style={styles.deleteButton}
-                      onPress={() => handleDeleteService(service.id)}
-                    >
-                      <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
-                    </TouchableOpacity>
-                  </View>
-                  {service.proofUris.length > 0 && (
-                    <ScrollView
-                      horizontal
-                      style={styles.proofRow}
-                      contentContainerStyle={styles.proofRowContent}
-                    >
-                      {service.proofUris.map((uri, index) => (
-                        <TouchableOpacity
-                          key={index}
-                          onPress={() => {
-                            console.log('Thumbnail clicked:', { serviceId: service.id, index, uri });
-                            setModalVisible(false);
-                            setImageModal({ serviceId: service.id, index });
-                            setCurrentIndex(index);
-                          }}
-                          style={styles.thumbnailContainer}
-                          activeOpacity={0.7}
-                        >
-                          <Image source={{ uri }} style={styles.thumbnail} />
-                        </TouchableOpacity>
-                      ))}
-                    </ScrollView>
-                  )}
-                  {renderServiceDetails(service)}
-                  <View style={styles.buttonRow}>
-                    {service.completed ? (
-                      <>
-                        <TouchableOpacity
-                          style={styles.completeButton}
-                          onPress={() => handleUnmarkCompleted(service.id)}
-                        >
-                          <MaterialCommunityIcons name="refresh" size={16} color="#fff" />
-                          <Text style={styles.completeText}> Unmark</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.completeButton}
-                          onPress={() => handleUploadProof(service.id)}
-                        >
-                          <MaterialCommunityIcons name="plus-circle-outline" size={16} color="#fff" />
-                          <Text style={styles.completeText}> Add Proof</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.completeButton}
-                          onPress={() => openEditDetails(service)}
-                        >
-                          <MaterialIcons name="edit" size={16} color="#fff" />
-                          <Text style={styles.completeText}> Edit Details</Text>
-                        </TouchableOpacity>
-                      </>
-                    ) : (
-                      <TouchableOpacity
-                        style={styles.completeButton}
-                        onPress={() => handleMarkCompleted(service.id)}
-                      >
-                        <MaterialCommunityIcons name="check-circle-outline" size={16} color="#fff" />
-                        <Text style={styles.completeText}> Mark Completed</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                </View>
-              ))}
-              <TouchableOpacity
-                style={styles.addServiceButton}
-                onPress={handleCreateCustomServiceButton}
-                disabled={isGenerating}
-              >
-                <Text style={styles.addServiceText}>+ Add Custom Service</Text>
-              </TouchableOpacity>
-              {!hasGeneratedServices && (
-                <TouchableOpacity
-                  style={styles.generateButton}
-                  onPress={handleGenerateRecommendations}
-                  disabled={isGenerating}
-                >
-                  <Text style={styles.addServiceText}>Generate Recommended Service Records</Text>
-                </TouchableOpacity>
-              )}
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
-
+      {/* FULL-SCREEN MAIN MODAL */}
       <Modal
-        visible={showInfoModal}
-        transparent
+        visible={modalVisible}
+        transparent={false}
         animationType="slide"
-        onRequestClose={() => setShowInfoModal(false)}
+        onRequestClose={closeAll}
+        presentationStyle="fullScreen"
+        statusBarTranslucent
       >
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalOverlay}
+          style={{ flex: 1, backgroundColor: '#121212' }}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 40 : 0}
         >
-          <View style={styles.modalContent}>
-            <TouchableOpacity
-              onPress={() => {
-                setShowInfoModal(false);
-                setModalVisible(true);
-              }}
-              style={styles.modalCloseIcon}
-            >
-              <Text style={styles.modalCloseText}>×</Text>
-            </TouchableOpacity>
-            <Text style={styles.modalTitle}>About Service Recommendations</Text>
-            <Text style={styles.infoText}>
-              The ServiceBox feature in TorqueTheMechanic helps you manage your vehicle's maintenance by providing a list of recommended services tailored to your specific vehicle. You can view, mark as completed, or add custom service records, and attach proof of service (e.g., receipts).
-            </Text>
-            <Text style={styles.infoText}>
-              The "Generate Recommended Service Records" feature uses advanced automotive expertise to suggest maintenance tasks based on your vehicle's year, make, model, and engine specifications. These recommendations are sourced from standard maintenance schedules and may include part numbers for common services like oil changes.
-            </Text>
-            <Text style={styles.disclaimerText}>
-              Disclaimer: All service recommendations and part numbers are provided for informational purposes only. Always verify maintenance schedules and part compatibility with your vehicle's manufacturer or a certified mechanic before performing any service. TorqueTheMechanic is not liable for any damages or issues arising from the use of these recommendations.
-            </Text>
-            <TouchableOpacity
-              style={styles.completeButton}
-              onPress={() => {
-                setShowInfoModal(false);
-                setModalVisible(true);
-              }}
-            >
-              <Text style={styles.completeText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      <Modal
-        visible={showGenerateModal}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowGenerateModal(false)}
-      >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalOverlay}
-        >
-          <View style={styles.modalContent}>
-            <TouchableOpacity
-              onPress={() => {
-                setShowGenerateModal(false);
-                setModalVisible(true);
-              }}
-              style={styles.modalCloseIcon}
-            >
-              <Text style={styles.modalCloseText}>×</Text>
-            </TouchableOpacity>
-            <Text style={styles.modalTitle}>Generate Service Recommendations</Text>
-            <Text style={styles.infoText}>
-              This feature will generate a personalized list of recommended maintenance tasks for your {selectedVehicle?.year} {selectedVehicle?.make} {selectedVehicle?.model}. The recommendations are based on standard maintenance schedules and may include part numbers for services like oil changes or filter replacements.
-            </Text>
-            <Text style={styles.infoText}>
-              To provide the most accurate recommendations, you can optionally enter your vehicle's current mileage below. This helps prioritize services based on how close your vehicle is to recommended intervals (e.g., a timing belt replacement may be low priority at 20,000 miles but high priority near 105,000 miles).
-            </Text>
-            <TextInput
-              style={styles.inputField}
-              placeholder="Current Mileage (optional)"
-              value={currentMileage}
-              onChangeText={setCurrentMileage}
-              placeholderTextColor="#777"
-              keyboardType="numeric"
-            />
-            <Text style={styles.disclaimerText}>
-              Transparency: Recommendations are generated using advanced automotive expertise and trusted data sources. Always verify with your vehicle's manual or a certified mechanic to ensure accuracy and safety.
-            </Text>
-            <View style={styles.buttonRow}>
-              <TouchableOpacity
-                style={[styles.completeButton, { backgroundColor: '#4CAF50' }]}
-                onPress={confirmAndGenerate}
-                disabled={isGenerating}
-              >
-                <Text style={styles.completeText}>Continue</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.completeButton, { backgroundColor: '#FF5252' }]}
-                onPress={() => {
-                  setShowGenerateModal(false);
-                  setModalVisible(true);
-                }}
-              >
-                <Text style={styles.completeText}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      <Modal
-        visible={!!imageModal}
-        transparent
-        animationType="fade"
-        onRequestClose={safeCloseModal}
-      >
-        <View style={styles.imageModalOverlay}>
-          <TouchableOpacity
-            style={styles.closeIcon}
-            onPress={safeCloseModal}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.closeIconText}>✕</Text>
-          </TouchableOpacity>
-          {imageModal && services.find(s => s.id === imageModal.serviceId)?.proofUris?.length > 0 ? (
-            <ScrollView
-              ref={scrollViewRef}
-              horizontal
-              pagingEnabled
-              showsHorizontalScrollIndicator={false}
-              onMomentumScrollEnd={(e) => {
-                const newIndex = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
-                console.log('ScrollView index:', newIndex);
-                setCurrentIndex(newIndex);
-              }}
-              style={styles.imageScrollView}
-            >
-              {services
-                .find(s => s.id === imageModal.serviceId)
-                .proofUris.map((uri, index) => (
-                  <View
-                    key={index}
-                    style={[styles.fullImageWrapper, { width: screenWidth }]}
-                  >
-                    <Image
-                      source={{ uri }}
-                      style={styles.fullImage}
-                      resizeMode="contain"
-                      onError={(e) => console.log('Image load error:', e.nativeEvent.error)}
-                    />
-                  </View>
-                ))}
-            </ScrollView>
-          ) : (
-            <View style={styles.fullImageWrapper}>
-              <Text style={styles.errorText}>No images available for this service</Text>
-            </View>
-          )}
-          <View style={styles.imageActions}>
-            <TouchableOpacity
-              style={styles.iconButtonLeft}
-              onPress={() => deleteImage(imageModal.serviceId, currentIndex)}
-              activeOpacity={0.7}
-            >
-              <MaterialCommunityIcons name="trash-can-outline" size={32} color="red" />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.iconButtonRight}
-              onPress={() => {
-                const uri = services.find(s => s.id === imageModal.serviceId)?.proofUris[currentIndex];
-                if (uri) {
-                  downloadImage(uri);
-                } else {
-                  Alert.alert('Error', 'No image available to download');
-                }
-              }}
-              activeOpacity={0.7}
-            >
-              <MaterialCommunityIcons name="download" size={32} color="#fff" />
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal visible={!!editService} transparent animationType="fade">
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalWrapper}
-        >
-          <ScrollView contentContainerStyle={styles.scrollContent}>
+          <View style={styles.modalWrapper}>
             <View style={styles.modalBox}>
-              <Text style={styles.modalTitle}>Edit Details for:</Text>
-              <Text style={styles.serviceLabel}>{editService?.text}</Text>
-              <Text style={styles.label}>Notes</Text>
-              <TextInput
-                placeholder="Describe what was done..."
-                value={tempNotes}
-                onChangeText={setTempNotes}
-                style={[styles.inputField, { height: 80, textAlignVertical: 'top' }]}
-                multiline
-              />
-              <Text style={styles.label}>Date</Text>
-              <TouchableOpacity onPress={() => setShowDatePicker(true)}>
-                <View style={[styles.inputField, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
-                  <Text style={{ color: '#fff' }}>
-                    {editService?.date ? editService.date : 'Select a Date'}
-                  </Text>
-                  <MaterialIcons name="calendar-today" size={20} color="#fff" />
-                </View>
-              </TouchableOpacity>
-              <DatePicker
-                modal
-                open={showDatePicker}
-                date={date}
-                mode="date"
-                theme="dark"
-                onConfirm={(selectedDate) => {
-                  setShowDatePicker(false);
-                  setDate(selectedDate);
-                  setEditService(prev => ({
-                    ...prev,
-                    date: selectedDate.toISOString().split('T')[0],
-                  }));
-                }}
-                onCancel={() => setShowDatePicker(false)}
-              />
-              <View style={styles.buttonRow}>
-                <TouchableOpacity
-                  onPress={handleSaveDetails}
-                  style={[styles.modalButton, { backgroundColor: '#4CAF50' }]}
-                >
-                  <Text style={styles.modalButtonText}>✅ Save</Text>
+              {/* Header */}
+              <View style={styles.headerRow}>
+                <TouchableOpacity onPress={() => Alert.alert('Info', `Managing services for your ${vehicleLabel}.`)} style={styles.headerButton}>
+                  <MaterialIcons name="info-outline" size={24} color="#fff" />
                 </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => {
-                    setEditService(null);
-                    setModalVisible(true);
-                  }}
-                  style={[styles.modalButton, { backgroundColor: '#FF5252' }]}
-                >
-                  <Text style={styles.modalButtonText}>✖ Cancel</Text>
+                <Text style={styles.modalTitle} numberOfLines={1} adjustsFontSizeToFit>All Service Recommendations</Text>
+                <TouchableOpacity onPress={closeAll} style={styles.headerButton}>
+                  <Text style={styles.modalCloseText}>×</Text>
                 </TouchableOpacity>
               </View>
-            </View>
-          </ScrollView>
-        </KeyboardAvoidingView>
-      </Modal>
 
-      <Modal
-        visible={showCreateModal}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowCreateModal(false)}
-      >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalOverlay}
-        >
-          <View style={styles.modalContent}>
-            <TouchableOpacity
-              onPress={() => {
-                setShowCreateModal(false);
-                setModalVisible(true);
-              }}
-              style={styles.modalCloseIcon}
-            >
-              <Text style={styles.modalCloseText}>×</Text>
-            </TouchableOpacity>
-            <Text style={styles.modalTitle}>Add Custom Service</Text>
-            <TextInput
-              style={styles.inputField}
-              placeholder="Service Title"
-              value={customTitle}
-              onChangeText={setCustomTitle}
-              placeholderTextColor="#777"
-            />
-            <TextInput
-              style={styles.inputField}
-              placeholder="Mileage"
-              value={customMileage}
-              onChangeText={setCustomMileage}
-              placeholderTextColor="#777"
-              keyboardType="numeric"
-            />
-            <TouchableOpacity
-              style={styles.completeButton}
-              onPress={handleCreateCustomService}
-            >
-              <Text style={styles.completeText}>Create</Text>
-            </TouchableOpacity>
+              {/* Vehicle mileage bar (normal flow — NOT sticky) */}
+              <View style={styles.mileageBar}>
+                <Text style={styles.mileageBarLabel}>Vehicle Mileage</Text>
+                <View style={styles.mileageInputRow}>
+                  <TextInput
+                    style={[styles.inlineInput, { flex: 1 }]}
+                    value={vehicleMilesInput}
+                    onChangeText={(t) => setVehicleMilesInput(formatThousands(t))}
+                    placeholder="e.g., 181,000"
+                    placeholderTextColor="#777"
+                    keyboardType="numeric"
+                    inputMode="numeric"
+                    maxLength={12}
+                    returnKeyType="done"
+                    onSubmitEditing={saveVehicleMilesAndRecalc}
+                  />
+                  <TouchableOpacity style={styles.mileageSaveBtn} onPress={saveVehicleMilesAndRecalc}>
+                    <Text style={styles.mileageSaveText}>Save</Text>
+                  </TouchableOpacity>
+                </View>
+                {vehicleMiles ? (
+                  <Text style={styles.mileageBarHint}>Using {formatThousands(vehicleMiles)} mi for urgency.</Text>
+                ) : (
+                  <Text style={styles.mileageBarHint}>Set mileage to enable urgency colors.</Text>
+                )}
+              </View>
+
+              {/* Generate CTA (if needed) */}
+              {!hasGeneratedServices && (
+                <View style={{ paddingHorizontal: 16, marginBottom: 8 }}>
+                  <TouchableOpacity style={styles.generateButton} onPress={handleGeneratePress} disabled={isGenerating} activeOpacity={0.95}>
+                    <Text style={styles.addServiceText}>Generate Recommended Service Records</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* LIST */}
+              <ScrollView
+                ref={scrollViewRef}
+                contentContainerStyle={styles.scrollContent}
+                initialNumToRender={10}
+                windowSize={5}
+                keyboardShouldPersistTaps="handled"
+              >
+                {sortedServices.map((service) => {
+                  const isEditing = editingHeaderId === service.id;
+                  const severity = getSeverityForService(service, currentMilesNumber);
+                  const remaining = getRemainingMiles(service, currentMilesNumber);
+                  const severityStyle =
+                    severity === 'red' ? styles.serviceSevRed :
+                    severity === 'yellow' ? styles.serviceSevYellow :
+                    severity === 'green' ? styles.serviceSevGreen :
+                    styles.serviceLow;
+
+                  const dueText =
+                    service.dueDisplay && service.dueDisplay !== '—'
+                      ? `${service.dueDisplay}`
+                      : '—';
+
+                  let remainingText = '';
+                  if (remaining != null) {
+                    if (remaining <= 0) {
+                      remainingText = ` (OVERDUE by ${formatThousands(String(Math.abs(remaining)))} mi)`;
+                    } else {
+                      remainingText = ` (${formatThousands(String(remaining))} mi left)`;
+                    }
+                  } else if (!service.completedMileageNumber && !service.completedMileage) {
+                    remainingText = ' (log a completion to start tracking)';
+                  }
+
+                  return (
+                    <View key={service.id} style={[styles.serviceItem, severityStyle]}>
+                      {/* Header */}
+                      <View style={styles.serviceHeaderRow}>
+                        <View style={{ flex: 1, flexWrap: 'wrap' }}>
+                          <Text style={styles.serviceTitleText}>{service.text}</Text>
+                          <View style={styles.milesEditRow}>
+                            <Text style={styles.serviceSubLabel}>Interval: </Text>
+                            {isEditing ? (
+                              <>
+                                <TextInput
+                                  ref={headerMilesRef}
+                                  style={[styles.inlineInput, { paddingVertical: 4, minWidth: 90 }]}
+                                  value={tempHeaderMiles}
+                                  onChangeText={(t) => setTempHeaderMiles(formatThousands(t))}
+                                  placeholder="miles"
+                                  placeholderTextColor="#777"
+                                  keyboardType="numeric"
+                                  inputMode="numeric"
+                                  maxLength={12}
+                                  autoFocus
+                                  returnKeyType="done"
+                                  onSubmitEditing={() => saveIntervalInline(service.id)}
+                                />
+                                <Text style={styles.serviceSubLabel}> miles</Text>
+                                <TouchableOpacity style={[styles.smallBtn, { backgroundColor: '#4CAF50' }]} onPress={() => saveIntervalInline(service.id)}>
+                                  <Text style={styles.smallBtnText}>Save</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={[styles.smallBtn, { backgroundColor: '#FF5252' }]} onPress={() => { setEditingHeaderId(null); setTempHeaderMiles(''); }}>
+                                  <Text style={styles.smallBtnText}>Cancel</Text>
+                                </TouchableOpacity>
+                              </>
+                            ) : (
+                              <TouchableOpacity
+                                onPress={() => {
+                                  setEditingHeaderId(service.id);
+                                  setTempHeaderMiles(formatThousands(service.intervalMiles ?? ''));
+                                  setTimeout(() => headerMilesRef.current?.focus?.(), 30);
+                                }}
+                              >
+                                <Text style={styles.clickableMiles}>
+                                  {service.intervalMiles ? `${formatThousands(service.intervalMiles)} miles` : 'set miles'}
+                                </Text>
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        </View>
+
+                        <TouchableOpacity style={styles.deleteButton} onPress={() => {
+                          Alert.alert('Delete Service', 'Are you sure?', [
+                            { text: 'Cancel', style: 'cancel' },
+                            { text: 'Delete', style: 'destructive', onPress: () => {
+                              setServices((prev) => {
+                                const updated = prev.filter((s) => s.id !== service.id);
+                                saveServicesToStorage(updated);
+                                return updated;
+                              });
+                            }},
+                          ]);
+                        }}>
+                          <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* Due line */}
+                      <View style={{ marginTop: 4 }}>
+                        <Text style={styles.dueText}>
+                          Due: <Text style={styles.dueValue}>{dueText}</Text>
+                          <Text style={styles.dueRemaining}>{remainingText}</Text>
+                        </Text>
+                      </View>
+
+                      {/* Proof thumbnails */}
+                      {service.proofUris.length > 0 && (
+                        <ScrollView horizontal style={styles.proofRow} contentContainerStyle={styles.proofRowContent}>
+                          {service.proofUris.map((uri, index) => (
+                            <TouchableOpacity
+                              key={index}
+                              onPress={() => { setImageForServiceId(service.id); setCurrentIndex(index); setOverlay('image'); }}
+                              style={styles.thumbnailContainer}
+                              activeOpacity={0.7}
+                            >
+                              <Image source={{ uri }} style={styles.thumbnail} />
+                            </TouchableOpacity>
+                          ))}
+                        </ScrollView>
+                      )}
+
+                      {/* Details summary */}
+                      <View style={styles.detailsBox}>
+                        <Text style={styles.detailText}>Notes: {service.notes || 'N/A'}</Text>
+                        <Text style={styles.detailText}>
+                          Completed Mileage:{' '}
+                          {service.completedMileage || (service.completedMileageNumber != null ? formatThousands(service.completedMileageNumber) : 'N/A')}
+                        </Text>
+                        <Text style={styles.detailText}>Date: {service.date || 'N/A'}</Text>
+                      </View>
+
+                      {/* Actions */}
+                      <View style={styles.buttonRow}>
+                        {!service.completed ? (
+                          <>
+                            <TouchableOpacity style={styles.completeButton} onPress={() => handleMarkCompleted(service.id)}>
+                              <MaterialCommunityIcons name="check-circle-outline" size={16} color="#fff" />
+                              <Text style={styles.completeText}> Mark Completed</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={styles.completeButton} onPress={() => openEditDetails(service)}>
+                              <MaterialIcons name="edit" size={16} color="#fff" />
+                              <Text style={styles.completeText}> Edit Details</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={styles.completeButton} onPress={() => handleUploadProof(service.id)}>
+                              <MaterialCommunityIcons name="image-plus" size={16} color="#fff" />
+                              <Text style={styles.completeText}> Add Proof</Text>
+                            </TouchableOpacity>
+                          </>
+                        ) : (
+                          <>
+                            <TouchableOpacity style={styles.completeButton} onPress={() => openEditDetails(service)}>
+                              <MaterialIcons name="edit" size={16} color="#fff" />
+                              <Text style={styles.completeText}> Edit Details</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={styles.completeButton} onPress={() => handleUploadProof(service.id)}>
+                              <MaterialCommunityIcons name="plus-circle-outline" size={16} color="#fff" />
+                              <Text style={styles.completeText}> Add Proof</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={styles.completeButton} onPress={() => handleUnmarkCompleted(service.id)}>
+                              <MaterialCommunityIcons name="refresh" size={16} color="#fff" />
+                              <Text style={styles.completeText}> Unmark</Text>
+                            </TouchableOpacity>
+                          </>
+                        )}
+                      </View>
+                    </View>
+                  );
+                })}
+
+                <TouchableOpacity style={styles.addServiceButton} onPress={openCustomOverlay} disabled={isGenerating}>
+                  <Text style={styles.addServiceText}>+ Add Custom Service</Text>
+                </TouchableOpacity>
+              </ScrollView>
+
+              {/* ===================== OVERLAYS ===================== */}
+
+              {/* Prompt for current mileage */}
+              {overlay === 'prompt' && (
+                <View style={styles.overlay}>
+                  <View style={styles.overlayCard}>
+                    <Text style={[styles.decodingText, { marginBottom: 8 }]}>
+                      Enter current mileage for your {vehicleLabel}
+                    </Text>
+                    <TextInput
+                      style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
+                      value={formatThousands(promptMileage)}
+                      onChangeText={(t) => setPromptMileage(digitsOnly(t))}
+                      placeholder="e.g., 181000"
+                      placeholderTextColor="#777"
+                      keyboardType="numeric"
+                      inputMode="numeric"
+                      maxLength={12}
+                      autoFocus
+                      returnKeyType="done"
+                      onSubmitEditing={startGenerationAfterMileage}
+                    />
+                    <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
+                      <TouchableOpacity onPress={() => setOverlay(null)} style={styles.btnGrey}>
+                        <Text style={styles.btnText}>Cancel</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={startGenerationAfterMileage} style={styles.btnGreen} disabled={isGenerating}>
+                        <Text style={[styles.btnText, { fontWeight: '600' }]}>Continue</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                </View>
+              )}
+
+              {/* Thinking */}
+              {overlay === 'thinking' && (
+                <View style={styles.overlay}>
+                  <View style={styles.overlayCardCenter}>
+                    <Text style={styles.decodingText}>🔧 Torque is thinking…</Text>
+                    <ActivityIndicator size="large" color="#4CAF50" />
+                  </View>
+                </View>
+              )}
+
+              {/* Edit Details */}
+              {overlay === 'edit' && editService && (
+                <View style={styles.overlay}>
+                  <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '90%' }}>
+                    <View style={[styles.overlayCard, { width: '100%' }]}>
+                      <Text style={[styles.decodingText, { marginBottom: 8 }]}>Edit Details</Text>
+
+                      <Text style={{ color: '#ccc', marginTop: 6 }}>Notes</Text>
+                      <TextInput
+                        style={[styles.inlineInput, { width: '100%', marginTop: 6, minHeight: 80, textAlignVertical: 'top' }]}
+                        value={tempNotes}
+                        onChangeText={setTempNotes}
+                        placeholder="Part numbers, capacities, fluids, torque specs…"
+                        placeholderTextColor="#777"
+                        multiline
+                      />
+
+                      <Text style={{ color: '#ccc', marginTop: 12 }}>Completed Mileage</Text>
+                      <TextInput
+                        style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
+                        value={tempCompletedMileage}
+                        onChangeText={(t) => setTempCompletedMileage(formatThousands(t))}
+                        placeholder="e.g., 181,000"
+                        placeholderTextColor="#777"
+                        keyboardType="numeric"
+                        inputMode="numeric"
+                        maxLength={12}
+                      />
+
+                      <Text style={{ color: '#ccc', marginTop: 12 }}>Date</Text>
+                      <TouchableOpacity
+                        onPress={() => setShowDatePicker(true)}
+                        style={{ marginTop: 6, backgroundColor: '#222', padding: 10, borderRadius: 8 }}
+                      >
+                        <Text style={{ color: '#fff' }}>{tempDate || 'Select date'}</Text>
+                      </TouchableOpacity>
+
+                      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
+                        <TouchableOpacity onPress={() => { setOverlay(null); setEditService(null); }} style={styles.btnGrey}>
+                          <Text style={styles.btnText}>Cancel</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={saveEditDetails} style={styles.btnGreen}>
+                          <Text style={[styles.btnText, { fontWeight: '600' }]}>Save</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </KeyboardAvoidingView>
+
+                  <DatePicker
+                    modal
+                    open={showDatePicker}
+                    date={date}
+                    mode="date"
+                    onConfirm={(d) => {
+                      setShowDatePicker(false);
+                      setDate(d);
+                      setTempDate(formatDateDisplay(d));
+                    }}
+                    onCancel={() => setShowDatePicker(false)}
+                  />
+                </View>
+              )}
+
+              {/* Image Viewer */}
+              {overlay === 'image' && imageForServiceId && (
+                <View style={styles.overlay}>
+                  <View style={{ width: '95%', height: '80%', backgroundColor: '#000', borderRadius: 12, overflow: 'hidden' }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', padding: 10 }}>
+                      <TouchableOpacity onPress={() => { setOverlay(null); setImageForServiceId(null); }}>
+                        <Text style={{ color: '#fff', fontSize: 16 }}>Close</Text>
+                      </TouchableOpacity>
+                      <View style={{ flexDirection: 'row', gap: 12 }}>
+                        <TouchableOpacity
+                          onPress={() => {
+                            const svc = services.find((s) => s.id === imageForServiceId);
+                            const uri = svc?.proofUris?.[currentIndex];
+                            if (uri) downloadImage(uri);
+                          }}
+                        >
+                          <MaterialIcons name="file-download" size={22} color="#fff" />
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          onPress={() => {
+                            const svc = services.find((s) => s.id === imageForServiceId);
+                            if (!svc) return;
+                            deleteImage(imageForServiceId, currentIndex);
+                          }}
+                        >
+                          <MaterialCommunityIcons name="trash-can-outline" size={22} color="#fff" />
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+
+                    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                      {(() => {
+                        const svc = services.find((s) => s.id === imageForServiceId);
+                        const uri = svc?.proofUris?.[currentIndex];
+                        return uri ? (
+                          <Image source={{ uri }} resizeMode="contain" style={{ width: '100%', height: '100%' }} />
+                        ) : (
+                          <Text style={{ color: '#fff' }}>No image</Text>
+                        );
+                      })()}
+                    </View>
+
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', padding: 10 }}>
+                      <TouchableOpacity
+                        onPress={() => {
+                          const svc = services.find((s) => s.id === imageForServiceId);
+                          if (!svc) return;
+                          const next = (currentIndex - 1 + svc.proofUris.length) % svc.proofUris.length;
+                          setCurrentIndex(next);
+                        }}
+                      >
+                        <Text style={{ color: '#fff' }}>◀︎ Prev</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => {
+                          const svc = services.find((s) => s.id === imageForServiceId);
+                          if (!svc) return;
+                          const next = (currentIndex + 1) % svc.proofUris.length;
+                          setCurrentIndex(next);
+                        }}
+                      >
+                        <Text style={{ color: '#fff' }}>Next ▶︎</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                </View>
+              )}
+
+              {/* Add Custom Service */}
+              {overlay === 'custom' && (
+                <View style={styles.overlay}>
+                  <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '90%' }}>
+                    <View style={[styles.overlayCard, { width: '100%' }]}>
+                      <Text style={[styles.decodingText, { marginBottom: 8 }]}>Add Custom Service</Text>
+
+                      <Text style={{ color: '#ccc', marginTop: 6 }}>Title</Text>
+                      <TextInput
+                        style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
+                        value={customTitle}
+                        onChangeText={setCustomTitle}
+                        placeholder="e.g., Rear Differential Fluid Change"
+                        placeholderTextColor="#777"
+                      />
+
+                      <Text style={{ color: '#ccc', marginTop: 12 }}>Interval (miles)</Text>
+                      <TextInput
+                        style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
+                        value={customInterval}
+                        onChangeText={(t) => setCustomInterval(formatThousands(t))}
+                        placeholder="e.g., 3,000"
+                        placeholderTextColor="#777"
+                        keyboardType="numeric"
+                        inputMode="numeric"
+                        maxLength={12}
+                      />
+
+                      <Text style={{ color: '#ccc', marginTop: 12 }}>Priority</Text>
+                      <View style={styles.priorityRow}>
+                        {['low', 'medium', 'high'].map((p) => (
+                          <TouchableOpacity
+                            key={p}
+                            onPress={() => setCustomPriority(p)}
+                            style={[styles.prioBtn, customPriority === p && styles.prioBtnActive]}
+                          >
+                            <Text style={styles.prioText}>{p.toUpperCase()}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+
+                      <Text style={{ color: '#ccc', marginTop: 12 }}>Notes (optional)</Text>
+                      <TextInput
+                        style={[styles.inlineInput, { width: '100%', marginTop: 6, minHeight: 70, textAlignVertical: 'top' }]}
+                        value={customNotes}
+                        onChangeText={setCustomNotes}
+                        placeholder="Part numbers, capacities, fluid type/viscosity, etc."
+                        placeholderTextColor="#777"
+                        multiline
+                      />
+
+                      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
+                        <TouchableOpacity onPress={() => setOverlay(null)} style={styles.btnGrey}>
+                          <Text style={styles.btnText}>Cancel</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={saveCustomService} style={styles.btnGreen}>
+                          <Text style={[styles.btnText, { fontWeight: '600' }]}>Save</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </KeyboardAvoidingView>
+                </View>
+              )}
+            </View>
           </View>
         </KeyboardAvoidingView>
-      </Modal>
-
-      <Modal visible={showDecodingModal} transparent animationType="fade">
-        <View style={styles.decodingModal}>
-          <Text style={styles.decodingText}>🔧 Torque is generating the service intervals...</Text>
-          <ActivityIndicator size="large" color="#4CAF50" />
-        </View>
       </Modal>
     </>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    backgroundColor: '#333',
-    borderRadius: 12,
-    padding: 26,
-    alignItems: 'center',
-    marginVertical: 10,
-  },
-  label: {
-    color: '#aaa',
-    fontSize: 14,
-  },
-  mileage: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
-    marginVertical: 4,
-    textAlign: 'center',
-  },
-  modalWrapper: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.95)',
-    paddingTop: 50,
-    zIndex: 0,
-  },
-  scrollContent: {
-    flexGrow: 1,
-    paddingBottom: 20,
-  },
-  modalBox: {
-    backgroundColor: 'rgba(0,0,0,0.95)',
-    borderRadius: 20,
-    marginHorizontal: 16,
-    elevation: 10,
-    paddingBottom: 20,
-  },
-  headerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 10,
-    marginBottom: 16,
-  },
-  infoButton: {
-    padding: 10,
-  },
-  modalTitle: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: 'bold',
-    alignSelf: 'center',
-  },
-  serviceLabel: {
-    fontSize: 14,
-    color: '#FFD700',
-    marginBottom: 16,
-  },
-  serviceItem: {
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 10,
-  },
-  serviceHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  serviceText: {
-    color: '#fff',
-    fontSize: 16,
-    marginBottom: 4,
-    flex: 1,
-  },
-  deleteButton: {
-    backgroundColor: '#FF5252',
-    padding: 6,
-    borderRadius: 6,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  proofRow: {
-    marginTop: 8,
-  },
-  proofRowContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  thumbnailContainer: {
-    marginRight: 8,
-    borderRadius: 6,
-    width: 60,
-    height: 60,
-    zIndex: 100,
-    pointerEvents: 'auto',
-  },
-  thumbnail: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 6,
-  },
-  detailsBox: {
-    marginTop: 8,
-    backgroundColor: '#2b2b2b',
-    padding: 8,
-    borderRadius: 6,
-  },
-  detailText: {
-    color: '#ccc',
-    fontSize: 12,
-    marginBottom: 2,
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-start',
-    marginTop: 24,
-    flexWrap: 'wrap',
-  },
-  modalButton: {
-    flex: 1,
-    padding: 12,
-    borderRadius: 10,
-    marginHorizontal: 5,
-  },
-  modalButtonText: {
-    textAlign: 'center',
-    color: '#fff',
-    fontWeight: '600',
-  },
-  completeButton: {
-    backgroundColor: '#4CAF50',
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 6,
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginRight: 8,
-    marginBottom: 6,
-  },
-  completeText: {
-    color: '#fff',
-    fontSize: 12,
-    marginLeft: 5,
-  },
-  serviceCompleted: {
-    backgroundColor: '#2e7d32',
-  },
-  serviceHigh: {
-    backgroundColor: '#b71c1c',
-  },
-  serviceMedium: {
-    backgroundColor: '#fbc02d',
-  },
-  serviceLow: {
-    backgroundColor: '#424242',
-  },
-  inputField: {
-    backgroundColor: '#111',
-    color: '#fff',
-    padding: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#444',
-    fontSize: 14,
-    marginBottom: 12,
-  },
-  imageModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.9)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 2000,
-  },
-  imageScrollView: {
-    flex: 1,
-    width: '100%',
-  },
-  fullImageWrapper: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    width: Dimensions.get('window').width,
-    backgroundColor: '#000',
-  },
-  fullImage: {
-    width: '100%',
-    height: '80%',
-    maxHeight: Dimensions.get('window').height * 0.8,
-    backgroundColor: '#333',
-  },
-  closeIcon: {
-    position: 'absolute',
-    top: 40,
-    right: 20,
-    zIndex: 2010,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    borderRadius: 20,
-    padding: 10,
-  },
-  closeIconText: {
-    color: '#fff',
-    fontSize: 24,
-  },
-  imageActions: {
-    position: 'absolute',
-    bottom: 40,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    width: '100%',
-    paddingHorizontal: 20,
-    zIndex: 2010,
-  },
-  iconButtonLeft: {
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    padding: 10,
-    borderRadius: 30,
-  },
-  iconButtonRight: {
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    padding: 10,
-    borderRadius: 30,
-  },
-  errorText: {
-    color: '#fff',
-    fontSize: 16,
-    textAlign: 'center',
-  },
-  modalCloseIcon: {
-    position: 'absolute',
-    right: 5,
-    zIndex: 1000,
-    backgroundColor: '#fff',
-    width: 27,
-    height: 27,
-    borderRadius: 13.5,
-    alignItems: 'center',
-    justifyContent: 'center',
-    elevation: 4,
-  },
-  modalCloseText: {
-    color: '#000',
-    fontSize: 18,
-    fontWeight: 'bold',
-    lineHeight: 20,
-  },
-  addServiceButton: {
-    marginTop: 10,
-    marginBottom: 50,
-    alignSelf: 'center',
-    backgroundColor: '#4CAF50',
-    paddingVertical: 10,
-    paddingHorizontal: 36,
-    height: 40,
-    borderRadius: 10,
-    zIndex: 1000,
-  },
-  generateButton: {
-    marginTop: 10,
-    marginBottom: 20,
-    alignSelf: 'center',
-    backgroundColor: '#2196F3',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 10,
-    zIndex: 1000,
-  },
-  addServiceText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.95)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modalContent: {
-    backgroundColor: '#222',
-    borderRadius: 20,
-    padding: 20,
-    width: '90%',
-    maxHeight: '80%',
-  },
-  infoText: {
-    color: '#fff',
-    fontSize: 14,
-    marginBottom: 12,
-    lineHeight: 20,
-  },
-  disclaimerText: {
-    color: '#ccc',
-    fontSize: 12,
-    marginBottom: 12,
-    lineHeight: 18,
-    fontStyle: 'italic',
-  },
-  decodingModal: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+  container: { backgroundColor: '#333', borderRadius: 12, padding: 26, alignItems: 'center', marginVertical: 10 },
+  label: { color: '#aaa', fontSize: 14 },
+  mileage: { color: '#fff', fontSize: 18, fontWeight: '600', marginVertical: 4, textAlign: 'center' },
+
+  modalWrapper: { flex: 1, paddingTop: 50, backgroundColor: '#121212' },
+  scrollContent: { flexGrow: 1, paddingBottom: 20 },
+  modalBox: { backgroundColor: '#121212', borderRadius: 20, marginHorizontal: 16, elevation: 10, paddingBottom: 20 },
+
+  headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, marginBottom: 8, width: '100%' },
+  headerButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)', borderRadius: 22 },
+  modalTitle: { color: '#fff', fontSize: 20, fontWeight: 'bold', flex: 1, textAlign: 'center', marginHorizontal: 8 },
+  modalCloseText: { color: '#fff', fontSize: 20, fontWeight: 'bold', lineHeight: 22 },
+
+  // Vehicle mileage bar (not sticky)
+  mileageBar: { marginHorizontal: 16, marginBottom: 10, backgroundColor: '#1b1b1b', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#2b2b2b' },
+  mileageBarLabel: { color: '#eee', fontWeight: '600', marginBottom: 6 },
+  mileageInputRow: { flexDirection: 'row', alignItems: 'center' },
+  mileageSaveBtn: { backgroundColor: '#4CAF50', paddingVertical: 10, paddingHorizontal: 16, borderRadius: 8, marginLeft: 8 },
+  mileageSaveText: { color: '#fff', fontWeight: '600' },
+  mileageBarHint: { color: '#999', marginTop: 6, fontSize: 12 },
+
+  serviceItem: { borderRadius: 8, padding: 12, marginBottom: 10 },
+  serviceHeaderRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 },
+  serviceTitleText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  milesEditRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginTop: 4 },
+
+  serviceSubLabel: { color: '#ccc', fontSize: 13 },
+  clickableMiles: { color: '#FFD700', textDecorationLine: 'underline', fontSize: 13, paddingVertical: 2 },
+
+  inlineInput: { backgroundColor: '#111', color: '#fff', borderRadius: 8, borderWidth: 1, borderColor: '#444', paddingHorizontal: 10, minWidth: 90, marginHorizontal: 4 },
+
+  dueText: { color: '#ddd', fontSize: 12, flexWrap: 'wrap' },
+  dueValue: { color: '#fff' },
+  dueRemaining: { color: '#ccc' },
+
+  deleteButton: { backgroundColor: '#FF5252', padding: 6, borderRadius: 6, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
+
+  proofRow: { marginTop: 8 },
+  proofRowContent: { flexDirection: 'row', alignItems: 'center' },
+  thumbnailContainer: { marginRight: 8, borderRadius: 6, width: 60, height: 60, zIndex: 1 },
+  thumbnail: { width: '100%', height: '100%', borderRadius: 6 },
+
+  detailsBox: { marginTop: 8, backgroundColor: '#1e1e1e', padding: 8, borderRadius: 6 },
+  detailText: { color: '#ccc', fontSize: 12, marginBottom: 2 },
+
+  buttonRow: { flexDirection: 'row', justifyContent: 'flex-start', marginTop: 16, flexWrap: 'wrap' },
+  completeButton: { backgroundColor: '#4CAF50', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 6, flexDirection: 'row', alignItems: 'center', marginRight: 8, marginBottom: 6 },
+  completeText: { color: '#fff', fontSize: 12, marginLeft: 5 },
+
+  // Baseline color
+  serviceLow: { backgroundColor: '#424242' },
+
+  // Severity colors
+  serviceSevGreen: { backgroundColor: '#1f5f2a' },
+  serviceSevYellow: { backgroundColor: '#8d6e00' },
+  serviceSevRed: { backgroundColor: '#7f1d1d' },
+
+  addServiceButton: { marginTop: 10, marginBottom: 50, alignSelf: 'center', backgroundColor: '#4CAF50', paddingVertical: 10, paddingHorizontal: 36, height: 40, borderRadius: 10, zIndex: 1 },
+  generateButton: { alignSelf: 'flex-start', backgroundColor: '#2196F3', paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10, zIndex: 1 },
+  addServiceText: { color: '#fff', fontSize: 14, fontWeight: 'bold' },
+
+  decodingText: { color: '#fff', fontSize: 18, marginBottom: 20 },
+
+  smallBtn: { marginLeft: 8, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, alignSelf: 'center' },
+  smallBtnText: { color: '#fff', fontSize: 12, fontWeight: '600' },
+
+  // overlay shell
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 99999,
+    elevation: 99999,
     backgroundColor: 'rgba(0,0,0,0.85)',
-    zIndex: 9999,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 16,
   },
-  decodingText: {
-    color: '#fff',
-    fontSize: 18,
-    marginBottom: 20,
+  overlayCard: {
+    backgroundColor: '#111',
+    padding: 16,
+    borderRadius: 12,
+    width: '90%',
   },
-  headerRow: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  paddingHorizontal: 16,
-  marginBottom: 16,
-  width: '100%',
-},
-headerButton: {
-  width: 36,
-  height: 36,
-  alignItems: 'center',
-  justifyContent: 'center',
-  backgroundColor: 'rgba(255, 255, 255, 0.1)',
-  borderRadius: 22,
-},
-modalTitle: {
-  color: '#fff',
-  fontSize: 20,
-  fontWeight: 'bold',
-  flex: 1,
-  textAlign: 'center',
-  marginHorizontal: 8,
-},
-modalCloseText: {
-  color: '#fff',
-  fontSize: 20,
-  fontWeight: 'bold',
-  lineHeight: 22,
-},
+  overlayCardCenter: {
+    backgroundColor: 'transparent',
+    padding: 16,
+    borderRadius: 12,
+    width: '90%',
+    alignItems: 'center',
+  },
+
+  // overlay buttons
+  btnGrey: { paddingVertical: 10, paddingHorizontal: 16, marginRight: 8, backgroundColor: '#555', borderRadius: 8 },
+  btnGreen: { paddingVertical: 10, paddingHorizontal: 16, backgroundColor: '#4CAF50', borderRadius: 8 },
+  btnText: { color: '#fff' },
+
+  // custom priority buttons
+  priorityRow: { flexDirection: 'row', gap: 8, marginTop: 6 },
+  prioBtn: { backgroundColor: '#222', paddingVertical: 10, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: '#444' },
+  prioBtnActive: { backgroundColor: '#4CAF50', borderColor: '#4CAF50' },
+  prioText: { color: '#fff', fontWeight: '600', fontSize: 12 },
 });
