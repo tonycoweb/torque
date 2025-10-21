@@ -267,7 +267,7 @@ REQUIREMENTS (important):
 1) Output must be ONLY a JSON array of objects, no markdown.
 2) Each object MUST have:
    - "text": short service description ONLY (no numbers, no "miles", no "every", no hyphens)
-     ✓ Examples: "Oil Change", "Cabin Air Filter", "Brake Fluid", "Front Differential Fluid"
+     ✓ Examples: "Oil/Filter Change", "Cabin Air Filter", "Brake Fluid", "Front Differential Fluid"
      ✗ INVALID: "Oil Change - 7,500 miles", "Oil Change every 7,500 miles"
    - "priority": "high" | "medium" | "low"
    - "mileage": NUMBER interval in miles (omit if N/A)
@@ -275,14 +275,14 @@ REQUIREMENTS (important):
    - "applies": true|false (true only if this service actually applies to the given vehicle config)
 3) Include **a complete baseline list** appropriate for the powertrain:
    ENGINE/GENERAL:
-     - Oil Change, Oil Filter, Engine Air Filter, Cabin Air Filter, Spark Plugs (if non-diesel),
-       PCV Valve (if serviceable), Drive/Serpentine Belt, Timing Belt (if belt; if chain -> applies=false but include inspection),
-       Coolant, Brake Fluid, Battery Test, Tire Rotation, Alignment Check
+     - Oil/Filter Change, Engine Air Filter, Cabin Air Filter, Spark Plugs (if non-diesel),
+       PCV Valve (if serviceable), Drive/Serpentine Belt, Timing Belt inspect/replace (if belt; if chain -> applies=false but include inspection),
+       Coolant flush, Brake Fluid flush, Battery Test, Tire Rotation, Alignment Check
    FUEL:
      - Fuel Filter (only if serviceable—some are in-tank lifetime; set applies accordingly)
    TRANSMISSION/DRIVELINE:
      - Automatic Transmission Fluid (AT) or CVT/DCT/Manual (choose correct ONE), Transfer Case (if 4WD/AWD and applicable),
-       Front Differential, Rear Differential (applies based on drivetrain)
+       Front Differential service, Rear Differential service (applies based on drivetrain)
    CHASSIS/INSPECTION:
      - Brake Pads/Rotors Inspection, Suspension/Steering Inspection, Hoses & Clamps Check
 4) If something is **not applicable** (e.g., “Front Differential” on FWD cars, or “Fuel Filter” is non-serviceable), set "applies": false.

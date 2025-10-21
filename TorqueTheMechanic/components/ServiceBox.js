@@ -1,4 +1,4 @@
-// ServiceBox.js — auto-unmark after due; "Mark Completed" opens Edit overlay first; focus lock prevents jumping
+// ServiceBox.js — show mileage card only AFTER generation + refreshed CTA button styling + "Apply to vehicle" action
 import React, { useState, useEffect, useRef } from 'react';
 import { KeyboardAvoidingView, Platform, ActivityIndicator } from 'react-native';
 import DatePicker from 'react-native-date-picker';
@@ -13,7 +13,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { showRewardedAd, preloadRewardedAd } from '../components/RewardedAdManager';
 
-export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMileage }) {
+export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMileage, onRequestAddVehicle }) {
   const [modalVisible, setModalVisible] = useState(false);
 
   // data
@@ -24,13 +24,13 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
   const [vehicleMiles, setVehicleMiles] = useState('');
   const [vehicleMilesInput, setVehicleMilesInput] = useState('');
 
-  // interval inline edit
+  // interval inline edit (miles)
   const [editingHeaderId, setEditingHeaderId] = useState(null);
   const [tempHeaderMiles, setTempHeaderMiles] = useState('');
   const headerMilesRef = useRef(null);
 
   // overlays
-  const [overlay, setOverlay] = useState(null); // 'prompt' | 'thinking' | 'edit' | 'image' | 'custom' | null
+  const [overlay, setOverlay] = useState(null); // 'prompt' | 'thinking' | 'edit' | 'image' | 'custom' | 'editMonths' | null
   const [isGenerating, setIsGenerating] = useState(false);
 
   // prompt overlay
@@ -53,8 +53,13 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
   // custom service overlay
   const [customTitle, setCustomTitle] = useState('');
   const [customInterval, setCustomInterval] = useState('');
+  const [customMonths, setCustomMonths] = useState('');
   const [customPriority, setCustomPriority] = useState('low'); // 'low' | 'medium' | 'high'
   const [customNotes, setCustomNotes] = useState('');
+
+  // edit months overlay
+  const [monthsEditServiceId, setMonthsEditServiceId] = useState(null);
+  const [monthsInput, setMonthsInput] = useState('');
 
   const [cameraPermission, requestCameraPermission] = ImagePicker.useCameraPermissions();
   const [mediaPermission, requestMediaPermission] = ImagePicker.useMediaLibraryPermissions();
@@ -76,9 +81,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
       const dd = String(dateObj.getDate()).padStart(2, '0');
       const yyyy = dateObj.getFullYear();
       return `${mm}/${dd}/${yyyy}`;
-    } catch {
-      return 'N/A';
-    }
+    } catch { return 'N/A'; }
   };
 
   const getPrefillMileage = async () => {
@@ -91,21 +94,42 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
     return String(m || '');
   };
 
-  // Compute next due ONLY when we have a recorded completion mileage.
   const computeDueMiles = (svc) => {
     if (!svc.intervalMiles) return undefined;
     const completed = svc.completedMileageNumber ?? (svc.completedMileage ? parseInt(digitsOnly(svc.completedMileage), 10) : undefined);
-    if (!Number.isFinite(completed)) return undefined; // no completion recorded => unknown due
+    if (!Number.isFinite(completed)) return undefined;
     return completed + svc.intervalMiles;
+  };
+
+  const computeDueDateIso = (svc) => {
+    if (!svc.intervalMonths) return undefined;
+    const baseDateIso = svc.lastCompletedDate || null;
+    if (!baseDateIso) return undefined;
+    const base = new Date(baseDateIso);
+    if (isNaN(base.getTime())) return undefined;
+    const next = new Date(base);
+    next.setMonth(next.getMonth() + svc.intervalMonths);
+    return next.toISOString();
+  };
+
+  const daysUntil = (iso) => {
+    if (!iso) return undefined;
+    const now = new Date();
+    const due = new Date(iso);
+    if (isNaN(due.getTime())) return undefined;
+    const diff = Math.ceil((due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+    return diff;
   };
 
   const recalcAllDues = (arr) =>
     arr.map((svc) => {
       const due = computeDueMiles(svc);
+      const dueDate = computeDueDateIso(svc);
       return {
         ...svc,
         dueMilesNumber: due,
         dueDisplay: due ? `${formatThousands(String(due))} mi` : '—',
+        dueDateIso: dueDate,
       };
     });
 
@@ -117,30 +141,47 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
   };
 
   const getSeverityForService = (svc, currentMilesNumber) => {
-    if (!svc.completedMileageNumber && !svc.completedMileage) return 'red'; // assume due until first completion logged
-    if (!svc.intervalMiles || !currentMilesNumber) return 'neutral';
-    const remaining = getRemainingMiles(svc, currentMilesNumber);
-    if (remaining == null) return 'neutral';
-    if (remaining <= 0) return 'red';
-    const threshold = Math.max(500, Math.round(svc.intervalMiles * 0.2));
-    if (remaining <= threshold) return 'yellow';
-    return 'green';
+    const hasFirstCompletion = !!(svc.completedMileageNumber || svc.completedMileage || svc.lastCompletedDate);
+    if (!hasFirstCompletion) return 'red';
+
+    let mileSeverity = 'neutral';
+    if (svc.intervalMiles && currentMilesNumber) {
+      const remaining = getRemainingMiles(svc, currentMilesNumber);
+      if (remaining != null) {
+        if (remaining <= 0) mileSeverity = 'red';
+        else if (remaining <= Math.max(500, Math.round(svc.intervalMiles * 0.2))) mileSeverity = 'yellow';
+        else mileSeverity = 'green';
+      }
+    }
+
+    let timeSeverity = 'neutral';
+    if (svc.intervalMonths && svc.dueDateIso) {
+      const d = daysUntil(svc.dueDateIso);
+      if (d != null) {
+        if (d <= 0) timeSeverity = 'red';
+        else if (d <= Math.max(15, Math.round((svc.intervalMonths * 30) * 0.2))) timeSeverity = 'yellow';
+        else timeSeverity = 'green';
+      }
+    }
+
+    const order = { red: 3, yellow: 2, green: 1, neutral: 0 };
+    const worst = (a, b) => (order[b] > order[a] ? b : a);
+    return worst(mileSeverity, timeSeverity) === 'neutral' ? 'green' : worst(mileSeverity, timeSeverity);
   };
 
   const autoUnmarkIfOverdue = (arr, currentMilesNumber) => {
-    if (!currentMilesNumber) return arr;
     let changed = false;
+    const now = new Date();
     const next = arr.map((svc) => {
-      if (svc.completed && svc.dueMilesNumber && currentMilesNumber >= svc.dueMilesNumber) {
+      const overdueByMiles = svc.completed && svc.dueMilesNumber && currentMilesNumber && currentMilesNumber >= svc.dueMilesNumber;
+      const overdueByTime  = svc.completed && svc.dueDateIso && now >= new Date(svc.dueDateIso);
+      if (overdueByMiles || overdueByTime) {
         changed = true;
         return { ...svc, completed: false };
       }
       return svc;
     });
-    if (changed) {
-      // optional user feedback
-      // Alert.alert('Status Updated', 'One or more services are due again based on current mileage.');
-    }
+    if (changed) { /* optional toast */ }
     return next;
   };
 
@@ -155,6 +196,8 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
       if (!selectedVehicle?.id) {
         setServices([]); setHasGeneratedServices(false);
         setVehicleMiles(''); setVehicleMilesInput('');
+        setModalVisible(false);
+        setOverlay(null);
         return;
       }
       try {
@@ -177,7 +220,6 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
   }, [selectedVehicle]);
 
   useEffect(() => { if (modalVisible) { try { preloadRewardedAd(); } catch {} } }, [modalVisible]);
-
   useEffect(() => () => { if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current); }, []);
 
   const saveServicesToStorage = async (updated) => {
@@ -190,12 +232,18 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
 
   // ---------- generate flow ----------
   const handleGeneratePress = async () => {
+    if (!selectedVehicle?.id) {
+      if (onRequestAddVehicle) onRequestAddVehicle();
+      else Alert.alert('Add Vehicle', 'Add your vehicle first to generate a service report.');
+      return;
+    }
     const pm = await getPrefillMileage();
     setPromptMileage(pm ? String(pm) : '');
     setOverlay('prompt');
   };
 
   const startGenerationAfterMileage = async () => {
+    if (!selectedVehicle?.id) { setOverlay(null); return; }
     if (isGenerating) return;
     setOverlay('thinking');
     setIsGenerating(true);
@@ -233,6 +281,8 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
             ? String(item.priority).toLowerCase()
             : 'low',
           intervalMiles: Number.isFinite(Number(item.mileage)) ? Number(item.mileage) : undefined,
+          intervalMonths: Number.isFinite(Number(item.time_months)) ? Number(item.time_months) : undefined,
+          applies: Boolean(item.applies),
         }))
       : [];
 
@@ -241,6 +291,8 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
       text: s.text,
       priority: s.priority,
       intervalMiles: s.intervalMiles,
+      intervalMonths: s.intervalMonths,
+      applies: s.applies,
       completed: false,
       proofUris: [],
       notes: '',
@@ -248,8 +300,9 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
       completedMileageNumber: undefined,
       date: 'N/A',
       lastCompletedDate: undefined,
-      dueDisplay: '—',       // unknown until first completion is logged
+      dueDisplay: '—',
       dueMilesNumber: undefined,
+      dueDateIso: undefined,
     }));
 
     setServices(newServices);
@@ -264,13 +317,12 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
   };
 
   // ---------- mark complete / unmark ----------
-  // New UX: "Mark Completed" opens Edit overlay FIRST; we only set completed after user fills mileage/date.
   const handleMarkCompleted = (id) => {
     const svc = services.find((s) => s.id === id);
     if (!svc) return;
     setPendingCompleteServiceId(id);
-    setFocusLockServiceId(id);                 // prevent jumping while editing
-    openEditDetails(svc, { hint: true });     // show overlay
+    setFocusLockServiceId(id);
+    openEditDetails(svc, { hint: true });
   };
 
   const handleUnmarkCompleted = (id) => {
@@ -345,12 +397,10 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
   };
 
   // ---------- edit details overlay ----------
-  const openEditDetails = (service, opts = {}) => {
+  const openEditDetails = (service) => {
     setEditService(service);
     setTempNotes(service.notes || '');
-    const initial = service.completedMileageNumber != null
-      ? String(service.completedMileageNumber)
-      : service.completedMileage || '';
+    const initial = service.completedMileageNumber != null ? String(service.completedMileageNumber) : (service.completedMileage || '');
     setTempCompletedMileage(formatThousands(initial));
     setTempDate(service.lastCompletedDate ? formatDateDisplay(service.lastCompletedDate) : (service.date && service.date !== 'N/A' ? service.date : ''));
     setOverlay('edit');
@@ -383,18 +433,16 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
           lastCompletedDate: parsedDate ? parsedDate.toISOString() : (pendingCompleteServiceId === svc.id ? new Date().toISOString() : svc.lastCompletedDate),
         };
 
-        // If this save came from "Mark Completed", set completed=true now
         if (pendingCompleteServiceId === svc.id) next.completed = true;
 
-        // compute new due
-        const due = computeDueMiles(next);
-        next.dueMilesNumber = due;
-        next.dueDisplay = due ? `${formatThousands(String(due))} mi` : '—';
+        const dueM = computeDueMiles(next);
+        next.dueMilesNumber = dueM;
+        next.dueDisplay = dueM ? `${formatThousands(String(dueM))} mi` : '—';
+        next.dueDateIso = computeDueDateIso(next);
 
         return next;
       });
 
-      // auto-unmark if current mileage already past due
       const currentMilesNumber = parseInt(digitsOnly(vehicleMiles)) || undefined;
       const withAuto = autoUnmarkIfOverdue(recalcAllDues(updated), currentMilesNumber);
 
@@ -402,17 +450,13 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
       return withAuto;
     });
 
-    // clear states & keep focus stable until overlay closes
     setOverlay(null);
     setPendingCompleteServiceId(null);
     setEditService(null);
     setFocusLockServiceId(null);
-
-    // Optional UX toast:
-    // Alert.alert('Saved', 'Service details updated.');
   };
 
-  // ---------- interval inline save ----------
+  // ---------- interval inline save (miles) ----------
   const saveIntervalInline = (serviceId) => {
     const { value } = normalizeNumber(tempHeaderMiles);
     setServices((prev) => {
@@ -422,6 +466,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
         const due = computeDueMiles(updated[idx]);
         updated[idx].dueMilesNumber = due;
         updated[idx].dueDisplay = due ? `${formatThousands(String(due))} mi` : '—';
+        updated[idx].dueDateIso = computeDueDateIso(updated[idx]);
       }
       saveServicesToStorage(updated);
       return updated;
@@ -430,24 +475,61 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
     setTempHeaderMiles('');
   };
 
+  // ---------- months editor overlay ----------
+  const openMonthsEditor = (service) => {
+    setMonthsEditServiceId(service.id);
+    setMonthsInput(service.intervalMonths ? String(service.intervalMonths) : '');
+    setOverlay('editMonths');
+  };
+
+  const saveMonthsEdit = () => {
+    const n = parseInt(digitsOnly(monthsInput), 10);
+    setServices((prev) => {
+      const updated = prev.map((s) => {
+        if (s.id !== monthsEditServiceId) return s;
+        const next = { ...s, intervalMonths: Number.isFinite(n) ? n : undefined };
+        next.dueMilesNumber = computeDueMiles(next);
+        next.dueDisplay = next.dueMilesNumber ? `${formatThousands(String(next.dueMilesNumber))} mi` : '—';
+        next.dueDateIso = computeDueDateIso(next);
+        return next;
+      });
+      saveServicesToStorage(updated);
+      return updated;
+    });
+    setOverlay(null);
+    setMonthsEditServiceId(null);
+    setMonthsInput('');
+  };
+
   // ---------- custom service ----------
   const openCustomOverlay = () => {
+    if (!selectedVehicle?.id) {
+      if (onRequestAddVehicle) onRequestAddVehicle();
+      else Alert.alert('Add Vehicle', 'Add your vehicle first to add custom services.');
+      return;
+    }
     setCustomTitle('');
     setCustomInterval('');
+    setCustomMonths('');
     setCustomPriority('low');
     setCustomNotes('');
     setOverlay('custom');
   };
 
   const saveCustomService = () => {
+    if (!selectedVehicle?.id) { setOverlay(null); return; }
     if (!customTitle.trim()) return Alert.alert('Missing Title', 'Please enter a service title.');
     const { value: intervalVal } = normalizeNumber(customInterval);
+    const monthsVal = parseInt(digitsOnly(customMonths), 10);
+    const intervalMonths = Number.isFinite(monthsVal) ? monthsVal : undefined;
 
     const newService = {
       id: Date.now().toString(),
       text: customTitle.trim(),
       priority: customPriority,
       intervalMiles: intervalVal,
+      intervalMonths,
+      applies: true,
       completed: false,
       proofUris: [],
       notes: customNotes.trim(),
@@ -457,6 +539,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
       lastCompletedDate: undefined,
       dueDisplay: '—',
       dueMilesNumber: undefined,
+      dueDateIso: undefined,
     };
 
     const updated = [...services, newService];
@@ -468,14 +551,14 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
 
   // ---------- vehicle mileage bar ----------
   const saveVehicleMilesAndRecalc = async () => {
+    if (!selectedVehicle?.id) return;
     const { value } = normalizeNumber(vehicleMilesInput);
     const display = value ? String(value) : '';
     setVehicleMiles(display);
     setVehicleMilesInput(formatThousands(display));
     await persistVehicleMiles(display);
-    onUpdateVehicleCurrentMileage?.(value); // optional parent callback
+    onUpdateVehicleCurrentMileage?.(value);
 
-    // recalc dues and auto-unmark completed that became due
     setServices((prev) => {
       const withDues = recalcAllDues(prev);
       const currentMilesNumber = value || undefined;
@@ -493,13 +576,22 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
     setIsGenerating(false);
     setPendingCompleteServiceId(null);
     setFocusLockServiceId(null);
+    setMonthsEditServiceId(null);
+    setMonthsInput('');
     setModalVisible(false);
   };
 
-  // ---------- render ----------
-  // If we're editing, freeze list order by NOT resorting; otherwise keep the natural array order (no completed-at-bottom shuffle).
-  const listToRender = services; // keeping insertion order for stable UX
+  // ---------- APPLY SERVICE (new) ----------
+  const applyServiceToVehicle = (id) => {
+    setServices((prev) => {
+      const updated = prev.map((s) => (s.id === id ? { ...s, applies: true } : s));
+      saveServicesToStorage(updated);
+      return updated;
+    });
+  };
 
+  // ---------- render ----------
+  const listToRender = services;
   const vehicleLabel = (() => {
     const v = selectedVehicle || {};
     const year = v.year ? String(v.year) : '';
@@ -507,22 +599,44 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
     return base || 'vehicle';
   })();
   const currentMilesNumber = parseInt(digitsOnly(vehicleMiles)) || undefined;
+  const hasVehicle = !!selectedVehicle?.id;
 
   return (
     <>
-      <TouchableOpacity style={styles.container} onPress={() => setModalVisible(true)} disabled={isGenerating} activeOpacity={0.85}>
-        <Text style={styles.label}>Recommended Service:</Text>
-        <Text style={styles.mileage}>
-          {services.find((s) => !s.completed && s.priority === 'high')?.text ||
-            services.find((s) => !s.completed)?.text ||
-            `No pending service for your ${vehicleLabel}`}
-        </Text>
-        <MaterialIcons name="keyboard-arrow-down" size={24} color="#fff" />
-      </TouchableOpacity>
+      {/* ENTRY CARD */}
+      {hasVehicle ? (
+        <TouchableOpacity
+          style={styles.container}
+          onPress={() => setModalVisible(true)}
+          disabled={isGenerating}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.label}>Recommended Service:</Text>
+          <Text style={styles.mileage}>
+            {services.find((s) => !s.completed && s.priority === 'high')?.text ||
+              services.find((s) => !s.completed)?.text ||
+              `No pending service for your ${vehicleLabel}`}
+          </Text>
+          <MaterialIcons name="keyboard-arrow-down" size={24} color="#fff" />
+        </TouchableOpacity>
+      ) : (
+        <TouchableOpacity
+          style={[styles.container, styles.disabledContainer]}
+          onPress={() => {
+            if (onRequestAddVehicle) onRequestAddVehicle();
+            else Alert.alert('Add Your Vehicle', 'Add your vehicle to generate a service report.');
+          }}
+          activeOpacity={0.95}
+        >
+          <Text style={styles.label}>Recommended Service</Text>
+          <Text style={styles.mileage}>Add your vehicle to generate a service report</Text>
+          <MaterialIcons name="add-circle-outline" size={24} color="#fff" />
+        </TouchableOpacity>
+      )}
 
-      {/* FULL-SCREEN MAIN MODAL */}
+      {/* MAIN MODAL */}
       <Modal
-        visible={modalVisible}
+        visible={modalVisible && hasVehicle}
         transparent={false}
         animationType="slide"
         onRequestClose={closeAll}
@@ -547,39 +661,37 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 </TouchableOpacity>
               </View>
 
-              {/* Vehicle mileage bar */}
-              <View style={styles.mileageBar}>
-                <Text style={styles.mileageBarLabel}>Vehicle Mileage</Text>
-                <View style={styles.mileageInputRow}>
-                  <TextInput
-                    style={[styles.inlineInput, { flex: 1 }]}
-                    value={vehicleMilesInput}
-                    onChangeText={(t) => setVehicleMilesInput(formatThousands(t))}
-                    placeholder="e.g., 181,000"
-                    placeholderTextColor="#777"
-                    keyboardType="numeric"
-                    inputMode="numeric"
-                    maxLength={12}
-                    returnKeyType="done"
-                    onSubmitEditing={saveVehicleMilesAndRecalc}
-                  />
-                  <TouchableOpacity style={styles.mileageSaveBtn} onPress={saveVehicleMilesAndRecalc}>
-                    <Text style={styles.mileageSaveText}>Save</Text>
+              {/* ======= CTAs / Mileage ======= */}
+              {!hasGeneratedServices ? (
+                <View style={{ paddingHorizontal: 16, marginTop: 6, marginBottom: 6 }}>
+                  <TouchableOpacity style={styles.ctaBtnPrimary} onPress={handleGeneratePress} disabled={isGenerating} activeOpacity={0.95}>
+                    <Text style={styles.ctaBtnText}>Generate Recommended Service Records</Text>
                   </TouchableOpacity>
+                  <Text style={styles.ctaHint}>We’ll ask for your current mileage first.</Text>
                 </View>
-                {vehicleMiles ? (
-                  <Text style={styles.mileageBarHint}>Using {formatThousands(vehicleMiles)} mi for urgency.</Text>
-                ) : (
-                  <Text style={styles.mileageBarHint}>Set mileage to enable urgency colors.</Text>
-                )}
-              </View>
-
-              {/* Generate CTA (if needed) */}
-              {!hasGeneratedServices && (
-                <View style={{ paddingHorizontal: 16, marginBottom: 8 }}>
-                  <TouchableOpacity style={styles.generateButton} onPress={handleGeneratePress} disabled={isGenerating} activeOpacity={0.95}>
-                    <Text style={styles.addServiceText}>Generate Recommended Service Records</Text>
-                  </TouchableOpacity>
+              ) : (
+                <View style={styles.mileageCard}>
+                  <Text style={styles.mileageBarLabel}>Update current vehicle mileage</Text>
+                  <View style={styles.mileageInputRow}>
+                    <TextInput
+                      style={[styles.inlineInput, { flex: 1 }]}
+                      value={vehicleMilesInput}
+                      onChangeText={(t) => setVehicleMilesInput(formatThousands(t))}
+                      placeholder="e.g., 181,000"
+                      placeholderTextColor="#777"
+                      keyboardType="numeric"
+                      inputMode="numeric"
+                      maxLength={12}
+                      returnKeyType="done"
+                      onSubmitEditing={saveVehicleMilesAndRecalc}
+                    />
+                    <TouchableOpacity style={styles.mileageSaveBtn} onPress={saveVehicleMilesAndRecalc}>
+                      <Text style={styles.mileageSaveText}>Save</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <Text style={styles.mileageBarHint}>
+                    {vehicleMiles ? `Using ${formatThousands(vehicleMiles)} mi for urgency.` : 'Set mileage to enable urgency colors.'}
+                  </Text>
                 </View>
               )}
 
@@ -591,6 +703,15 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 windowSize={5}
                 keyboardShouldPersistTaps="handled"
               >
+                {/* Add Custom CTA near top as well (consistent) */}
+                {hasGeneratedServices && (
+                  <View style={{ paddingHorizontal: 16, marginBottom: 8 }}>
+                    <TouchableOpacity style={styles.ctaBtnSecondary} onPress={openCustomOverlay} activeOpacity={0.95}>
+                      <Text style={styles.ctaBtnText}>+ Add Custom Service</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+
                 {listToRender.map((service) => {
                   const isEditing = editingHeaderId === service.id;
                   const severity = getSeverityForService(service, currentMilesNumber);
@@ -601,30 +722,41 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                     severity === 'green' ? styles.serviceSevGreen :
                     styles.serviceLow;
 
-                  const dueText =
-                    service.dueDisplay && service.dueDisplay !== '—'
-                      ? `${service.dueDisplay}`
-                      : '—';
-
+                  const dueMilesText = service.dueDisplay && service.dueDisplay !== '—' ? service.dueDisplay : '—';
                   let remainingText = '';
                   if (remaining != null) {
-                    if (remaining <= 0) {
-                      remainingText = ` (OVERDUE by ${formatThousands(String(Math.abs(remaining)))} mi)`;
-                    } else {
-                      remainingText = ` (${formatThousands(String(remaining))} mi left)`;
-                    }
+                    remainingText = remaining <= 0
+                      ? ` (OVERDUE by ${formatThousands(String(Math.abs(remaining)))} mi)`
+                      : ` (${formatThousands(String(remaining))} mi left)`;
                   } else if (!service.completedMileageNumber && !service.completedMileage) {
                     remainingText = ' (log a completion to start tracking)';
                   }
 
+                  const daysLeft = daysUntil(service.dueDateIso);
+                  const dueDateText = service.dueDateIso ? formatDateDisplay(service.dueDateIso) : '—';
+                  let timeRemainingText = '';
+                  if (daysLeft != null) {
+                    timeRemainingText = daysLeft <= 0 ? ` (OVERDUE by ${Math.abs(daysLeft)} days)` : ` (${daysLeft} days left)`;
+                  }
+
+                  const muted = service.applies ? null : { opacity: 0.45 };
+
                   return (
-                    <View key={service.id} style={[styles.serviceItem, severityStyle]}>
+                    <View key={service.id} style={[styles.serviceItem, severityStyle, muted]}>
+                      {!service.applies && (
+                        <Text style={{ color: '#bbb', fontSize: 11, marginBottom: 4 }}>
+                          (Not applicable to this vehicle)
+                        </Text>
+                      )}
+
                       {/* Header */}
                       <View style={styles.serviceHeaderRow}>
                         <View style={{ flex: 1, flexWrap: 'wrap' }}>
                           <Text style={styles.serviceTitleText}>{service.text}</Text>
                           <View style={styles.milesEditRow}>
                             <Text style={styles.serviceSubLabel}>Interval: </Text>
+
+                            {/* Miles (editable inline) */}
                             {isEditing ? (
                               <>
                                 <TextInput
@@ -662,30 +794,66 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                                 </Text>
                               </TouchableOpacity>
                             )}
+
+                            {/* Time (months) */}
+                            <Text style={[styles.serviceSubLabel, { marginLeft: 8 }]}>
+                              • {service.intervalMonths ? `${service.intervalMonths} months` : 'set time'}
+                            </Text>
+                            <TouchableOpacity
+                              onPress={() => openMonthsEditor(service)}
+                              style={[styles.smallBtn, { backgroundColor: 'rgba(255,255,255,0.12)', marginLeft: 6 }]}
+                            >
+                              <Text style={styles.smallBtnText}>Edit</Text>
+                            </TouchableOpacity>
                           </View>
                         </View>
 
-                        <TouchableOpacity style={styles.deleteButton} onPress={() => {
-                          Alert.alert('Delete Service', 'Are you sure?', [
-                            { text: 'Cancel', style: 'cancel' },
-                            { text: 'Delete', style: 'destructive', onPress: () => {
-                              setServices((prev) => {
-                                const updated = prev.filter((s) => s.id !== service.id);
-                                saveServicesToStorage(updated);
-                                return updated;
-                              });
-                            }},
-                          ]);
-                        }}>
-                          <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
-                        </TouchableOpacity>
+                        {/* Right-side actions: Apply (if not applicable) + Delete */}
+                        <View style={styles.headerActions}>
+                          {!service.applies && (
+                            <TouchableOpacity
+                              style={styles.iconBtn}
+                              onPress={() =>
+                                Alert.alert(
+                                  'Apply Service',
+                                  'Apply this service to this vehicle?',
+                                  [
+                                    { text: 'Cancel', style: 'cancel' },
+                                    { text: 'Apply', onPress: () => applyServiceToVehicle(service.id) },
+                                  ]
+                                )
+                              }
+                              activeOpacity={0.85}
+                            >
+                              <MaterialCommunityIcons name="backup-restore" size={16} color="#fff" />
+                            </TouchableOpacity>
+                          )}
+
+                          <TouchableOpacity style={styles.deleteButton} onPress={() => {
+                            Alert.alert('Delete Service', 'Are you sure?', [
+                              { text: 'Cancel', style: 'cancel' },
+                              { text: 'Delete', style: 'destructive', onPress: () => {
+                                setServices((prev) => {
+                                  const updated = prev.filter((s) => s.id !== service.id);
+                                  saveServicesToStorage(updated);
+                                  return updated;
+                                });
+                              }},
+                            ]);
+                          }}>
+                            <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
+                          </TouchableOpacity>
+                        </View>
                       </View>
 
                       {/* Due line */}
                       <View style={{ marginTop: 4 }}>
                         <Text style={styles.dueText}>
-                          Due: <Text style={styles.dueValue}>{dueText}</Text>
+                          Due: <Text style={styles.dueValue}>{dueMilesText}</Text>
                           <Text style={styles.dueRemaining}>{remainingText}</Text>
+                          {'  '}•{'  '}
+                          <Text style={styles.dueValue}>{dueDateText}</Text>
+                          <Text style={styles.dueRemaining}>{timeRemainingText}</Text>
                         </Text>
                       </View>
 
@@ -753,22 +921,20 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                   );
                 })}
 
-                {/* Legacy bottom button */}
-                <View style={{ alignItems: 'center' }}>
-                  <TouchableOpacity style={styles.addServiceButton} onPress={openCustomOverlay} disabled={isGenerating}>
-                    <Text style={styles.addServiceText}>+ Add Custom Service</Text>
+                {/* Keep a second Add button near bottom for long lists */}
+                <View style={{ paddingHorizontal: 16, marginTop: 8, marginBottom: 120 }}>
+                  <TouchableOpacity style={styles.ctaBtnSecondary} onPress={openCustomOverlay} activeOpacity={0.95}>
+                    <Text style={styles.ctaBtnText}>+ Add Custom Service</Text>
                   </TouchableOpacity>
                 </View>
               </ScrollView>
 
-              {/* Floating Add FAB — always reachable */}
+              {/* Floating Add FAB */}
               <TouchableOpacity style={styles.addFab} onPress={openCustomOverlay} activeOpacity={0.9}>
                 <MaterialIcons name="add" size={26} color="#fff" />
               </TouchableOpacity>
 
               {/* ===================== OVERLAYS ===================== */}
-
-              {/* Prompt for current mileage */}
               {overlay === 'prompt' && (
                 <View style={styles.overlay}>
                   <View style={styles.overlayCard}>
@@ -800,17 +966,15 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 </View>
               )}
 
-              {/* Thinking */}
               {overlay === 'thinking' && (
                 <View style={styles.overlay}>
                   <View style={styles.overlayCardCenter}>
-                    <Text style={styles.decodingText}>🔧 Torque is thinking…</Text>
+                    <Text style={styles.decodingText}>🔧 Torque is generating recommendations…</Text>
                     <ActivityIndicator size="large" color="#4CAF50" />
                   </View>
                 </View>
               )}
 
-              {/* Edit Details */}
               {overlay === 'edit' && editService && (
                 <View style={styles.overlay}>
                   <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '90%' }}>
@@ -878,11 +1042,9 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 </View>
               )}
 
-              {/* Image Viewer — nice UI with chevrons & pager */}
               {overlay === 'image' && imageForServiceId && (
                 <View style={styles.overlay}>
                   <View style={styles.viewerShell}>
-                    {/* Top bar */}
                     <View style={styles.viewerTopBar}>
                       <TouchableOpacity onPress={() => { setOverlay(null); setImageForServiceId(null); }}>
                         <Text style={styles.viewerTopBarText}>Close</Text>
@@ -913,7 +1075,6 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                       </View>
                     </View>
 
-                    {/* Image */}
                     <View style={styles.viewerImageWrap}>
                       {(() => {
                         const svc = services.find((s) => s.id === imageForServiceId);
@@ -926,7 +1087,6 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                       })()}
                     </View>
 
-                    {/* Left/Right chevrons (hide if single image) */}
                     {(() => {
                       const svc = services.find((s) => s.id === imageForServiceId);
                       const total = svc?.proofUris?.length || 0;
@@ -935,26 +1095,18 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                         <>
                           <TouchableOpacity
                             style={[styles.chevron, { left: 10 }]}
-                            onPress={() => {
-                              const next = (currentIndex - 1 + total) % total;
-                              setCurrentIndex(next);
-                            }}
+                            onPress={() => setCurrentIndex((i) => (i - 1 + total) % total)}
                             activeOpacity={0.8}
                           >
                             <MaterialIcons name="chevron-left" size={38} color="#fff" />
                           </TouchableOpacity>
                           <TouchableOpacity
                             style={[styles.chevron, { right: 10 }]}
-                            onPress={() => {
-                              const next = (currentIndex + 1) % total;
-                              setCurrentIndex(next);
-                            }}
+                            onPress={() => setCurrentIndex((i) => (i + 1) % total)}
                             activeOpacity={0.8}
                           >
                             <MaterialIcons name="chevron-right" size={38} color="#fff" />
                           </TouchableOpacity>
-
-                          {/* Pager */}
                           <View style={styles.pager}>
                             <Text style={styles.pagerText}>{currentIndex + 1}/{total}</Text>
                           </View>
@@ -965,7 +1117,35 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 </View>
               )}
 
-              {/* Add Custom Service */}
+              {overlay === 'editMonths' && (
+                <View style={styles.overlay}>
+                  <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '90%' }}>
+                    <View style={[styles.overlayCard, { width: '100%' }]}>
+                      <Text style={[styles.decodingText, { marginBottom: 8 }]}>Interval (Months)</Text>
+                      <TextInput
+                        style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
+                        value={monthsInput}
+                        onChangeText={(t) => setMonthsInput(digitsOnly(t))}
+                        placeholder="e.g., 6"
+                        placeholderTextColor="#777"
+                        keyboardType="numeric"
+                        inputMode="numeric"
+                        maxLength={3}
+                        autoFocus
+                      />
+                      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
+                        <TouchableOpacity onPress={() => { setOverlay(null); setMonthsEditServiceId(null); setMonthsInput(''); }} style={styles.btnGrey}>
+                          <Text style={styles.btnText}>Cancel</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={saveMonthsEdit} style={styles.btnGreen}>
+                          <Text style={[styles.btnText, { fontWeight: '600' }]}>Save</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </KeyboardAvoidingView>
+                </View>
+              )}
+
               {overlay === 'custom' && (
                 <View style={styles.overlay}>
                   <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '90%' }}>
@@ -991,6 +1171,18 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                         keyboardType="numeric"
                         inputMode="numeric"
                         maxLength={12}
+                      />
+
+                      <Text style={{ color: '#ccc', marginTop: 12 }}>Interval (months)</Text>
+                      <TextInput
+                        style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
+                        value={customMonths}
+                        onChangeText={(t) => setCustomMonths(digitsOnly(t))}
+                        placeholder="e.g., 24"
+                        placeholderTextColor="#777"
+                        keyboardType="numeric"
+                        inputMode="numeric"
+                        maxLength={3}
                       />
 
                       <Text style={{ color: '#ccc', marginTop: 12 }}>Priority</Text>
@@ -1036,8 +1228,12 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
   );
 }
 
+const BLUE = '#3b82f6';
+const GREEN = '#22c55e';
+
 const styles = StyleSheet.create({
   container: { backgroundColor: '#333', borderRadius: 12, padding: 26, alignItems: 'center', marginVertical: 10 },
+  disabledContainer: { backgroundColor: '#2d2d2d', borderColor: '#666', borderWidth: 1 },
   label: { color: '#aaa', fontSize: 14 },
   mileage: { color: '#fff', fontSize: 18, fontWeight: '600', marginVertical: 4, textAlign: 'center' },
 
@@ -1050,49 +1246,93 @@ const styles = StyleSheet.create({
   modalTitle: { color: '#fff', fontSize: 20, fontWeight: 'bold', flex: 1, textAlign: 'center', marginHorizontal: 8 },
   modalCloseText: { color: '#fff', fontSize: 20, fontWeight: 'bold', lineHeight: 22 },
 
-  mileageBar: { marginHorizontal: 16, marginBottom: 10, backgroundColor: '#1b1b1b', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#2b2b2b' },
-  mileageBarLabel: { color: '#eee', fontWeight: '600', marginBottom: 6 },
+  // CTAs
+  ctaBtnPrimary: {
+    backgroundColor: BLUE,
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 6,
+  },
+  ctaBtnSecondary: {
+    backgroundColor: GREEN,
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 5,
+  },
+  ctaBtnText: { color: '#0b1220', fontSize: 16, fontWeight: '800' },
+  ctaHint: { color: '#9aa5b1', fontSize: 12, marginTop: 8, marginLeft: 4 },
+
+  // Mileage "card" (only after generation)
+  mileageCard: {
+    marginHorizontal: 16,
+    marginTop: 6,
+    marginBottom: 6,
+    backgroundColor: '#1b1b1b',
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#2b2b2b',
+  },
+  mileageBarLabel: { color: '#eee', fontWeight: '700', marginBottom: 6, fontSize: 14.5 },
   mileageInputRow: { flexDirection: 'row', alignItems: 'center' },
-  mileageSaveBtn: { backgroundColor: '#4CAF50', paddingVertical: 10, paddingHorizontal: 16, borderRadius: 8, marginLeft: 8 },
-  mileageSaveText: { color: '#fff', fontWeight: '600' },
+  mileageSaveBtn: { backgroundColor: GREEN, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10, marginLeft: 8 },
+  mileageSaveText: { color: '#0b1220', fontWeight: '800' },
   mileageBarHint: { color: '#999', marginTop: 6, fontSize: 12 },
 
-  serviceItem: { borderRadius: 8, padding: 12, marginBottom: 10 },
+  // List + items
+  serviceItem: { borderRadius: 10, padding: 12, marginBottom: 10 },
   serviceHeaderRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 },
-  serviceTitleText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  serviceTitleText: { color: '#fff', fontSize: 16, fontWeight: '700' },
   milesEditRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginTop: 4 },
 
   serviceSubLabel: { color: '#ccc', fontSize: 13 },
   clickableMiles: { color: '#FFD700', textDecorationLine: 'underline', fontSize: 13, paddingVertical: 2 },
 
-  inlineInput: { backgroundColor: '#111', color: '#fff', borderRadius: 8, borderWidth: 1, borderColor: '#444', paddingHorizontal: 10, minWidth: 90, marginHorizontal: 4 },
+  inlineInput: { backgroundColor: '#111', color: '#fff', borderRadius: 10, borderWidth: 1, borderColor: '#444', paddingHorizontal: 10, minWidth: 90, marginHorizontal: 4 },
 
   dueText: { color: '#ddd', fontSize: 12, flexWrap: 'wrap' },
   dueValue: { color: '#fff' },
   dueRemaining: { color: '#ccc' },
 
-  deleteButton: { backgroundColor: '#FF5252', padding: 6, borderRadius: 6, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  iconBtn: {
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    padding: 6,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  deleteButton: { backgroundColor: '#FF5252', padding: 6, borderRadius: 8, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
 
   proofRow: { marginTop: 8 },
   proofRowContent: { flexDirection: 'row', alignItems: 'center' },
-  thumbnailContainer: { marginRight: 8, borderRadius: 6, width: 60, height: 60, zIndex: 1 },
-  thumbnail: { width: '100%', height: '100%', borderRadius: 6 },
+  thumbnailContainer: { marginRight: 8, borderRadius: 8, width: 60, height: 60, zIndex: 1 },
+  thumbnail: { width: '100%', height: '100%', borderRadius: 8 },
 
-  detailsBox: { marginTop: 8, backgroundColor: '#1e1e1e', padding: 8, borderRadius: 6 },
+  detailsBox: { marginTop: 8, backgroundColor: '#1e1e1e', padding: 8, borderRadius: 8 },
   detailText: { color: '#ccc', fontSize: 12, marginBottom: 2 },
 
   buttonRow: { flexDirection: 'row', justifyContent: 'flex-start', marginTop: 16, flexWrap: 'wrap' },
-  completeButton: { backgroundColor: '#4CAF50', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 6, flexDirection: 'row', alignItems: 'center', marginRight: 8, marginBottom: 6 },
-  completeText: { color: '#fff', fontSize: 12, marginLeft: 5 },
+  completeButton: { backgroundColor: '#4CAF50', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, flexDirection: 'row', alignItems: 'center', marginRight: 8, marginBottom: 6 },
+  completeText: { color: '#fff', fontSize: 12.5, fontWeight: '600', marginLeft: 5 },
 
   serviceLow: { backgroundColor: '#424242' },
   serviceSevGreen: { backgroundColor: '#1f5f2a' },
   serviceSevYellow: { backgroundColor: '#8d6e00' },
   serviceSevRed: { backgroundColor: '#7f1d1d' },
-
-  addServiceButton: { marginTop: 10, alignSelf: 'center', backgroundColor: '#4CAF50', paddingVertical: 10, paddingHorizontal: 36, height: 40, borderRadius: 10, zIndex: 1 },
-  generateButton: { alignSelf: 'flex-start', backgroundColor: '#2196F3', paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10, zIndex: 1 },
-  addServiceText: { color: '#fff', fontSize: 14, fontWeight: 'bold' },
 
   addFab: {
     position: 'absolute',
@@ -1101,7 +1341,7 @@ const styles = StyleSheet.create({
     width: 56,
     height: 56,
     borderRadius: 28,
-    backgroundColor: '#4CAF50',
+    backgroundColor: GREEN,
     alignItems: 'center',
     justifyContent: 'center',
     elevation: 8,
@@ -1125,19 +1365,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 16,
   },
-  overlayCard: {
-    backgroundColor: '#111',
-    padding: 16,
-    borderRadius: 12,
-    width: '90%',
-  },
-  overlayCardCenter: {
-    backgroundColor: 'transparent',
-    padding: 16,
-    borderRadius: 12,
-    width: '90%',
-    alignItems: 'center',
-  },
+  overlayCard: { backgroundColor: '#111', padding: 16, borderRadius: 12, width: '90%' },
+  overlayCardCenter: { backgroundColor: 'transparent', padding: 16, borderRadius: 12, width: '90%', alignItems: 'center' },
 
   btnGrey: { paddingVertical: 10, paddingHorizontal: 16, marginRight: 8, backgroundColor: '#555', borderRadius: 8 },
   btnGreen: { paddingVertical: 10, paddingHorizontal: 16, backgroundColor: '#4CAF50', borderRadius: 8 },
@@ -1146,50 +1375,16 @@ const styles = StyleSheet.create({
   priorityRow: { flexDirection: 'row', gap: 8, marginTop: 6 },
   prioBtn: { backgroundColor: '#222', paddingVertical: 10, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: '#444' },
   prioBtnActive: { backgroundColor: '#4CAF50', borderColor: '#4CAF50' },
-  prioText: { color: '#fff', fontWeight: '600', fontSize: 12 },
+  prioText: { color: '#fff', fontWeight: '700', fontSize: 12 },
 
-  viewerShell: {
-    width: '95%',
-    height: '82%',
-    backgroundColor: '#080808',
-    borderRadius: 14,
-    overflow: 'hidden',
-    borderColor: '#222',
-    borderWidth: 1,
-  },
-  viewerTopBar: {
-    height: 46,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    borderBottomColor: '#111',
-    borderBottomWidth: 1,
-  },
+  viewerShell: { width: '95%', height: '82%', backgroundColor: '#080808', borderRadius: 14, overflow: 'hidden', borderColor: '#222', borderWidth: 1 },
+  viewerTopBar: { height: 46, backgroundColor: 'rgba(0,0,0,0.55)', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 12, borderBottomColor: '#111', borderBottomWidth: 1 },
   viewerTopBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 4, backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 8 },
   viewerTopBarText: { color: '#fff', fontSize: 14 },
   viewerImageWrap: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
   viewerImage: { width: '100%', height: '100%' },
 
-  chevron: {
-    position: 'absolute',
-    top: '45%',
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pager: {
-    position: 'absolute',
-    bottom: 10,
-    alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 12,
-  },
+  chevron: { position: 'absolute', top: '45%', backgroundColor: 'rgba(0,0,0,0.45)', width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
+  pager: { position: 'absolute', bottom: 10, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.45)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12 },
   pagerText: { color: '#fff', fontSize: 12 },
 });

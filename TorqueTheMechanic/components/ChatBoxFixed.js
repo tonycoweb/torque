@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+// ChatBoxFixed.js
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   TextInput,
@@ -6,49 +7,90 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
-  Dimensions,
+  Keyboard,
 } from 'react-native';
 import { Ionicons, MaterialIcons, Entypo } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 
-export default function ChatBoxFixed({ onSend, onAttachImage, onAttachDocument, onFocus }) {
+export default function ChatBoxFixed({
+  onSend,
+  onAttachImage,
+  onAttachDocument,
+  onFocus,
+  onOpenSavedNotes,     // open saved chats/notes panel
+  onMeasuredHeight,     // report measured height to parent
+}) {
   const [inputText, setInputText] = useState('');
+  const [selfHeight, setSelfHeight] = useState(0);
+  const inputRef = useRef(null);
+
+  // report height changes up to parent
+  useEffect(() => {
+    if (selfHeight && onMeasuredHeight) onMeasuredHeight(selfHeight);
+  }, [selfHeight, onMeasuredHeight]);
+
+  const handleLayout = (e) => {
+    const h = e.nativeEvent.layout.height;
+    if (Math.abs(h - selfHeight) > 1) setSelfHeight(h);
+  };
 
   const handleSend = () => {
-    if (inputText.trim()) {
-      onSend(inputText.trim());
-      setInputText('');
-    }
+    const text = inputText.trim();
+    if (!text) return;
+    onSend && onSend(text);
+    setInputText('');
+    inputRef.current?.blur();
+    Keyboard.dismiss();
   };
 
   const handlePickImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
       quality: 0.8,
     });
-    if (!result.canceled) {
-      onAttachImage && onAttachImage(result.assets[0].uri);
-    }
+    if (!result.canceled) onAttachImage && onAttachImage(result.assets?.[0]?.uri);
   };
 
-  const handleAttachDocument = () => {
-    console.log('Attach button pressed (implement document picker here)');
-    onAttachDocument && onAttachDocument({ name: 'sample_document.pdf' });
-  };
-
-  const handleMicrophone = () => {
-    console.log('Microphone button pressed (implement voice-to-text here)');
-  };
+  const handleAttachDocument = () => onAttachDocument && onAttachDocument({ name: 'sample_document.pdf' });
+  const handleMicrophone = () => { /* hook up voice-to-text here */ };
 
   return (
     <KeyboardAvoidingView
+      onLayout={handleLayout}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={60}
-      style={styles.chatBoxContainer}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 6 : 0}
+      style={styles.container}
     >
-      <View style={styles.textInputArea}>
+      {/* Toolbar ABOVE the input (includes Saved Notes button) */}
+      <View style={styles.toolbar}>
+        <TouchableOpacity onPress={handleMicrophone} style={styles.toolBtn} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+          <Ionicons name="mic-outline" size={21} color="#aaa" />
+        </TouchableOpacity>
+
+        <TouchableOpacity onPress={handleAttachDocument} style={styles.toolBtn} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+          <Entypo name="attachment" size={21} color="#aaa" />
+        </TouchableOpacity>
+
+        <TouchableOpacity onPress={handlePickImage} style={styles.toolBtn} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+          <Ionicons name="image-outline" size={21} color="#aaa" />
+        </TouchableOpacity>
+
+        <View style={{ flex: 1 }} />
+
+        <TouchableOpacity
+          onPress={onOpenSavedNotes}
+          style={[styles.toolBtn, styles.notesBtn]}
+          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+        >
+          <Ionicons name="document-text-outline" size={20} color="#cbd5e1" />
+        </TouchableOpacity>
+      </View>
+
+      {/* Input with SEND embedded bottom-right */}
+      <View style={styles.inputWrap}>
         <TextInput
-          placeholder="Message Torque..."
+          ref={inputRef}
+          placeholder="Message Torque…"
           placeholderTextColor="#aaa"
           multiline
           value={inputText}
@@ -56,24 +98,12 @@ export default function ChatBoxFixed({ onSend, onAttachImage, onAttachDocument, 
           style={styles.textInput}
           underlineColorAndroid="transparent"
           onFocus={onFocus}
+          blurOnSubmit={false}
+          returnKeyType="send"
+          onSubmitEditing={handleSend}
         />
-      </View>
-
-      <View style={styles.iconsRow}>
-        <TouchableOpacity onPress={handleMicrophone} style={styles.iconButton}>
-          <Ionicons name="mic-outline" size={24} color="#aaa" />
-        </TouchableOpacity>
-
-        <TouchableOpacity onPress={handleAttachDocument} style={styles.iconButton}>
-          <Entypo name="attachment" size={24} color="#aaa" />
-        </TouchableOpacity>
-
-        <TouchableOpacity onPress={handlePickImage} style={styles.iconButton}>
-          <Ionicons name="image-outline" size={24} color="#aaa" />
-        </TouchableOpacity>
-
-        <TouchableOpacity onPress={handleSend} style={styles.sendButton}>
-          <MaterialIcons name="send" size={22} color="#fff" />
+        <TouchableOpacity style={styles.sendFab} onPress={handleSend} activeOpacity={0.9}>
+          <MaterialIcons name="send" size={20} color="#fff" />
         </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
@@ -81,49 +111,49 @@ export default function ChatBoxFixed({ onSend, onAttachImage, onAttachDocument, 
 }
 
 const styles = StyleSheet.create({
-  chatBoxContainer: {
-    width: '100%',
-    height: Dimensions.get('window').height * 0.26,
+  container: {
     backgroundColor: '#121212',
-    paddingHorizontal: 12,
-    borderTopLeftRadius: 15,
-    borderTopRightRadius: 15,
-    borderColor: '#333',
+    paddingHorizontal: 10,
+    paddingTop: 16,
+    paddingBottom: Platform.OS === 'ios' ? 16 : 16,
     borderTopWidth: 1,
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 6,
-    paddingVertical: 8,
+    borderTopColor: '#2b2b2b',
+    marginBottom: 33,
   },
-  textInputArea: {
-    flex: 1,
-    backgroundColor: '#1f1f1f',
-    borderRadius: 20,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    marginBottom: 8,
-  },
-  textInput: {
-    flex: 1,
-    color: '#fff',
-    fontSize: 16,
-    textAlignVertical: 'top',
-  },
-  iconsRow: {
+  toolbar: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingBottom: 24,
+    gap: 10,
+    paddingBottom: 6,
   },
-  iconButton: {
+  toolBtn: {
     padding: 6,
-    marginRight: 4,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 10,
   },
-  sendButton: {
+  notesBtn: { backgroundColor: 'rgba(76,175,80,0.15)' },
+  inputWrap: {
+    position: 'relative',
+    minHeight: 46,
+    maxHeight: 150,
+    backgroundColor: '#1f1f1f',
+    borderRadius: 18,
+    paddingRight: 44, // room for send
+    paddingLeft: 12,
+    paddingTop: 8,
+    paddingBottom: 8,
+  },
+  textInput: { color: '#fff', fontSize: 16, textAlignVertical: 'top', marginBottom: 33 },
+  sendFab: {
+    position: 'absolute',
+    right: 6,
+    bottom: 6,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     backgroundColor: '#4CAF50',
-    padding: 10,
-    borderRadius: 20,
-    marginLeft: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 3,
   },
 });
