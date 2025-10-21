@@ -245,6 +245,7 @@ Expected keys:
   }
 });
 
+// --- REPLACE your /generate-service-recommendations handler with this ---
 app.post('/generate-service-recommendations', async (req, res) => {
   const { vehicle, currentMileage } = req.body;
   if (!vehicle || !vehicle.year || !vehicle.make || !vehicle.model) {
@@ -260,20 +261,35 @@ app.post('/generate-service-recommendations', async (req, res) => {
           {
             role: 'system',
             content: `
-You are a certified master mechanic. Generate a maintenance schedule by using vehicles specific user manual specs, and 
-online trusted sources while double checking for accuracy.
+You are a certified master mechanic building a factory-style maintenance plan that combines mileage **and** time intervals.
 
-STRICT OUTPUT SHAPE:
-- "text": a SHORT SERVICE DESCRIPTION ONLY (no numbers, no "miles", no "every", no hyphenated intervals).
-  Examples of valid text: "Oil Change", "Cabin Air Filter", "Timing Belt"
-  INVALID examples: "Oil Change - 7,500 miles", "Oil Change every 7,500 miles".
-- "priority": "high" | "medium" | "low"
-- "mileage": the recommended interval in miles as a NUMBER (e.g., 7500)
-
-NO extra fields (no parts, no notes, no units). Return ONLY JSON array.
-
-Priority can consider currentMileage if provided; otherwise base on severity & typical intervals.
-Return only valid JSON. No markdown.
+REQUIREMENTS (important):
+1) Output must be ONLY a JSON array of objects, no markdown.
+2) Each object MUST have:
+   - "text": short service description ONLY (no numbers, no "miles", no "every", no hyphens)
+     ✓ Examples: "Oil Change", "Cabin Air Filter", "Brake Fluid", "Front Differential Fluid"
+     ✗ INVALID: "Oil Change - 7,500 miles", "Oil Change every 7,500 miles"
+   - "priority": "high" | "medium" | "low"
+   - "mileage": NUMBER interval in miles (omit if N/A)
+   - "time_months": NUMBER interval in months (omit if N/A)
+   - "applies": true|false (true only if this service actually applies to the given vehicle config)
+3) Include **a complete baseline list** appropriate for the powertrain:
+   ENGINE/GENERAL:
+     - Oil Change, Oil Filter, Engine Air Filter, Cabin Air Filter, Spark Plugs (if non-diesel),
+       PCV Valve (if serviceable), Drive/Serpentine Belt, Timing Belt (if belt; if chain -> applies=false but include inspection),
+       Coolant, Brake Fluid, Battery Test, Tire Rotation, Alignment Check
+   FUEL:
+     - Fuel Filter (only if serviceable—some are in-tank lifetime; set applies accordingly)
+   TRANSMISSION/DRIVELINE:
+     - Automatic Transmission Fluid (AT) or CVT/DCT/Manual (choose correct ONE), Transfer Case (if 4WD/AWD and applicable),
+       Front Differential, Rear Differential (applies based on drivetrain)
+   CHASSIS/INSPECTION:
+     - Brake Pads/Rotors Inspection, Suspension/Steering Inspection, Hoses & Clamps Check
+4) If something is **not applicable** (e.g., “Front Differential” on FWD cars, or “Fuel Filter” is non-serviceable), set "applies": false.
+   Still include it (so the app can be consistent), but with applies=false.
+5) Choose realistic factory-like intervals (miles **and** months when known). Prefer both; if time is unknown, omit time_months.
+6) Consider currentMileage for priority ranking only; do NOT bake mileage numbers into "text".
+7) Return ONLY clean JSON array. No explanations. No extra keys.
             `.trim(),
           },
           {
@@ -281,8 +297,8 @@ Return only valid JSON. No markdown.
             content: `Generate service recommendations for a ${vehicle.year} ${vehicle.make} ${vehicle.model}${vehicle.engine ? ` with ${vehicle.engine}` : ''}${currentMileage ? `, current mileage: ${currentMileage}` : ''}.`,
           },
         ],
-        temperature: 0.3,
-        max_tokens: 1500,
+        temperature: 0.2,
+        max_tokens: 1600,
       },
       {
         headers: {
@@ -300,26 +316,31 @@ Return only valid JSON. No markdown.
       result = JSON.parse(reply);
       if (!Array.isArray(result)) throw new Error('Response is not an array');
     } catch (error) {
-      console.error('Parse Error:', error.message);
+      console.error('Parse Error:', error.message, reply);
       return res.status(500).json({ error: 'Failed to parse service recommendations.' });
     }
 
-    // Helper: strip any accidental miles/units from text (robust against model slip-ups)
+    // Helpers
     const cleanText = (t) => {
       const s = String(t || '').trim();
-      // Remove patterns like " - 7,500 miles", " – 7500 mi", " every 10k miles"
-      const rx = /\s*(?:[-–—]\s*)?(?:every\s+)?\d[\d,\.kK]*\s*(?:mi|miles?)\s*$/i;
+      // Remove trailing interval hints if model ever slips:
+      const rx = /\s*(?:[-–—]\s*)?(?:every\s+)?\d[\d,\.kK]*\s*(?:mi|miles?)\s*(?:\/\s*\d+\s*months?)?$/i;
       return s.replace(rx, '').trim();
+    };
+    const toNum = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
     };
 
     const sanitized = result.map((item) => {
       const priority = String(item.priority || '').toLowerCase();
-      const normalizedPriority = ['high','medium','low'].includes(priority) ? priority : 'low';
-      const mileageNum = Number(item.mileage);
+      const normalizedPriority = ['high', 'medium', 'low'].includes(priority) ? priority : 'low';
       return {
-        text: cleanText(item.text),               // description only
+        text: cleanText(item.text),
         priority: normalizedPriority,
-        mileage: Number.isFinite(mileageNum) ? mileageNum : undefined, // interval
+        mileage: toNum(item.mileage),
+        time_months: toNum(item.time_months),
+        applies: Boolean(item.applies),
       };
     });
 
@@ -329,6 +350,7 @@ Return only valid JSON. No markdown.
     res.status(500).json({ error: 'Failed to generate service recommendations.' });
   }
 });
+
 
 
 
