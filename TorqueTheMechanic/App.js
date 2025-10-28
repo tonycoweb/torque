@@ -186,82 +186,78 @@ export default function App() {
   };
 
   const decodeVinWithAd = async (base64Image) => {
-    setShowDecodingModal(true);
+  // Gate on rewarded ad first
+  return new Promise((resolve) => {
+    const rewarded = RewardedAd.createForAdRequest(adUnitId, { requestNonPersonalizedAdsOnly: true });
 
-    return new Promise((resolve) => {
-      const rewarded = RewardedAd.createForAdRequest(adUnitId, { requestNonPersonalizedAdsOnly: true });
+    const cleanup = () => rewarded.removeAllListeners();
 
-      const cleanup = () => {
-        rewarded.removeAllListeners();
-        setShowDecodingModal(false);
-      };
+    let timeoutId = setTimeout(() => {
+      Alert.alert('⚠️ Ad not ready', 'Try again in a few seconds.');
+      cleanup();
+      resolve();
+    }, 10000);
 
-      let decodePromise = new Promise((resolveDecode) => {
-        const decodeVin = async () => {
-          try {
-            const response = await fetch('http://192.168.1.246:3001/decode-vin', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ base64Image }),
-            });
-            const { result } = await response.json();
-            const parsedResult = parseVinReply(result);
-            resolveDecode(parsedResult);
-          } catch (err) {
-            resolveDecode({ error: 'Could not decode VIN.' });
-          }
-        };
-        decodeVin();
-      });
+    rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
+      clearTimeout(timeoutId);
+      try { rewarded.show(); } catch { cleanup(); resolve(); }
+    });
 
-      let timeoutId = setTimeout(() => {
-        Alert.alert('⚠️ Ad not ready', 'Try again in a few seconds.');
-        cleanup();
-        resolve();
-      }, 10000);
+    rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, async () => {
+      // Only AFTER reward do we call the backend
+      setShowDecodingModal(true);
+      try {
+        const resp = await fetch('http://192.168.1.246:3001/decode-vin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ base64Image }),
+        });
 
-      rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
-        clearTimeout(timeoutId);
-        try { rewarded.show(); }
-        catch (err) { cleanup(); resolve(); }
-      });
+        const data = await resp.json();
 
-      rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, async () => {
-        clearTimeout(timeoutId);
-
-        const decodeResult = await decodePromise;
-
-        if (decodeResult && decodeResult.vin && decodeResult.make && decodeResult.model) {
-          const cached = await getVehicleByVin(decodeResult.vin);
-          const newVehicle = cached || { id: Date.now().toString(), ...decodeResult };
-
-          setVehicle(newVehicle);
+        if (!resp.ok) {
+          Alert.alert('❌ VIN Decode Failed', data?.error || `HTTP ${resp.status}`);
           setVinPhoto(null);
+          setShowDecodingModal(false);
+          cleanup();
+          return resolve();
+        }
+
+        const vehicleFromPhoto = data?.vehicle;
+        if (vehicleFromPhoto && vehicleFromPhoto.vin && vehicleFromPhoto.make && vehicleFromPhoto.model) {
+          const newVehicle = vehicleFromPhoto;
+          setVehicle(newVehicle);
           await saveVehicle(newVehicle);
+          setVinPhoto(null);
 
           const name = `${newVehicle.year || ''} ${newVehicle.make || ''} ${newVehicle.model || ''}`.trim();
           Alert.alert(`✅ ${name} added to garage`, newVehicle.engine || '');
-        } else if (decodeResult && decodeResult.error) {
-          Alert.alert('❌ Error', decodeResult.error);
-          setVinPhoto(null);
         } else {
-          Alert.alert('⚠️ Failed to parse VIN result.', 'No valid vehicle data received.');
+          Alert.alert('⚠️ No valid vehicle data', 'Could not parse a VIN from that image.');
           setVinPhoto(null);
         }
-
-        cleanup();
-        resolve();
-      });
-
-      try { rewarded.load(); rewardedRef.current = rewarded; }
-      catch (error) {
-        Alert.alert('❌ Ad error', error.message || 'Unknown error');
-        clearTimeout(timeoutId);
+      } catch (err) {
+        Alert.alert('❌ Error', err?.message || 'Could not decode VIN.');
+        setVinPhoto(null);
+      } finally {
+        setShowDecodingModal(false);
         cleanup();
         resolve();
       }
     });
-  };
+
+    try {
+      rewarded.load();
+      rewardedRef.current = rewarded;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      cleanup();
+      Alert.alert('❌ Ad error', error?.message || 'Unknown error');
+      resolve();
+    }
+  });
+};
+
 
   // login + vehicle bootstrap
   useEffect(() => { (async () => {
@@ -364,9 +360,11 @@ export default function App() {
         {!isChatting && (
           <>
             <VehicleSelector
-              selectedVehicle={vehicle}
-              onSelectVehicle={setVehicle}
-              triggerVinCamera={() => setShowCamera(true)}
+             selectedVehicle={vehicle}
+  onSelectVehicle={setVehicle}
+  triggerVinCamera={() => setShowCamera(true)}
+  onShowRewardedAd={showRewardedAd}     // must resolve true ONLY when user earned reward
+  gateCameraWithAd={false}    
             />
             <ServiceBox selectedVehicle={vehicle} />
           </>

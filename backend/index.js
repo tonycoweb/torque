@@ -8,6 +8,14 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// ---------------- VIN helpers (safe, local) ----------------
+function normalizeVin(str = '') {
+  return String(str).toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/[IOQ]/g, '');
+}
+function isValidVin(vin = '') {
+  return /^[A-HJ-NPR-Z0-9]{17}$/.test(vin);
+}
+
 // ---------------- Prompts ----------------
 const getTorquePrompt = (tier = 'free') => {
   if (tier === 'pro') {
@@ -59,30 +67,20 @@ function summarizeVehicle(v = {}) {
 function vehicleSystemMessage(vehicle) {
   const hasVehicle = vehicle && vehicle.make && vehicle.model;
   const summary = hasVehicle ? summarizeVehicle(vehicle) : 'unknown';
-
   return `
 VEHICLE CONTEXT:
-- Default vehicle for this conversation: ${summary}.
+- Default vehicle for this conversation: ${summary || 'unknown'}.
 - Assume questions refer to this vehicle unless the user clearly switches to a different one.
-- If the user mentions another vehicle (year/make/model/trim/engine), prefer that for THIS reply.
-
-AMBIGUITY POLICY:
-- If the user question is clearly general (e.g., "how to jump start a car", "what is a timing belt"), answer generally.
-- If the answer would differ by vehicle (fluids, torques, part location, common failures, etc.) **and** the user's intent is unclear,
-  start with a very short confirmation like: "Are we talking about your ${hasVehicle ? summary : 'vehicle'}?"
-  Then continue with the most likely answer assuming the default vehicle, and invite corrections in one short clause.
-  Keep confirmations concise (<= 1 short sentence).
-
-TONE & FORMAT:
-- Keep replies short, mechanic-clear, and confident.
-- If you made an assumption, briefly say: "Assuming ${hasVehicle ? summary : 'no specific vehicle'}—correct me if not."
+- If the user specifies a different vehicle, use that for this reply.
 
 METADATA CONTRACT (IMPORTANT):
-- At the very end of EVERY reply, append exactly one line:
+- At the **very end** of EVERY reply, append exactly one line in this format:
   [[META: {"vehicle_used": <object-or-null>}]]
-- "vehicle_used" must reflect the vehicle actually used for reasoning for THIS reply (either the default or a user-specified one).
-- If unknown, set "vehicle_used": null.
-- Do NOT explain this metadata; keep it as the final line only.
+- "vehicle_used" must reflect the vehicle you actually used for reasoning **for this reply**.
+- If using the default context, include the best-known fields (year, make, model, trim, engine, transmission, drive_type, body_style) that you’re confident in.
+- If user switched vehicles this turn, set "vehicle_used" to that new one with whatever fields the user provided.
+- If no vehicle is known, set "vehicle_used": null.
+- Do NOT explain this metadata or mention it in normal text. Keep it as the final line only.
   `.trim();
 }
 
@@ -94,23 +92,67 @@ function estimateTokenCount(messages) {
   return Math.round(joined.length / 4);
 }
 
-// Keep ALL system messages; trim only user/assistant turns.
 function trimHistory(messages, maxTurns = 6) {
-  const systemMessages = messages.filter((m) => m.role === 'system');
-  const convo = messages.filter((m) => m.role !== 'system');
+  const system = messages.find((m) => m.role === 'system');
+  const convo = messages.filter(m => m.role !== 'system');
   const recent = convo.slice(-maxTurns * 2);
-  return [...systemMessages, ...recent];
+  return system ? [system, ...recent] : recent;
+}
+
+// ---------------- OpenAI helpers ----------------
+async function decodeVinTextWithOpenAI(vin) {
+  const response = await axios.post(
+    'https://api.openai.com/v1/chat/completions',
+    {
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: `
+You are an expert VIN decoder. Input is a 17-character VIN string.
+Return ONLY raw JSON (no markdown). Use keys:
+vin, year, make, model, trim, engine, transmission, drive_type, body_style, fuel_type,
+mpg, horsepower, gvw. Omit unknowns.
+          `.trim(),
+        },
+        { role: 'user', content: vin },
+      ],
+      temperature: 0.2,
+      max_tokens: 600,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  const raw = response.data.choices?.[0]?.message?.content?.trim() || '{}';
+  let vehicle;
+  try {
+    vehicle = JSON.parse(raw);
+  } catch {
+    const m = raw.match(/\{[\s\S]*\}$/);
+    vehicle = m ? JSON.parse(m[0]) : null;
+  }
+  if (!vehicle || typeof vehicle !== 'object') {
+    throw new Error('Failed to parse VIN details.');
+  }
+
+  vehicle.vin = vin; // ensure normalized VIN
+  return { vehicle, usage: response.data.usage };
 }
 
 // ---------------- Routes ----------------
 app.post('/chat', async (req, res) => {
   const { messages = [], tier = 'free', vehicle = null } = req.body;
 
-  // Always inject our two system messages; keep only user/assistant from client
   const baseSystem = { role: 'system', content: getTorquePrompt(tier) };
   const vehicleSystem = { role: 'system', content: vehicleSystemMessage(vehicle) };
-  const userAssistantOnly = messages.filter(m => m.role === 'user' || m.role === 'assistant');
-  const injected = [baseSystem, vehicleSystem, ...userAssistantOnly];
+
+  const hasTorque = messages.some(m => m.role === 'system' && m.content.includes('TorqueTheMechanic'));
+  const injected = hasTorque ? messages : [baseSystem, vehicleSystem, ...messages];
 
   const finalMessages = trimHistory(injected);
   const estimatedTokens = estimateTokenCount(finalMessages);
@@ -138,7 +180,6 @@ app.post('/chat', async (req, res) => {
     let raw = response.data.choices?.[0]?.message?.content ?? '';
     const usage = response.data.usage;
 
-    // Parse trailing [[META: {...}]] line
     let vehicle_used = null;
     const metaMatch = raw.match(/\[\[META:\s*(\{[\s\S]*?\})\s*\]\]\s*$/);
     if (metaMatch) {
@@ -147,10 +188,7 @@ app.post('/chat', async (req, res) => {
         if (meta && typeof meta === 'object' && 'vehicle_used' in meta) {
           vehicle_used = meta.vehicle_used || null;
         }
-      } catch (e) {
-        // ignore parse errors
-      }
-      // Strip meta from the reply shown to user
+      } catch {}
       raw = raw.replace(/\n?\s*\[\[META:[\s\S]*\]\]\s*$/, '').trim();
     }
 
@@ -161,75 +199,96 @@ app.post('/chat', async (req, res) => {
   }
 });
 
+// --------- VIN photo route (SIMPLE: one call — find VIN anywhere & decode; return JSON) ---------
 app.post('/decode-vin', async (req, res) => {
-  const { base64Image } = req.body;
-  if (!base64Image) {
-    return res.status(400).json({ error: 'Missing base64Image in request body.' });
-  }
-
   try {
-    const response = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      {
-        model: 'gpt-4o',
-        messages: [
-          {
-            role: 'system',
-            content: `
-You are an expert VIN decoder and vehicle data estimator. Your job is to extract the 17-character VIN from the image and decode the vehicle details.
+    let { base64Image } = req.body;
+    if (!base64Image) {
+      return res.status(400).json({ error: 'Missing base64Image in request body.' });
+    }
+    // Accept bare base64 or data URL; normalize to data URL
+    if (!/^data:image\/(png|jpe?g);base64,/.test(base64Image)) {
+      base64Image = `data:image/jpeg;base64,${base64Image}`;
+    }
 
-Then, return a JSON object with as many of the following keys as possible:
-- vin  
-- year  
-- make  
-- model  
-- trim  
-- engine  
-- transmission (thoroughly determine and state: automatic or manual)  
-- drive_type (FWD, RWD, AWD, 4WD)  
-- body_style (sedan, coupe, SUV, etc.)  
-- fuel_type (gasoline, diesel, electric, hybrid)  
-- country (country of manufacture)  
-- mpg (estimate based on year/make/model/engine if needed)  
-- horsepower (estimate from known trim/engine specs)  
-- gross_vehicle_weight_rating (GVWR or gvw — estimate if needed)  
-- exterior_color (if available or likely from defaults)
-
-Do not explain. Only return a raw JSON object — no markdown, no headings, no descriptions.
-            `.trim(),
-          },
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: 'Here is a photo of a VIN. Please extract and decode it:' },
-              { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64Image}` } },
-            ],
-          },
-        ],
-        temperature: 0.3,
-        max_tokens: 600,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          'Content-Type': 'application/json',
+    // Single vision pass: OCR + VIN extraction + decode + JSON
+    const payload = {
+      model: 'gpt-4o',
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: `
+You will receive an image that may be a door sticker, windshield plate, title/registration, or any document/photo that might contain a vehicle VIN.
+1) Scan the entire image (including rotated/small text) and find the best VIN candidate:
+   - VIN must be exactly 17 characters and match /^[A-HJ-NPR-Z0-9]{17}$/ (NO I, O, Q).
+2) If a valid VIN is found, decode it (year, make, model, etc.).
+3) Return ONLY JSON with these keys (omit unknowns):
+   vin, year, make, model, trim, engine, transmission, drive_type, body_style, fuel_type, mpg, horsepower, gvw.
+No markdown. No extra commentary. JSON object only.
+          `.trim(),
         },
-      }
-    );
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Find the VIN anywhere in this image, decode it, and return ONLY the JSON object.' },
+            { type: 'image_url', image_url: { url: base64Image, detail: 'high' } },
+          ],
+        },
+      ],
+      temperature: 0.0,
+      max_tokens: 900,
+    };
 
-    const reply = response.data.choices[0].message.content;
-    const usage = response.data.usage;
+    const resp = await axios.post('https://api.openai.com/v1/chat/completions', payload, {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    });
 
-    console.log('📦 Full VIN GPT reply:\n' + reply);
-    console.log('🔍 VIN Decode Token Usage:', usage);
+    const raw = resp.data?.choices?.[0]?.message?.content?.trim() || '{}';
+    let vehicle;
+    try {
+      vehicle = JSON.parse(raw);
+    } catch {
+      const m = raw.match(/\{[\s\S]*\}$/);
+      vehicle = m ? JSON.parse(m[0]) : null;
+    }
 
-    res.json({ result: reply, usage });
+    if (!vehicle || typeof vehicle !== 'object' || !vehicle.vin) {
+      return res.status(422).json({ error: 'Could not find a valid 17-character VIN in the image.' });
+    }
+
+    // Normalize and validate VIN
+    vehicle.vin = normalizeVin(vehicle.vin);
+    if (!isValidVin(vehicle.vin)) {
+      return res.status(422).json({ error: 'Found VIN is invalid (must be 17 chars, no I/O/Q).' });
+    }
+
+    return res.json({ vehicle });
   } catch (error) {
-    console.error('VIN Decode Error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to decode VIN.' });
+    console.error('VIN Photo Decode Error:', error.response?.data || error.message);
+    return res.status(500).json({ error: 'Failed to decode VIN from photo.' });
   }
 });
 
+// --------- Typed VIN route (unchanged) ---------
+app.post('/decode-vin-text', async (req, res) => {
+  try {
+    const vin = normalizeVin(req.body?.vin || '');
+    if (!isValidVin(vin)) {
+      return res.status(400).json({ error: 'Invalid VIN. Must be 17 chars (no I/O/Q).' });
+    }
+    const { vehicle, usage } = await decodeVinTextWithOpenAI(vin);
+    return res.json({ vehicle, usage });
+  } catch (err) {
+    console.error('VIN Text Decode Error:', err.response?.data || err.message);
+    return res.status(500).json({ error: 'Failed to decode VIN.' });
+  }
+});
+
+// --------- Manual validator (unchanged) ---------
 app.post('/validate-manual', async (req, res) => {
   const { year, make, model, engine } = req.body;
 
@@ -251,32 +310,9 @@ You are a precise vehicle decoder. A user will input partial information (like y
 5. Do NOT return multiple full vehicle variants.
 6. Do NOT return markdown or explanations — only raw JSON.
 
-Only return a flat object. Example (for understanding only):
-If a user enters "2004 Infiniti", you might return:
-{
-  "year": 2004,
-  "make": "Infiniti",
-  "model": ["G35", "FX35", "QX56"],
-  "engine": ["3.5L V6", "4.5L V8"]
-}
-
-Return ONLY clean JSON. No markdown or explanations. Fill in the expected keys if possible based off data
-or once its validated properly and you can infer the vehicle exists and thus return the expected keys filled.
-
+Only return a flat object.
 Expected keys:
-- year
-- make
-- model
-- engine
-- transmission
-- drive_type
-- body_style
-- fuel_type
-- mpg
-- horsepower
-- gvw
-- trim (optional)
-- variants (optional array of differing configurations)
+- year, make, model, engine, transmission, drive_type, body_style, fuel_type, mpg, horsepower, gvw, trim (optional), variants (optional)
             `.trim(),
           },
           { role: 'user', content: `Year: ${year}, Make: ${make}, Model: ${model}, Engine: ${engine || '(blank)'}` },
@@ -301,6 +337,7 @@ Expected keys:
   }
 });
 
+// --------- Service recommendations (unchanged) ---------
 app.post('/generate-service-recommendations', async (req, res) => {
   const { vehicle, currentMileage } = req.body;
   if (!vehicle || !vehicle.year || !vehicle.make || !vehicle.model) {
@@ -317,34 +354,10 @@ app.post('/generate-service-recommendations', async (req, res) => {
             role: 'system',
             content: `
 You are a certified master mechanic building a factory-style maintenance plan that combines mileage **and** time intervals.
-
-REQUIREMENTS (important):
-1) Output must be ONLY a JSON array of objects, no markdown.
-2) Each object MUST have:
-   - "text": short service description ONLY (no numbers, no "miles", no "every", no hyphens)
-     ✓ Examples: "Oil/Filter Change", "Cabin Air Filter", "Brake Fluid", "Front Differential Fluid"
-     ✗ INVALID: "Oil Change - 7,500 miles", "Oil Change every 7,500 miles"
-   - "priority": "high" | "medium" | "low"
-   - "mileage": NUMBER interval in miles (omit if N/A)
-   - "time_months": NUMBER interval in months (omit if N/A)
-   - "applies": true|false (true only if this service actually applies to the given vehicle config)
-3) Include **a complete baseline list** appropriate for the powertrain:
-   ENGINE/GENERAL:
-     - Oil/Filter Change, Engine Air Filter, Cabin Air Filter, Spark Plugs (if non-diesel),
-       PCV Valve (if serviceable), Drive/Serpentine Belt, Timing Belt inspect/replace (if belt; if chain -> applies=false but include inspection),
-       Coolant flush, Brake Fluid flush, Battery Test, Tire Rotation, Alignment Check
-   FUEL:
-     - Fuel Filter (only if serviceable—some are in-tank lifetime; set applies accordingly)
-   TRANSMISSION/DRIVELINE:
-     - Automatic Transmission Fluid (AT) or CVT/DCT/Manual (choose correct ONE), Transfer Case (if 4WD/AWD and applicable),
-       Front Differential service, Rear Differential service (applies based on drivetrain)
-   CHASSIS/INSPECTION:
-     - Brake Pads/Rotors Inspection, Suspension/Steering Inspection, Hoses & Clamps Check
-4) If something is **not applicable** (e.g., “Front Differential” on FWD cars, or “Fuel Filter” is non-serviceable), set "applies": false.
-   Still include it (so the app can be consistent), but with applies=false.
-5) Choose realistic factory-like intervals (miles **and** months when known). Prefer both; if time is unknown, omit time_months.
-6) Consider currentMileage for priority ranking only; do NOT bake mileage numbers into "text".
-7) Return ONLY clean JSON array. No explanations. No extra keys.
+REQUIREMENTS:
+1) ONLY JSON array of objects, no markdown.
+2) Each object MUST have: text, priority, mileage?, time_months?, applies
+3) Include baseline list; set applies=false for non-applicable items; pick realistic intervals.
             `.trim(),
           },
           {

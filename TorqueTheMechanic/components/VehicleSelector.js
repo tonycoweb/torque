@@ -1,3 +1,4 @@
+// VehicleSelector.js
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
@@ -11,6 +12,8 @@ import {
   SafeAreaView,
   Image,
   ScrollView,
+  ActivityIndicator,
+  Platform,
 } from 'react-native';
 import Animated, {
   useSharedValue,
@@ -18,43 +21,65 @@ import Animated, {
   withTiming,
   withSpring,
 } from 'react-native-reanimated';
-import { getAllVehicles, deleteVehicleByVin, saveVehicle } from '../utils/VehicleStorage';
-import ManualVehicleEntry from './ManualVehicleEntry';
+import {
+  RewardedAd,
+  RewardedAdEventType,
+} from 'react-native-google-mobile-ads';
 
-// vinLocations array remains unchanged
+import { getAllVehicles, deleteVehicleByVin, saveVehicle } from '../utils/VehicleStorage';
+
+// ---------- CONFIG ----------
+const API_BASE = 'http://192.168.1.246:3001';
+
+const adUnitId = __DEV__
+  ? Platform.OS === 'ios'
+    ? 'ca-app-pub-3940256099942544/1712485313' // iOS test rewarded ad unit ID
+    : 'ca-app-pub-3940256099942544/5224354917' // Android test rewarded ad unit ID
+  : 'your-real-admob-id-here'; // <- replace for production
+
+// ---------- VIN HELPERS ----------
+const normalizeVin = (str = '') =>
+  String(str)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .replace(/[IOQ]/g, '');
+
+const isValidVin = (vin = '') => /^[A-HJ-NPR-Z0-9]{17}$/.test(vin);
+
+// ---------- STATIC IMAGES ----------
 const vinLocations = [
-  {
-    id: '1',
-    label: 'Registration Card',
-    image: require('../assets/vin_registration_card.png'),
-  },
-  {
-    id: '2',
-    label: 'Insurance Document',
-    image: require('../assets/vin_insurance.png'),
-  },
-  {
-    id: '3',
-    label: 'Driver-Side Door Sticker',
-    image: require('../assets/vin_door_sticker.png'),
-  },
-  {
-    id: '4',
-    label: 'Windshield Corner',
-    image: require('../assets/vin_windshield.png'),
-  },
+  { id: '1', label: 'Registration Card', image: require('../assets/vin_registration_card.png') },
+  { id: '2', label: 'Insurance Document', image: require('../assets/vin_insurance.png') },
+  { id: '3', label: 'Driver-Side Door Sticker', image: require('../assets/vin_door_sticker.png') },
+  { id: '4', label: 'Windshield Corner', image: require('../assets/vin_windshield.png') },
 ];
 
-// Rest of the component (state, useEffect, functions) remains unchanged
-export default function VehicleSelector({ selectedVehicle = null, onSelectVehicle, triggerVinCamera }) {
+// ---------- COMPONENT ----------
+export default function VehicleSelector({
+  selectedVehicle = null,
+  onSelectVehicle,
+  triggerVinCamera,
+  onShowRewardedAd,     // optional: provide parent ad helper; must resolve true ONLY on earned reward
+  gateCameraWithAd = false, // set true if you also want to gate camera with ad
+}) {
+  // UI state
   const [modalVisible, setModalVisible] = useState(false);
   const [showVinModal, setShowVinModal] = useState(false);
   const [editMode, setEditMode] = useState(false);
-  const [vehicles, setVehicles] = useState([]);
-  const [editableVehicle, setEditableVehicle] = useState(null);
-  const [showManualEntry, setShowManualEntry] = useState(false);
-  const scrollRef = useRef(null);
 
+  // Garage state
+  const [vehicles, setVehicles] = useState([]);
+
+  // Edit state
+  const [editableVehicle, setEditableVehicle] = useState(null);
+
+  // Typed VIN
+  const [typedVin, setTypedVin] = useState('');
+  const [adLoading, setAdLoading] = useState(false);
+  const [decoding, setDecoding] = useState(false);
+
+  // Animations
+  const scrollRef = useRef(null);
   const modalOpacity = useSharedValue(0);
   const modalTranslateY = useSharedValue(100);
 
@@ -63,23 +88,16 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
   }, [modalVisible]);
 
   useEffect(() => {
-    const isOpen = modalVisible || showVinModal || editMode || showManualEntry;
+    const isOpen = modalVisible || showVinModal || editMode;
     modalOpacity.value = withTiming(isOpen ? 1 : 0, { duration: 250 });
-    modalTranslateY.value = withSpring(isOpen ? 0 : 100, {
-      damping: 18,
-      stiffness: 120,
-    });
-  }, [modalVisible, showVinModal, editMode, showManualEntry]);
+    modalTranslateY.value = withSpring(isOpen ? 0 : 100, { damping: 18, stiffness: 120 });
+  }, [modalVisible, showVinModal, editMode]);
 
   useEffect(() => {
     if (showVinModal && scrollRef.current) {
       scrollRef.current.scrollTo({ y: 0, animated: false });
     }
   }, [showVinModal]);
-
-  useEffect(() => {
-    console.log('Selected vehicle:', selectedVehicle);
-  }, [selectedVehicle]);
 
   const animatedModalStyle = useAnimatedStyle(() => ({
     opacity: modalOpacity.value,
@@ -91,21 +109,144 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
     setVehicles(saved.reverse());
   };
 
+  // ---------- Ad fallback (used if parent doesn't provide onShowRewardedAd) ----------
+  const showRewardedAdFallback = () =>
+    new Promise((resolve) => {
+      try {
+        const rewarded = RewardedAd.createForAdRequest(adUnitId, {
+          requestNonPersonalizedAdsOnly: true,
+        });
+
+        const cleanup = () => rewarded.removeAllListeners();
+
+        // Timeout safety
+        const timeoutId = setTimeout(() => {
+          cleanup();
+          resolve(false);
+        }, 15000);
+
+        rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
+          try {
+            rewarded.show();
+          } catch {
+            clearTimeout(timeoutId);
+            cleanup();
+            resolve(false);
+          }
+        });
+
+        rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => {
+          clearTimeout(timeoutId);
+          cleanup();
+          resolve(true);
+        });
+
+        // If the SDK exposes CLOSED, treat it as no reward
+        if (RewardedAdEventType.CLOSED) {
+          rewarded.addAdEventListener(RewardedAdEventType.CLOSED, () => {
+            clearTimeout(timeoutId);
+            cleanup();
+            resolve(false);
+          });
+        }
+
+        // Error path
+        if (RewardedAdEventType.ERROR) {
+          rewarded.addAdEventListener(RewardedAdEventType.ERROR, () => {
+            clearTimeout(timeoutId);
+            cleanup();
+            resolve(false);
+          });
+        }
+
+        rewarded.load();
+      } catch {
+        resolve(false);
+      }
+    });
+
+  // ---------- Camera VIN flow (optionally gated) ----------
   const handleAddNew = () => {
     setModalVisible(false);
     setShowVinModal(true);
   };
 
-  const handleCaptureVin = () => {
+  const handleCaptureVin = async () => {
+    if (gateCameraWithAd) {
+      setAdLoading(true);
+      const rewarded = onShowRewardedAd
+        ? await onShowRewardedAd()
+        : await showRewardedAdFallback();
+      setAdLoading(false);
+      if (!rewarded) {
+        Alert.alert('Ad Required', 'Please watch the full ad to use the VIN camera.');
+        return;
+      }
+    }
     setShowVinModal(false);
     triggerVinCamera();
   };
 
-  const handleManualEntry = () => {
-    setShowVinModal(false);
-    setShowManualEntry(true);
+  // ---------- Typed VIN flow (always gated) ----------
+  const handleDecodeTypedVin = async () => {
+    const vin = normalizeVin(typedVin);
+    if (!isValidVin(vin)) {
+      Alert.alert('Invalid VIN', 'VIN must be 17 characters (letters & numbers, no I/O/Q).');
+      return;
+    }
+
+    // 1) Ad must reward first
+    setAdLoading(true);
+    try {
+      const rewarded = onShowRewardedAd
+        ? await onShowRewardedAd()
+        : await showRewardedAdFallback();
+
+      if (!rewarded) {
+        setAdLoading(false);
+        Alert.alert('Ad Required', 'Please watch the full ad to unlock VIN decoding.');
+        return;
+      }
+    } catch {
+      setAdLoading(false);
+      Alert.alert('Ad Error', 'Could not show the rewarded ad.');
+      return;
+    }
+    setAdLoading(false);
+
+    // 2) Decode after reward
+    setDecoding(true);
+    try {
+      const resp = await fetch(`${API_BASE}/decode-vin-text`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vin }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err?.error || `HTTP ${resp.status}`);
+      }
+      const { vehicle } = await resp.json();
+      if (!vehicle || !vehicle.vin || !vehicle.make || !vehicle.model) {
+        throw new Error('VIN decoded but missing key fields.');
+      }
+
+      await saveVehicle(vehicle);
+      setVehicles(prev => [vehicle, ...prev]);
+      onSelectVehicle(vehicle);
+
+      const name = `${vehicle.year || ''} ${vehicle.make || ''} ${vehicle.model || ''}`.trim();
+      Alert.alert(`✅ ${name} added to garage`, vehicle.engine || '');
+      setShowVinModal(false);
+      setTypedVin('');
+    } catch (e) {
+      Alert.alert('❌ VIN Decode Failed', e.message || 'Please check the VIN and try again.');
+    } finally {
+      setDecoding(false);
+    }
   };
 
+  // ---------- Edit ----------
   const handleDelete = async (vin) => {
     Alert.alert('Delete Vehicle?', 'This will remove it from your garage.', [
       { text: 'Cancel', style: 'cancel' },
@@ -147,17 +288,16 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
   const handleSaveEdit = async () => {
     const updatedVehicle = {
       ...editableVehicle,
-      mpg: editableVehicle.mpgCity && editableVehicle.mpgHighway
-        ? `${editableVehicle.mpgCity} city / ${editableVehicle.mpgHighway} highway`
-        : editableVehicle.mpg || '',
+      mpg:
+        editableVehicle.mpgCity && editableVehicle.mpgHighway
+          ? `${editableVehicle.mpgCity} city / ${editableVehicle.mpgHighway} highway`
+          : editableVehicle.mpg || '',
     };
     delete updatedVehicle.mpgCity;
     delete updatedVehicle.mpgHighway;
 
     await saveVehicle(updatedVehicle);
-    const updatedList = vehicles.map(v =>
-      v.vin === updatedVehicle.vin ? updatedVehicle : v
-    );
+    const updatedList = vehicles.map(v => (v.vin === updatedVehicle.vin ? updatedVehicle : v));
     setVehicles(updatedList);
     if (selectedVehicle?.vin === updatedVehicle.vin) {
       onSelectVehicle(updatedVehicle);
@@ -166,6 +306,7 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
     setEditableVehicle(null);
   };
 
+  // ---------- Render helpers ----------
   const renderMpg = (mpg) => {
     if (!mpg || typeof mpg !== 'string') return '--/--';
     const match = mpg.match(/(\d+)\s*city\s*\/\s*(\d+)\s*highway/);
@@ -195,17 +336,15 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
     </TouchableOpacity>
   );
 
+  // ---------- UI ----------
   return (
     <View style={styles.container}>
       {selectedVehicle ? (
-        <TouchableOpacity
-          style={styles.selectedCard}
-          onPress={() => setModalVisible(true)}
-        >
+        <TouchableOpacity style={styles.selectedCard} onPress={() => setModalVisible(true)}>
           <Text style={styles.title}>{selectedVehicle.year} {selectedVehicle.make}</Text>
           <Text style={styles.details}>{selectedVehicle.model} ({selectedVehicle.engine})</Text>
           <Text style={styles.stats}>
-             • MPG: {renderMpg(selectedVehicle.mpg)} • HP: {selectedVehicle.hp || '--'} • GVW: {selectedVehicle.gvw || '--'}
+            • MPG: {renderMpg(selectedVehicle.mpg)} • HP: {selectedVehicle.hp || '--'} • GVW: {selectedVehicle.gvw || '--'}
           </Text>
         </TouchableOpacity>
       ) : (
@@ -215,6 +354,7 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
         </TouchableOpacity>
       )}
 
+      {/* Garage modal */}
       <Modal visible={modalVisible} animationType="slide">
         <Animated.View style={[styles.EditModalContainer, animatedModalStyle]}>
           <SafeAreaView style={styles.modalContainer}>
@@ -229,32 +369,81 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
               contentContainerStyle={{ paddingBottom: 40 }}
             />
             <TouchableOpacity style={styles.addNewButton} onPress={handleAddNew}>
-              <Text style={styles.addNewText}>+ Add Vehicle (Manual or VIN Image)</Text>
+              <Text style={styles.addNewText}>+ Add Vehicle +</Text>
             </TouchableOpacity>
           </SafeAreaView>
         </Animated.View>
       </Modal>
 
+      {/* Add Vehicle modal */}
       <Modal visible={showVinModal} animationType="none" transparent>
         <Animated.View style={[styles.vinModalContainer, animatedModalStyle]}>
           <SafeAreaView style={styles.vinModalContent}>
-            <ScrollView ref={scrollRef} contentContainerStyle={styles.vinScrollContent}>
+            <ScrollView ref={scrollRef} contentContainerStyle={styles.vinScrollContent} keyboardShouldPersistTaps="handled">
               <TouchableOpacity onPress={() => setShowVinModal(false)} style={styles.closeIcon}>
                 <Text style={styles.closeIconText}>✖</Text>
               </TouchableOpacity>
+
               <Text style={styles.modalTitle}>Add Your Vehicle</Text>
-              <TouchableOpacity style={styles.optionButton} onPress={handleCaptureVin}>
-                <Text style={styles.optionButtonText}>📷 Snap VIN Photo</Text>
-                <Text style={styles.optionSubText}>Fastest way to add your car.</Text>
+
+              {/* Camera option (optionally gated) */}
+              <TouchableOpacity
+                style={[styles.optionButton, (adLoading) && { opacity: 0.7 }]}
+                onPress={handleCaptureVin}
+                disabled={adLoading}
+                activeOpacity={0.9}
+              >
+                {adLoading ? (
+                  <ActivityIndicator color="#0f172a" />
+                ) : (
+                  <>
+                    <Text style={styles.optionButtonText}>📷 Snap VIN Photo</Text>
+                    <Text style={styles.optionSubText}>
+                      {gateCameraWithAd ? 'Watch an ad, then use the VIN camera.' : 'Fastest way to add your car.'}
+                    </Text>
+                  </>
+                )}
               </TouchableOpacity>
-              <TouchableOpacity style={styles.optionButton} onPress={handleManualEntry}>
-                <Text style={styles.optionButtonText}>📝 Enter Manually</Text>
-                <Text style={styles.optionSubText}>Input year, make, model, etc.</Text>
-              </TouchableOpacity>
+
+              {/* Typed VIN entry (always gated by ad) */}
+              <View style={{ width: '100%', marginTop: 10 }}>
+                <Text style={styles.sectionTitle}>Or Type Your VIN</Text>
+                <Text style={styles.helperText}>Enter the full 17-character VIN (no I/O/Q). We’ll verify it after an ad.</Text>
+                <TextInput
+                  value={typedVin}
+                  onChangeText={setTypedVin}
+                  placeholder="e.g., 1HGCM82633A004352"
+                  placeholderTextColor="#7b8794"
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  style={[styles.input, { letterSpacing: 1.2, textAlign: 'center', fontSize: 16 }]}
+                  maxLength={25}
+                />
+                <TouchableOpacity
+                  style={[
+                    styles.decodeBtn,
+                    (!isValidVin(normalizeVin(typedVin)) || decoding || adLoading) && styles.decodeBtnDisabled,
+                  ]}
+                  onPress={handleDecodeTypedVin}
+                  disabled={!isValidVin(normalizeVin(typedVin)) || decoding || adLoading}
+                  activeOpacity={0.9}
+                >
+                  {adLoading ? (
+                    <ActivityIndicator color="#0f172a" />
+                  ) : decoding ? (
+                    <Text style={styles.decodeBtnText}>Decoding…</Text>
+                  ) : (
+                    <Text style={styles.decodeBtnText}>🎟️ Watch Ad & Decode</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+
+              {/* VIN help & locations */}
               <Text style={styles.modalSubtitle}>What’s a VIN?</Text>
               <Text style={styles.helperText}>
                 A VIN (Vehicle Identification Number) is a unique 17-digit code that identifies your car.
               </Text>
+
               <Text style={styles.sectionTitle}>Where to Find Your VIN</Text>
               {vinLocations.map((item) => (
                 <View key={item.id} style={styles.vinCardWrapper}>
@@ -272,6 +461,7 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
         </Animated.View>
       </Modal>
 
+      {/* Edit modal */}
       {editMode && editableVehicle && (
         <Modal visible={editMode} animationType="slide">
           <Animated.View style={[styles.EditModalContainer, animatedModalStyle]}>
@@ -346,25 +536,11 @@ export default function VehicleSelector({ selectedVehicle = null, onSelectVehicl
           </Animated.View>
         </Modal>
       )}
-
-      {showManualEntry && (
-        <Modal animationType="slide">
-          <ManualVehicleEntry
-            onClose={() => setShowManualEntry(false)}
-            onSave={async (result) => {
-              const vehicleToSave = Array.isArray(result) ? result[0] : result;
-              await saveVehicle(vehicleToSave);
-              setVehicles(prev => [vehicleToSave, ...prev]);
-              onSelectVehicle(vehicleToSave);
-              setShowManualEntry(false);
-            }}
-          />
-        </Modal>
-      )}
     </View>
   );
 }
 
+// ---------- STYLES ----------
 const styles = StyleSheet.create({
   container: {
     width: '100%',
@@ -390,6 +566,8 @@ const styles = StyleSheet.create({
   title: { fontSize: 20, fontWeight: 'bold', color: '#fff' },
   details: { fontSize: 14, color: '#ccc', marginVertical: 4 },
   stats: { fontSize: 12, color: '#aaa' },
+
+  // Modals
   modalContainer: {
     flex: 1,
     backgroundColor: '#121212',
@@ -411,6 +589,7 @@ const styles = StyleSheet.create({
     marginBottom: 6,
     textAlign: 'center',
   },
+
   vehicleCard: {
     backgroundColor: '#222',
     padding: 20,
@@ -422,6 +601,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginTop: 12,
+    gap: 10,
   },
   actionBtn: {
     padding: 10,
@@ -429,6 +609,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   smallText: { fontSize: 16, color: '#fff' },
+
   addNewButton: {
     marginTop: 30,
     padding: 16,
@@ -439,6 +620,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
   },
   addNewText: { color: '#fff', fontSize: 17 },
+
   vinModalContainer: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.9)',
@@ -506,13 +688,11 @@ const styles = StyleSheet.create({
     fontSize: 18,
     color: '#eee',
     fontWeight: '600',
-    marginTop: 18,
-    marginBottom: 12,
+    marginTop: 6,
+    marginBottom: 8,
     textAlign: 'center',
   },
-  vinCardWrapper: {
-    width: '100%',
-  },
+  vinCardWrapper: { width: '100%' },
   vinCardStacked: {
     alignItems: 'center',
     backgroundColor: '#1e293b',
@@ -534,6 +714,12 @@ const styles = StyleSheet.create({
     color: '#e2e8f0',
     textAlign: 'center',
   },
+
+  inputLabel: {
+    color: '#ccc',
+    marginBottom: 4,
+    fontSize: 14,
+  },
   input: {
     backgroundColor: '#222',
     color: '#fff',
@@ -542,11 +728,7 @@ const styles = StyleSheet.create({
     borderColor: '#444',
     borderWidth: 1,
   },
-  inputLabel: {
-    color: '#ccc',
-    marginBottom: 4,
-    fontSize: 14,
-  },
+
   transmissionSelector: {
     flexDirection: 'row',
     backgroundColor: '#222',
@@ -574,6 +756,7 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: 'bold',
   },
+
   EditModalContainer: {
     width: '100%',
     height: '100%',
@@ -590,5 +773,21 @@ const styles = StyleSheet.create({
     fontSize: 22,
     color: '#000',
     fontWeight: 'bold',
+  },
+
+  decodeBtn: {
+    marginTop: 10,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    backgroundColor: '#22c55e',
+  },
+  decodeBtnDisabled: {
+    opacity: 0.6,
+  },
+  decodeBtnText: {
+    color: '#0f172a',
+    fontSize: 16,
+    fontWeight: '700',
   },
 });
