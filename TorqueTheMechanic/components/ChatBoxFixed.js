@@ -17,14 +17,13 @@ export default function ChatBoxFixed({
   onAttachImage,
   onAttachDocument,
   onFocus,
-  onOpenSavedNotes,     // open saved chats/notes panel
-  onMeasuredHeight,     // report measured height to parent
+  onOpenSavedNotes,
+  onMeasuredHeight,
 }) {
   const [inputText, setInputText] = useState('');
   const [selfHeight, setSelfHeight] = useState(0);
   const inputRef = useRef(null);
 
-  // report height changes up to parent
   useEffect(() => {
     if (selfHeight && onMeasuredHeight) onMeasuredHeight(selfHeight);
   }, [selfHeight, onMeasuredHeight]);
@@ -51,17 +50,21 @@ export default function ChatBoxFixed({
     if (!result.canceled) onAttachImage && onAttachImage(result.assets?.[0]?.uri);
   };
 
-  const handleAttachDocument = () => onAttachDocument && onAttachDocument({ name: 'sample_document.pdf' });
-  const handleMicrophone = () => { /* hook up voice-to-text here */ };
+  const handleAttachDocument = () =>
+    onAttachDocument && onAttachDocument({ name: 'sample_document.pdf' });
+
+  const handleMicrophone = () => {
+    // hook up voice-to-text here
+  };
 
   return (
     <KeyboardAvoidingView
       onLayout={handleLayout}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 6 : 0}
+      // Set this to your fixed header height if you have one; 0 is safest otherwise.
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
       style={styles.container}
     >
-      {/* Toolbar ABOVE the input (includes Saved Notes button) */}
       <View style={styles.toolbar}>
         <TouchableOpacity onPress={handleMicrophone} style={styles.toolBtn} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
           <Ionicons name="mic-outline" size={21} color="#aaa" />
@@ -78,7 +81,6 @@ export default function ChatBoxFixed({
         <View style={{ flex: 1 }} />
       </View>
 
-      {/* Input with SEND embedded bottom-right */}
       <View style={styles.inputWrap}>
         <TextInput
           ref={inputRef}
@@ -107,10 +109,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#121212',
     paddingHorizontal: 10,
     paddingTop: 16,
-    paddingBottom: Platform.OS === 'ios' ? 16 : 16,
+    paddingBottom: 16, // no platform branch needed
     borderTopWidth: 1,
     borderTopColor: '#2b2b2b',
-    marginBottom: 33,
+    // Avoid extra spacing that would double up with list padding
+    marginBottom: 0,
   },
   toolbar: {
     flexDirection: 'row',
@@ -130,10 +133,11 @@ const styles = StyleSheet.create({
     maxHeight: 150,
     backgroundColor: '#1f1f1f',
     borderRadius: 18,
-    paddingRight: 44, // room for send
+    paddingRight: 44,
     paddingLeft: 12,
     paddingTop: 8,
     paddingBottom: 8,
+    marginBottom: 33,
   },
   textInput: { color: '#fff', fontSize: 16, textAlignVertical: 'top', marginBottom: 33 },
   sendFab: {
