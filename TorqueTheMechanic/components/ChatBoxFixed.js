@@ -76,14 +76,6 @@ export default function ChatBoxFixed({
         </TouchableOpacity>
 
         <View style={{ flex: 1 }} />
-
-        <TouchableOpacity
-          onPress={onOpenSavedNotes}
-          style={[styles.toolBtn, styles.notesBtn]}
-          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-        >
-          <Ionicons name="document-text-outline" size={20} color="#cbd5e1" />
-        </TouchableOpacity>
       </View>
 
       {/* Input with SEND embedded bottom-right */}

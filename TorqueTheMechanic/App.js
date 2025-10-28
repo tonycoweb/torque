@@ -1,3 +1,4 @@
+// App.js
 import React, { useState, useRef, useEffect } from 'react';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import {
@@ -21,15 +22,16 @@ import ChatMessages from './components/ChatMessages';
 import ChatBoxFixed from './components/ChatBoxFixed';
 import SavedChatsPanel from './components/SavedChatsPanel';
 import VehicleSelector from './components/VehicleSelector';
-import { sendToGPT } from './components/GptService';
 import LoginScreen from './components/LoginScreen';
-import { saveChat } from './utils/storage';
+import { saveChat, getAllChats } from './utils/storage';
 import { LogBox, LayoutAnimation, UIManager } from 'react-native';
 import VinCamera from './components/VinCamera';
 import VinPreview from './components/VinPreview';
 import { getVehicleByVin, saveVehicle, getAllVehicles } from './utils/VehicleStorage';
 import SettingsModal from './components/SettingsModal';
 import mobileAds, { RewardedAd, RewardedAdEventType } from 'react-native-google-mobile-ads';
+
+const API_URL = 'http://192.168.1.246:3001/chat';
 
 const adUnitId = __DEV__
   ? Platform.OS === 'ios'
@@ -42,6 +44,29 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 }
 LayoutAnimation.configureNext = () => {};
 LogBox.ignoreLogs(['Excessive number of pending callbacks']);
+
+// ---- Local helper: trim turns (kept from before)
+const trimTurns = (history, maxTurns = 6) => {
+  const turns = [];
+  for (let i = history.length - 1; i >= 0 && turns.length < maxTurns * 2; i--) {
+    const msg = history[i];
+    if (msg.role === 'user' || msg.role === 'assistant') {
+      turns.unshift(msg);
+    }
+  }
+  return turns;
+};
+
+// ---- Local helper: call backend (replaces GptService.js)
+async function chatWithBackend(tier, messages, vehicle) {
+  const resp = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tier, messages, vehicle }), // vehicle context sent to backend
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return await resp.json(); // { reply, usage, vehicle_used }
+}
 
 export default function App() {
   const [vehicle, setVehicle] = useState(null);
@@ -58,198 +83,218 @@ export default function App() {
   const [showDecodingModal, setShowDecodingModal] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
-  // NEW: drive auto-scroll & bottom inset
-  const [focusTick, setFocusTick] = useState(0);
-  const [kbVisible, setKbVisible] = useState(false);
-  const [kbHeight, setKbHeight] = useState(0);
+  // Which vehicle the model actually used (from backend [[META]])
+  const [activeChatVehicle, setActiveChatVehicle] = useState(null);
 
   const rewardedRef = useRef(null);
 
+  // AdMob init
   useEffect(() => {
     const initAdMob = async () => {
-      try { await mobileAds().initialize(); } catch {}
+      try { await mobileAds().initialize(); }
+      catch (error) { console.error('❌ AdMob initialization failed:', error); }
     };
     initAdMob();
   }, []);
 
-  // Keyboard listeners → ensure we always see newest message
-  useEffect(() => {
-    const show = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hide = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-
-    const subShow = Keyboard.addListener(show, (e) => {
-      setKbVisible(true);
-      setKbHeight(e?.endCoordinates?.height ?? 0);
-      // tell ChatMessages to jump to bottom when keyboard appears
-      setFocusTick((x) => x + 1);
-    });
-    const subHide = Keyboard.addListener(hide, () => {
-      setKbVisible(false);
-      setKbHeight(0);
-    });
-
-    return () => {
-      subShow.remove();
-      subHide.remove();
-    };
-  }, []);
-
-  const showRewardedAd = async () =>
-    new Promise((resolve) => {
+  const showRewardedAd = async () => {
+    return new Promise((resolve) => {
       const rewarded = RewardedAd.createForAdRequest(adUnitId, { requestNonPersonalizedAdsOnly: true });
-      const cleanup = () => rewarded.removeAllListeners();
+      const cleanup = () => { rewarded.removeAllListeners(); };
       let timeoutId = setTimeout(() => { cleanup(); resolve(false); }, 10000);
 
       rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
         clearTimeout(timeoutId);
-        try { rewarded.show(); } catch { cleanup(); resolve(false); }
+        try { rewarded.show(); } catch (error) { cleanup(); resolve(false); }
       });
-      rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => { clearTimeout(timeoutId); cleanup(); resolve(true); });
-      try { rewarded.load(); rewardedRef.current = rewarded; } catch { clearTimeout(timeoutId); cleanup(); resolve(false); }
-    });
+      rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => {
+        clearTimeout(timeoutId);
+        cleanup();
+        resolve(true);
+      });
 
+      try { rewarded.load(); rewardedRef.current = rewarded; }
+      catch (error) { clearTimeout(timeoutId); cleanup(); resolve(false); }
+    });
+  };
+
+  // VIN decode helpers
   const parseVinReply = (text) => {
     const data = {};
     const jsonMatch = text.match(/```json\s*([\s\S]+?)\s*```/);
     const cleaned = jsonMatch ? jsonMatch[1] : text;
     try {
       const parsed = JSON.parse(cleaned);
-      Object.entries(parsed).forEach(([k, v]) => {
-        const key = k.toLowerCase();
-        if (key === 'vin') data.vin = v;
-        else if (key === 'year') data.year = v;
-        else if (key === 'make') data.make = v;
-        else if (key === 'model') data.model = v;
-        else if (key === 'trim') data.trim = v;
-        else if (key === 'engine') data.engine = v;
-        else if (key === 'transmission') data.transmission = v;
-        else if (key === 'drive_type') data.drive_type = v;
-        else if (key === 'body_style') data.body_style = v;
-        else if (key === 'fuel_type') data.fuel_type = v;
-        else if (key === 'country') data.country = v;
-        else if (key === 'mpg') data.mpg = typeof v === 'object' && v?.city && v?.highway ? `${v.city}/${v.highway}` : String(v);
-        else if (key === 'horsepower') data.hp = v;
-        else if (key === 'gross_vehicle_weight_rating' || key === 'gvw') data.gvw = v;
-        else if (['exterior_color', 'color', 'paint color'].includes(key)) data.color = v;
+      Object.entries(parsed).forEach(([key, value]) => {
+        const k = key.toLowerCase();
+        switch (k) {
+          case 'vin': data.vin = value; break;
+          case 'year': data.year = value; break;
+          case 'make': data.make = value; break;
+          case 'model': data.model = value; break;
+          case 'trim': data.trim = value; break;
+          case 'engine': data.engine = value; break;
+          case 'transmission': data.transmission = value; break;
+          case 'drive_type': data.drive_type = value; break;
+          case 'body_style': data.body_style = value; break;
+          case 'fuel_type': data.fuel_type = value; break;
+          case 'country': data.country = value; break;
+          case 'mpg':
+            if (typeof value === 'string') data.mpg = value;
+            else if (typeof value === 'object' && value.city && value.highway) data.mpg = `${value.city}/${value.highway}`;
+            else data.mpg = String(value);
+            break;
+          case 'horsepower': data.hp = value; break;
+          case 'gross_vehicle_weight_rating':
+          case 'gvw': data.gvw = value; break;
+          case 'exterior_color':
+          case 'color':
+          case 'paint color': data.color = value; break;
+        }
       });
-    } catch {
-      text.split('\n').map((l) => l.trim()).filter(Boolean).forEach((line) => {
-        const [raw, ...rest] = line.split(/[:—-]/);
-        if (!raw || rest.length === 0) return;
-        const key = raw.trim().toLowerCase();
-        const v = rest.join(':').trim();
-        if (!v) return;
-        if (key === 'vin') data.vin = v;
-        else if (key === 'year') data.year = v;
-        else if (key === 'make') data.make = v;
-        else if (key === 'model') data.model = v;
-        else if (key === 'trim') data.trim = v;
-        else if (key === 'engine') data.engine = v;
-        else if (key === 'transmission') data.transmission = v;
-        else if (key === 'drive_type') data.drive_type = v;
-        else if (key === 'body_style') data.body_style = v;
-        else if (key === 'fuel_type') data.fuel_type = v;
-        else if (key === 'country') data.country = v;
-        else if (key === 'mpg') data.mpg = v;
-        else if (key === 'horsepower') data.hp = v;
-        else if (['gross_vehicle_weight_rating', 'gvw'].includes(key)) data.gvw = v;
-        else if (['exterior_color', 'color', 'paint color'].includes(key)) data.color = v;
-      });
+    } catch (err) {
+      const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+      for (let line of lines) {
+        const [keyRaw, ...rest] = line.split(/[:—-]/);
+        if (!keyRaw || rest.length === 0) continue;
+        const key = keyRaw.trim().toLowerCase();
+        const value = rest.join(':').trim();
+        if (!value) continue;
+        switch (key) {
+          case 'vin': data.vin = value; break;
+          case 'year': data.year = value; break;
+          case 'make': data.make = value; break;
+          case 'model': data.model = value; break;
+          case 'trim': data.trim = value; break;
+          case 'engine': data.engine = value; break;
+          case 'transmission': data.transmission = value; break;
+          case 'drive_type': data.drive_type = value; break;
+          case 'body_style': data.body_style = value; break;
+          case 'fuel_type': data.fuel_type = value; break;
+          case 'country': data.country = value; break;
+          case 'mpg': data.mpg = value; break;
+          case 'horsepower': data.hp = value; break;
+          case 'gross_vehicle_weight_rating':
+          case 'gvw': data.gvw = value; break;
+          case 'exterior_color':
+          case 'color':
+          case 'paint color': data.color = value; break;
+        }
+      }
     }
     return data.vin ? data : null;
   };
 
   const decodeVinWithAd = async (base64Image) => {
     setShowDecodingModal(true);
+
     return new Promise((resolve) => {
       const rewarded = RewardedAd.createForAdRequest(adUnitId, { requestNonPersonalizedAdsOnly: true });
-      const cleanup = () => { rewarded.removeAllListeners(); setShowDecodingModal(false); };
+
+      const cleanup = () => {
+        rewarded.removeAllListeners();
+        setShowDecodingModal(false);
+      };
 
       let decodePromise = new Promise((resolveDecode) => {
-        (async () => {
+        const decodeVin = async () => {
           try {
             const response = await fetch('http://192.168.1.246:3001/decode-vin', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base64Image }),
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ base64Image }),
             });
             const { result } = await response.json();
-            resolveDecode(parseVinReply(result));
-          } catch { resolveDecode({ error: 'Could not decode VIN.' }); }
-        })();
+            const parsedResult = parseVinReply(result);
+            resolveDecode(parsedResult);
+          } catch (err) {
+            resolveDecode({ error: 'Could not decode VIN.' });
+          }
+        };
+        decodeVin();
       });
 
-      let timeoutId = setTimeout(() => { cleanup(); resolve(); }, 10000);
+      let timeoutId = setTimeout(() => {
+        Alert.alert('⚠️ Ad not ready', 'Try again in a few seconds.');
+        cleanup();
+        resolve();
+      }, 10000);
 
       rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
         clearTimeout(timeoutId);
-        try { rewarded.show(); } catch { cleanup(); resolve(); }
+        try { rewarded.show(); }
+        catch (err) { cleanup(); resolve(); }
       });
 
       rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, async () => {
         clearTimeout(timeoutId);
+
         const decodeResult = await decodePromise;
-        if (decodeResult?.vin && decodeResult?.make && decodeResult?.model) {
+
+        if (decodeResult && decodeResult.vin && decodeResult.make && decodeResult.model) {
           const cached = await getVehicleByVin(decodeResult.vin);
           const newVehicle = cached || { id: Date.now().toString(), ...decodeResult };
+
           setVehicle(newVehicle);
           setVinPhoto(null);
           await saveVehicle(newVehicle);
+
           const name = `${newVehicle.year || ''} ${newVehicle.make || ''} ${newVehicle.model || ''}`.trim();
           Alert.alert(`✅ ${name} added to garage`, newVehicle.engine || '');
-        } else if (decodeResult?.error) {
+        } else if (decodeResult && decodeResult.error) {
           Alert.alert('❌ Error', decodeResult.error);
           setVinPhoto(null);
         } else {
           Alert.alert('⚠️ Failed to parse VIN result.', 'No valid vehicle data received.');
           setVinPhoto(null);
         }
-        cleanup(); resolve();
+
+        cleanup();
+        resolve();
       });
 
       try { rewarded.load(); rewardedRef.current = rewarded; }
-      catch (error) { Alert.alert('❌ Ad error', error.message || 'Unknown error'); clearTimeout(timeoutId); cleanup(); resolve(); }
+      catch (error) {
+        Alert.alert('❌ Ad error', error.message || 'Unknown error');
+        clearTimeout(timeoutId);
+        cleanup();
+        resolve();
+      }
     });
   };
 
+  // login + vehicle bootstrap
+  useEffect(() => { (async () => {
+    const user = await AsyncStorage.getItem('user');
+    setIsLoggedIn(!!user);
+  })(); }, []);
+  useEffect(() => { (async () => {
+    const saved = await getAllVehicles();
+    if (saved.length > 0) setVehicle(saved[0]);
+  })(); }, []);
   useEffect(() => {
-    (async () => {
-      const user = await AsyncStorage.getItem('user');
-      setIsLoggedIn(!!user);
-    })();
-  }, []);
-
-  useEffect(() => {
-    (async () => {
-      const saved = await getAllVehicles();
-      if (saved.length > 0) setVehicle(saved[0]);
-    })();
-  }, []);
-
-  useEffect(() => {
-    if (vehicle) AsyncStorage.setItem('selectedVehicle', JSON.stringify(vehicle)).catch(() => {});
+    if (vehicle) {
+      AsyncStorage.setItem('selectedVehicle', JSON.stringify(vehicle))
+        .catch(e => console.error('Failed to save vehicle:', e));
+    }
   }, [vehicle]);
 
   const robotTranslateY = useRef(new Animated.Value(0)).current;
   const robotScale = useRef(new Animated.Value(1)).current;
-
   useEffect(() => {
     Animated.timing(robotTranslateY, { toValue: isChatting ? -80 : 0, duration: 500, useNativeDriver: true }).start();
     Animated.timing(robotScale, { toValue: isChatting ? 0.6 : 1, duration: 500, useNativeDriver: true }).start();
   }, [isChatting]);
 
-  const trimTurns = (history, maxTurns = 6) => {
-    const turns = [];
-    for (let i = history.length - 1; i >= 0 && turns.length < maxTurns * 2; i--) {
-      const msg = history[i];
-      if (msg.role === 'user' || msg.role === 'assistant') turns.unshift(msg);
-    }
-    return turns;
-  };
-
+  // ---- SEND message (calls backend & passes vehicle context)
   const handleSend = async (text) => {
     if (!text.trim()) return;
-
     if (/new issue|start over|reset/i.test(text)) {
-      setChatHistory([]); setMessages([]); setChatID(null); return;
+      setChatHistory([]);
+      setMessages([]);
+      setChatID(null);
+      setActiveChatVehicle(null);
+      return;
     }
 
     const newHistory = [...chatHistory, { role: 'user', content: text }];
@@ -258,7 +303,23 @@ export default function App() {
     setLoading(true);
 
     const trimmedHistory = trimTurns(newHistory);
-    const reply = await sendToGPT('free', trimmedHistory);
+
+    // Prefer overridden vehicle if the model switched earlier in the chat
+    const vehicleForChat =
+      activeChatVehicle?.source === 'overridden' ? activeChatVehicle : vehicle;
+
+    let replyPayload;
+    try {
+      replyPayload = await chatWithBackend('free', trimmedHistory, vehicleForChat);
+    } catch (e) {
+      setLoading(false);
+      setMessages((prev) => [...prev, { sender: 'api', text: '⚠️ There was an error processing your request.' }]);
+      return;
+    }
+
+    const reply = replyPayload.reply || '';
+    const used = replyPayload.vehicle_used || null;
+    if (used) setActiveChatVehicle(used); // remember which vehicle the model actually used
 
     const updatedHistory = [...newHistory, { role: 'assistant', content: reply }];
     setChatHistory(updatedHistory);
@@ -268,9 +329,6 @@ export default function App() {
     const id = chatID || Date.now().toString();
     setChatID(id);
     await saveChat(id, updatedHistory);
-
-    // after a reply, nudge scroll down
-    setFocusTick((x) => x + 1);
   };
 
   const handleExitChat = () => {
@@ -280,34 +338,36 @@ export default function App() {
     setChatHistory([]);
     setChatID(null);
     setShowSavedChats(false);
+    setActiveChatVehicle(null);
   };
 
   const handleChatFocus = () => {
     if (!isChatting) setIsChatting(true);
-    setFocusTick((x) => x + 1);
   };
-
-  const toggleSavedChats = () => {
-    Keyboard.dismiss();
-    setShowSavedChats((prev) => !prev);
-  };
-
-  // how much padding the list should keep at the bottom so newest message isn't under the input
-  const BASE_INPUT_BLOCK = isChatting ? 84 : 76; // input height when collapsed
-  const bottomInset = BASE_INPUT_BLOCK + (kbVisible ? 4 : 0);
 
   const renderContent = () => {
-    if (isLoggedIn === null) return <View style={styles.loading}><ActivityIndicator size="large" /></View>;
+    if (isLoggedIn === null) {
+      return (
+        <View style={styles.loading}>
+          <ActivityIndicator size="large" />
+        </View>
+      );
+    }
+
     if (!isLoggedIn) return <LoginScreen onLogin={() => setIsLoggedIn(true)} />;
 
     return (
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container} keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
         <HomeHeader garageName={garageName} setGarageName={setGarageName} onSettingsPress={() => setShowSettings(true)} />
         <SettingsModal visible={showSettings} onClose={() => setShowSettings(false)} />
 
         {!isChatting && (
           <>
-            <VehicleSelector selectedVehicle={vehicle} onSelectVehicle={setVehicle} triggerVinCamera={() => setShowCamera(true)} />
+            <VehicleSelector
+              selectedVehicle={vehicle}
+              onSelectVehicle={setVehicle}
+              triggerVinCamera={() => setShowCamera(true)}
+            />
             <ServiceBox selectedVehicle={vehicle} />
           </>
         )}
@@ -330,12 +390,7 @@ export default function App() {
         )}
 
         <View style={styles.chatMessagesArea}>
-          <ChatMessages
-            messages={messages}
-            loading={loading}
-            focusTick={focusTick}
-            bottomInset={bottomInset}
-          />
+          <ChatMessages messages={messages} loading={loading} />
         </View>
 
         {isChatting && showSavedChats && (
@@ -343,15 +398,34 @@ export default function App() {
             onClose={() => setShowSavedChats(false)}
             onSelect={(chat) => {
               if (!chat) {
-                setChatID(null); setChatHistory([]); setMessages([]); setShowSavedChats(false); return;
+                setChatID(null);
+                setChatHistory([]);
+                setMessages([]);
+                setShowSavedChats(false);
+                setActiveChatVehicle(null);
+                return;
               }
               setChatID(chat.id);
               setChatHistory(chat.messages);
-              setMessages(chat.messages.map((m) => ({ sender: m.role === 'user' ? 'user' : 'api', text: m.content })));
+              setMessages(
+                chat.messages.map((m) => ({
+                  sender: m.role === 'user' ? 'user' : 'api',
+                  text: m.content,
+                }))
+              );
               setShowSavedChats(false);
-              setFocusTick((x) => x + 1);
+              setActiveChatVehicle(null);
             }}
           />
+        )}
+
+        {isChatting && (
+          <TouchableOpacity
+            style={styles.savedChatsButton}
+            onPress={() => { Keyboard.dismiss(); setShowSavedChats((prev) => !prev); }}
+          >
+            <Text style={styles.savedChatsIcon}>📝</Text>
+          </TouchableOpacity>
         )}
 
         <ChatBoxFixed
@@ -359,7 +433,6 @@ export default function App() {
           onAttachImage={(uri) => setMessages((prev) => [...prev, { sender: 'user', text: `📷 ${uri}` }])}
           onAttachDocument={(file) => setMessages((prev) => [...prev, { sender: 'user', text: `📄 ${file.name}` }])}
           onFocus={handleChatFocus}
-          onOpenSavedNotes={toggleSavedChats}
         />
       </KeyboardAvoidingView>
     );
@@ -368,7 +441,10 @@ export default function App() {
   return (
     <>
       {showCamera ? (
-        <VinCamera onCapture={(photo) => { setShowCamera(false); setVinPhoto(photo); }} onCancel={() => setShowCamera(false)} />
+        <VinCamera
+          onCapture={(photo) => { setShowCamera(false); setVinPhoto(photo); }}
+          onCancel={() => setShowCamera(false)}
+        />
       ) : vinPhoto ? (
         <VinPreview
           photo={vinPhoto}
@@ -401,4 +477,18 @@ const styles = StyleSheet.create({
   robotWrapper: { alignItems: 'center' },
   exitButton: { marginBottom: 8, backgroundColor: '#444', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 12, alignSelf: 'center' },
   exitButtonText: { color: '#fff', fontSize: 14 },
+  savedChatsButton: {
+    position: 'absolute',
+    right: 24,
+    bottom: Platform.OS === 'ios' ? 140 : 120,
+    backgroundColor: '#333',
+    padding: 12,
+    borderRadius: 30,
+    zIndex: 99,
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 6,
+  },
+  savedChatsIcon: { fontSize: 20, color: '#fff' },
 });

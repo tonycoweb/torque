@@ -1,3 +1,4 @@
+// index.js
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -7,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Efficient Torque prompts
+// ---------------- Prompts ----------------
 const getTorquePrompt = (tier = 'free') => {
   if (tier === 'pro') {
     return `
@@ -36,34 +37,82 @@ Bring off-topic chats back with humor.
   `.trim();
 };
 
-// Max token ceilings
-const MAX_TOTAL_TOKENS = {
-  free: 1500,
-  pro: 6000,
-};
+// Build a compact, readable vehicle context line from optional fields
+function summarizeVehicle(v = {}) {
+  if (!v || typeof v !== 'object') return '';
+  const parts = [];
+  if (v.year) parts.push(String(v.year));
+  if (v.make) parts.push(String(v.make));
+  if (v.model) parts.push(String(v.model));
+  const main = parts.join(' ');
+  const extras = [
+    v.trim && `Trim: ${v.trim}`,
+    v.engine && `Engine: ${v.engine}`,
+    v.transmission && `Trans: ${v.transmission}`,
+    v.drive_type && `Drive: ${v.drive_type}`,
+    v.body_style && `Body: ${v.body_style}`,
+  ].filter(Boolean).join(' | ');
+  return extras ? `${main} (${extras})` : main;
+}
 
-// Estimate total tokens (simple heuristic)
+// Compose a system helper message that sets default vehicle + metadata contract
+function vehicleSystemMessage(vehicle) {
+  const hasVehicle = vehicle && vehicle.make && vehicle.model;
+  const summary = hasVehicle ? summarizeVehicle(vehicle) : 'unknown';
+
+  return `
+VEHICLE CONTEXT:
+- Default vehicle for this conversation: ${summary}.
+- Assume questions refer to this vehicle unless the user clearly switches to a different one.
+- If the user mentions another vehicle (year/make/model/trim/engine), prefer that for THIS reply.
+
+AMBIGUITY POLICY:
+- If the user question is clearly general (e.g., "how to jump start a car", "what is a timing belt"), answer generally.
+- If the answer would differ by vehicle (fluids, torques, part location, common failures, etc.) **and** the user's intent is unclear,
+  start with a very short confirmation like: "Are we talking about your ${hasVehicle ? summary : 'vehicle'}?"
+  Then continue with the most likely answer assuming the default vehicle, and invite corrections in one short clause.
+  Keep confirmations concise (<= 1 short sentence).
+
+TONE & FORMAT:
+- Keep replies short, mechanic-clear, and confident.
+- If you made an assumption, briefly say: "Assuming ${hasVehicle ? summary : 'no specific vehicle'}—correct me if not."
+
+METADATA CONTRACT (IMPORTANT):
+- At the very end of EVERY reply, append exactly one line:
+  [[META: {"vehicle_used": <object-or-null>}]]
+- "vehicle_used" must reflect the vehicle actually used for reasoning for THIS reply (either the default or a user-specified one).
+- If unknown, set "vehicle_used": null.
+- Do NOT explain this metadata; keep it as the final line only.
+  `.trim();
+}
+
+// ---------------- Token controls ----------------
+const MAX_TOTAL_TOKENS = { free: 1500, pro: 6000 };
+
 function estimateTokenCount(messages) {
   const joined = messages.map(m => `${m.role}:${m.content}`).join('\n');
   return Math.round(joined.length / 4);
 }
 
-// Trim chat history down to last N user/assistant turns + system
+// Keep ALL system messages; trim only user/assistant turns.
 function trimHistory(messages, maxTurns = 6) {
-  const system = messages.find((m) => m.role === 'system');
-  const convo = messages.filter(m => m.role !== 'system');
+  const systemMessages = messages.filter((m) => m.role === 'system');
+  const convo = messages.filter((m) => m.role !== 'system');
   const recent = convo.slice(-maxTurns * 2);
-  return system ? [system, ...recent] : recent;
+  return [...systemMessages, ...recent];
 }
 
+// ---------------- Routes ----------------
 app.post('/chat', async (req, res) => {
-  const { messages = [], tier = 'free' } = req.body;
+  const { messages = [], tier = 'free', vehicle = null } = req.body;
 
-  const systemPrompt = { role: 'system', content: getTorquePrompt(tier) };
-  const hasPrompt = messages.some(m => m.role === 'system' && m.content.includes('Torque'));
-  const injected = hasPrompt ? messages : [systemPrompt, ...messages];
+  // Always inject our two system messages; keep only user/assistant from client
+  const baseSystem = { role: 'system', content: getTorquePrompt(tier) };
+  const vehicleSystem = { role: 'system', content: vehicleSystemMessage(vehicle) };
+  const userAssistantOnly = messages.filter(m => m.role === 'user' || m.role === 'assistant');
+  const injected = [baseSystem, vehicleSystem, ...userAssistantOnly];
+
   const finalMessages = trimHistory(injected);
-
   const estimatedTokens = estimateTokenCount(finalMessages);
   if (estimatedTokens > MAX_TOTAL_TOKENS[tier]) {
     return res.status(400).json({ error: '🛑 Token limit exceeded. Please shorten your chat or upgrade to Pro.' });
@@ -76,7 +125,7 @@ app.post('/chat', async (req, res) => {
         model: 'gpt-4o',
         messages: finalMessages,
         temperature: tier === 'pro' ? 0.7 : 0.5,
-        max_tokens: 600,
+        max_tokens: 700,
       },
       {
         headers: {
@@ -86,11 +135,26 @@ app.post('/chat', async (req, res) => {
       }
     );
 
-    const reply = response.data.choices[0].message.content;
+    let raw = response.data.choices?.[0]?.message?.content ?? '';
     const usage = response.data.usage;
 
-    console.log('🧮 Token Usage:', usage);
-    res.json({ reply, usage });
+    // Parse trailing [[META: {...}]] line
+    let vehicle_used = null;
+    const metaMatch = raw.match(/\[\[META:\s*(\{[\s\S]*?\})\s*\]\]\s*$/);
+    if (metaMatch) {
+      try {
+        const meta = JSON.parse(metaMatch[1]);
+        if (meta && typeof meta === 'object' && 'vehicle_used' in meta) {
+          vehicle_used = meta.vehicle_used || null;
+        }
+      } catch (e) {
+        // ignore parse errors
+      }
+      // Strip meta from the reply shown to user
+      raw = raw.replace(/\n?\s*\[\[META:[\s\S]*\]\]\s*$/, '').trim();
+    }
+
+    res.json({ reply: raw, usage, vehicle_used });
   } catch (error) {
     console.error('OpenAI Error:', error.response?.data || error.message);
     res.status(500).json({ error: 'Something went wrong with OpenAI' });
@@ -138,12 +202,7 @@ Do not explain. Only return a raw JSON object — no markdown, no headings, no d
             role: 'user',
             content: [
               { type: 'text', text: 'Here is a photo of a VIN. Please extract and decode it:' },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: `data:image/jpeg;base64,${base64Image}`,
-                },
-              },
+              { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64Image}` } },
             ],
           },
         ],
@@ -220,10 +279,7 @@ Expected keys:
 - variants (optional array of differing configurations)
             `.trim(),
           },
-          {
-            role: 'user',
-            content: `Year: ${year}, Make: ${make}, Model: ${model}, Engine: ${engine || '(blank)'}`,
-          },
+          { role: 'user', content: `Year: ${year}, Make: ${make}, Model: ${model}, Engine: ${engine || '(blank)'}` },
         ],
         temperature: 0.3,
         max_tokens: 600,
@@ -245,7 +301,6 @@ Expected keys:
   }
 });
 
-// --- REPLACE your /generate-service-recommendations handler with this ---
 app.post('/generate-service-recommendations', async (req, res) => {
   const { vehicle, currentMileage } = req.body;
   if (!vehicle || !vehicle.year || !vehicle.make || !vehicle.model) {
@@ -320,17 +375,12 @@ REQUIREMENTS (important):
       return res.status(500).json({ error: 'Failed to parse service recommendations.' });
     }
 
-    // Helpers
     const cleanText = (t) => {
       const s = String(t || '').trim();
-      // Remove trailing interval hints if model ever slips:
       const rx = /\s*(?:[-–—]\s*)?(?:every\s+)?\d[\d,\.kK]*\s*(?:mi|miles?)\s*(?:\/\s*\d+\s*months?)?$/i;
       return s.replace(rx, '').trim();
     };
-    const toNum = (v) => {
-      const n = Number(v);
-      return Number.isFinite(n) ? n : undefined;
-    };
+    const toNum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : undefined; };
 
     const sanitized = result.map((item) => {
       const priority = String(item.priority || '').toLowerCase();
@@ -350,9 +400,6 @@ REQUIREMENTS (important):
     res.status(500).json({ error: 'Failed to generate service recommendations.' });
   }
 });
-
-
-
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
