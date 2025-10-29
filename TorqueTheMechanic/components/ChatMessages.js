@@ -1,5 +1,4 @@
-// ChatMessages.js
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useMemo } from 'react';
 import {
   ScrollView,
   View,
@@ -13,13 +12,75 @@ import {
 } from 'react-native';
 import Markdown from 'react-native-markdown-display';
 import Icon from 'react-native-vector-icons/FontAwesome';
+import ZoomableSvg from './SvgWrapper';
+
+// ---- helpers to parse reply content ----
+function extractBlocks(text = '', tag) {
+  // Finds ```<tag>\n...\n```
+  const blocks = [];
+  const regex = new RegExp('```' + tag + '\\s*([\\s\\S]*?)```', 'g');
+  let m;
+  while ((m = regex.exec(text)) !== null) {
+    blocks.push({ raw: m[1].trim(), start: m.index, end: regex.lastIndex });
+  }
+  return blocks;
+}
+
+function splitIntoSegments(text = '') {
+  // Support: diagram-json (debug as code), svg (render)
+  const dj = extractBlocks(text, 'diagram-json');
+  const sv = extractBlocks(text, 'svg');
+
+  if (dj.length === 0 && sv.length === 0) return [{ type: 'md', content: text }];
+
+  const all = [
+    ...dj.map(b => ({ ...b, type: 'diagram-json' })),
+    ...sv.map(b => ({ ...b, type: 'svg' })),
+  ].sort((a, b) => a.start - b.start);
+
+  const parts = [];
+  let cursor = 0;
+  for (const b of all) {
+    const before = text.slice(cursor, b.start);
+    if (before.trim()) parts.push({ type: 'md', content: before });
+
+    if (b.type === 'diagram-json') {
+      // Show the JSON as fenced code for now (keeps things generic)
+      parts.push({ type: 'md', content: '```json\n' + b.raw + '\n```' });
+    } else if (b.type === 'svg') {
+      // small safety limit (front-end guard; your backend already sanitizes)
+      const safe = b.raw.length <= 20000 ? b.raw : b.raw.slice(0, 20000);
+      parts.push({ type: 'svg', content: safe });
+    }
+    cursor = b.end;
+  }
+  const tail = text.slice(cursor);
+  if (tail.trim()) parts.push({ type: 'md', content: tail });
+  return parts;
+}
+
+// Infer a good render height from the SVG viewBox to preserve aspect ratio
+function inferSvgHeight(xml, defaultHeight = 240) {
+  try {
+    const m = xml.match(/viewBox\s*=\s*["']\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*["']/i);
+    if (!m) return defaultHeight;
+    const w = parseFloat(m[3]), h = parseFloat(m[4]);
+    if (w > 0 && h > 0) {
+      // Aim for ~100% width; pick height that keeps ratio but clamp
+      const ratio = h / w;
+      const est = Math.max(160, Math.min(480, Math.round(360 * ratio))); // clamp between 160–480
+      return est;
+    }
+  } catch {}
+  return defaultHeight;
+}
 
 export default function ChatMessages({
   messages,
   loading,
   onExitChat,
   focusTick = 0,
-  bottomInset = 84, // measured composer height from ChatBoxFixed via onMeasuredHeight
+  bottomInset = 84,
 }) {
   const scrollViewRef = useRef(null);
   const prevMessageCount = useRef(0);
@@ -30,7 +91,6 @@ export default function ChatMessages({
     requestAnimationFrame(() => scrollViewRef.current?.scrollToEnd({ animated }));
   };
 
-  // Keep "near-bottom" detection so we don't yank history while reading
   const handleScroll = (e) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
     const paddingToBottom = 40;
@@ -38,7 +98,6 @@ export default function ChatMessages({
       contentOffset.y + layoutMeasurement.height + paddingToBottom >= contentSize.height;
   };
 
-  // New messages → autoscroll only if user is near bottom
   useEffect(() => {
     if (!scrollViewRef.current) return;
     if (messages.length >= prevMessageCount.current && atBottomRef.current) {
@@ -47,25 +106,21 @@ export default function ChatMessages({
     prevMessageCount.current = messages.length;
   }, [messages]);
 
-  // Input focus → immediate scroll and a delayed scroll to catch KAV/keyboard animation
   useEffect(() => {
     if (!scrollViewRef.current) return;
     lastFocusTickRef.current = focusTick;
-    // 1) Immediate nudge (in case content already fits)
     scrollToEnd(true);
-    // 2) After keyboard animation finishes (iOS has a willShow duration, Android settles fast)
     const delay = Platform.OS === 'ios' ? 250 : 80;
     const t = setTimeout(() => scrollToEnd(true), delay);
     return () => clearTimeout(t);
   }, [focusTick]);
 
-  // Keyboard events → do not change padding, just ensure we re-scroll after the lift/resize
   useEffect(() => {
     const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const changeEvt = Platform.OS === 'ios' ? 'keyboardWillChangeFrame' : null;
+    const pendingTimers = { current: [] };
 
     const handleKeyboardAdjust = (e) => {
-      // Immediate + after the reported duration (fallbacks included)
       scrollToEnd(false);
       const dur =
         (Platform.OS === 'ios' && typeof e?.duration === 'number' ? e.duration : null) ??
@@ -74,7 +129,6 @@ export default function ChatMessages({
       pendingTimers.current.push(t);
     };
 
-    const pendingTimers = { current: [] };
     const subShow = Keyboard.addListener(showEvt, handleKeyboardAdjust);
     const subChange = changeEvt ? Keyboard.addListener(changeEvt, handleKeyboardAdjust) : { remove: () => {} };
 
@@ -85,7 +139,6 @@ export default function ChatMessages({
     };
   }, []);
 
-  // Only pad by the composer height (plus a tiny breathing room). No keyboard height here.
   const effectiveBottom = Math.max(0, bottomInset) + 6;
 
   return (
@@ -94,12 +147,10 @@ export default function ChatMessages({
         ref={scrollViewRef}
         style={styles.scroller}
         contentContainerStyle={[styles.messagesContainer, { paddingBottom: effectiveBottom }]}
-        // Let padding do the work; avoid doubling with contentInset on iOS
         scrollIndicatorInsets={{ bottom: effectiveBottom }}
         removeClippedSubviews={Platform.OS === 'android'}
         keyboardShouldPersistTaps="handled"
         onContentSizeChange={() => {
-          // If user is at bottom OR this was triggered by a recent focus, keep end in view
           if (atBottomRef.current || lastFocusTickRef.current === focusTick) {
             scrollToEnd(true);
           }
@@ -113,7 +164,7 @@ export default function ChatMessages({
               <Text style={styles.userText}>{msg.text}</Text>
             </View>
           ) : (
-            <AnimatedReply key={index} text={msg.text} />
+            <AssistantReply key={index} text={msg.text} />
           )
         )}
 
@@ -128,14 +179,25 @@ export default function ChatMessages({
   );
 }
 
-function AnimatedReply({ text }) {
+function AssistantReply({ text }) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 300, useNativeDriver: true }).start();
   }, []);
+
+  const segments = useMemo(() => splitIntoSegments(text), [text]);
+
   return (
     <Animated.View style={[styles.assistantContainer, { opacity: fadeAnim }]}>
-      <Markdown style={markdownStyle}>{text}</Markdown>
+      {segments.map((seg, i) =>
+        seg.type === 'svg' ? (
+          <View key={`s-${i}`} style={{ marginVertical: 8 }}>
+            <ZoomableSvg xml={seg.content} height={inferSvgHeight(seg.content, 240)} />
+          </View>
+        ) : (
+          <Markdown key={`m-${i}`} style={markdownStyle}>{seg.content}</Markdown>
+        )
+      )}
     </Animated.View>
   );
 }

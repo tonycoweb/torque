@@ -46,6 +46,16 @@ const normalizeVin = (str = '') =>
 
 const isValidVin = (vin = '') => /^[A-HJ-NPR-Z0-9]{17}$/.test(vin);
 
+// ✅ Ensure vehicle has a stable id
+const ensureId = (v = {}) => {
+  const id =
+    v.id?.toString?.() ||
+    (v.vin ? String(v.vin) : undefined) ||
+    [v.year, v.make, v.model].filter(Boolean).join('-') ||
+    undefined;
+  return id ? { ...v, id } : { ...v, id: Math.random().toString(36).slice(2) };
+};
+
 // ---------- STATIC IMAGES ----------
 const vinLocations = [
   { id: '1', label: 'Registration Card', image: require('../assets/vin_registration_card.png') },
@@ -59,8 +69,8 @@ export default function VehicleSelector({
   selectedVehicle = null,
   onSelectVehicle,
   triggerVinCamera,
-  onShowRewardedAd,     // optional: provide parent ad helper; must resolve true ONLY on earned reward
-  gateCameraWithAd = false, // set true if you also want to gate camera with ad
+  onShowRewardedAd,
+  gateCameraWithAd = false,
 }) {
   // UI state
   const [modalVisible, setModalVisible] = useState(false);
@@ -106,10 +116,11 @@ export default function VehicleSelector({
 
   const loadGarage = async () => {
     const saved = await getAllVehicles();
-    setVehicles(saved.reverse());
+    const withIds = (saved || []).map(ensureId).reverse();
+    setVehicles(withIds);
   };
 
-  // ---------- Ad fallback (used if parent doesn't provide onShowRewardedAd) ----------
+  // ---------- Ad fallback ----------
   const showRewardedAdFallback = () =>
     new Promise((resolve) => {
       try {
@@ -118,44 +129,22 @@ export default function VehicleSelector({
         });
 
         const cleanup = () => rewarded.removeAllListeners();
-
-        // Timeout safety
-        const timeoutId = setTimeout(() => {
-          cleanup();
-          resolve(false);
-        }, 15000);
+        const timeoutId = setTimeout(() => { cleanup(); resolve(false); }, 15000);
 
         rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
-          try {
-            rewarded.show();
-          } catch {
-            clearTimeout(timeoutId);
-            cleanup();
-            resolve(false);
-          }
+          try { rewarded.show(); } catch { clearTimeout(timeoutId); cleanup(); resolve(false); }
         });
-
         rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => {
-          clearTimeout(timeoutId);
-          cleanup();
-          resolve(true);
+          clearTimeout(timeoutId); cleanup(); resolve(true);
         });
-
-        // If the SDK exposes CLOSED, treat it as no reward
         if (RewardedAdEventType.CLOSED) {
           rewarded.addAdEventListener(RewardedAdEventType.CLOSED, () => {
-            clearTimeout(timeoutId);
-            cleanup();
-            resolve(false);
+            clearTimeout(timeoutId); cleanup(); resolve(false);
           });
         }
-
-        // Error path
         if (RewardedAdEventType.ERROR) {
           rewarded.addAdEventListener(RewardedAdEventType.ERROR, () => {
-            clearTimeout(timeoutId);
-            cleanup();
-            resolve(false);
+            clearTimeout(timeoutId); cleanup(); resolve(false);
           });
         }
 
@@ -165,7 +154,7 @@ export default function VehicleSelector({
       }
     });
 
-  // ---------- Camera VIN flow (optionally gated) ----------
+  // ---------- Camera VIN flow ----------
   const handleAddNew = () => {
     setModalVisible(false);
     setShowVinModal(true);
@@ -187,7 +176,7 @@ export default function VehicleSelector({
     triggerVinCamera();
   };
 
-  // ---------- Typed VIN flow (always gated) ----------
+  // ---------- Typed VIN flow ----------
   const handleDecodeTypedVin = async () => {
     const vin = normalizeVin(typedVin);
     if (!isValidVin(vin)) {
@@ -195,7 +184,6 @@ export default function VehicleSelector({
       return;
     }
 
-    // 1) Ad must reward first
     setAdLoading(true);
     try {
       const rewarded = onShowRewardedAd
@@ -214,7 +202,6 @@ export default function VehicleSelector({
     }
     setAdLoading(false);
 
-    // 2) Decode after reward
     setDecoding(true);
     try {
       const resp = await fetch(`${API_BASE}/decode-vin-text`, {
@@ -231,12 +218,13 @@ export default function VehicleSelector({
         throw new Error('VIN decoded but missing key fields.');
       }
 
-      await saveVehicle(vehicle);
-      setVehicles(prev => [vehicle, ...prev]);
-      onSelectVehicle(vehicle);
+      const withId = ensureId(vehicle);
+      await saveVehicle(withId);
+      setVehicles(prev => [withId, ...prev]);
+      onSelectVehicle(withId);             // ✅ selection always has id
 
-      const name = `${vehicle.year || ''} ${vehicle.make || ''} ${vehicle.model || ''}`.trim();
-      Alert.alert(`✅ ${name} added to garage`, vehicle.engine || '');
+      const name = `${withId.year || ''} ${withId.make || ''} ${withId.model || ''}`.trim();
+      Alert.alert(`✅ ${name} added to garage`, withId.engine || '');
       setShowVinModal(false);
       setTypedVin('');
     } catch (e) {
@@ -286,13 +274,13 @@ export default function VehicleSelector({
   };
 
   const handleSaveEdit = async () => {
-    const updatedVehicle = {
+    const updatedVehicle = ensureId({
       ...editableVehicle,
       mpg:
         editableVehicle.mpgCity && editableVehicle.mpgHighway
           ? `${editableVehicle.mpgCity} city / ${editableVehicle.mpgHighway} highway`
           : editableVehicle.mpg || '',
-    };
+    });
     delete updatedVehicle.mpgCity;
     delete updatedVehicle.mpgHighway;
 
@@ -300,7 +288,7 @@ export default function VehicleSelector({
     const updatedList = vehicles.map(v => (v.vin === updatedVehicle.vin ? updatedVehicle : v));
     setVehicles(updatedList);
     if (selectedVehicle?.vin === updatedVehicle.vin) {
-      onSelectVehicle(updatedVehicle);
+      onSelectVehicle(updatedVehicle);     // ✅ keep id stable
     }
     setEditMode(false);
     setEditableVehicle(null);
@@ -313,28 +301,31 @@ export default function VehicleSelector({
     return match ? `${match[1]}/${match[2]}` : '--/--';
   };
 
-  const renderVehicle = ({ item }) => (
-    <TouchableOpacity
-      style={styles.vehicleCard}
-      onPress={() => {
-        onSelectVehicle(item);
-        setModalVisible(false);
-      }}
-    >
-      <Text style={styles.title}>{item.year} {item.make} {item.model}</Text>
-      <Text style={styles.details}>
-        {item.engine || '—'} • {item.transmission || '—'} • {item.hp || '--'} HP • {renderMpg(item.mpg)} MPG • GVW {item.gvw || '--'}
-      </Text>
-      <View style={styles.inlineBtns}>
-        <TouchableOpacity onPress={() => handleEdit(item)} style={styles.actionBtn}>
-          <Text style={styles.smallText}>✏️ Edit</Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => handleDelete(item.vin)} style={styles.actionBtn}>
-          <Text style={styles.smallText}>🗑️ Delete</Text>
-        </TouchableOpacity>
-      </View>
-    </TouchableOpacity>
-  );
+  const renderVehicle = ({ item }) => {
+    const withId = ensureId(item);
+    return (
+      <TouchableOpacity
+        style={styles.vehicleCard}
+        onPress={() => {
+          onSelectVehicle(withId);        // ✅ ensure id on selection
+          setModalVisible(false);
+        }}
+      >
+        <Text style={styles.title}>{withId.year} {withId.make} {withId.model}</Text>
+        <Text style={styles.details}>
+          {withId.engine || '—'} • {withId.transmission || '—'} • {withId.hp || '--'} HP • {renderMpg(withId.mpg)} MPG • GVW {withId.gvw || '--'}
+        </Text>
+        <View style={styles.inlineBtns}>
+          <TouchableOpacity onPress={() => handleEdit(withId)} style={styles.actionBtn}>
+            <Text style={styles.smallText}>✏️ Edit</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => handleDelete(withId.vin)} style={styles.actionBtn}>
+            <Text style={styles.smallText}>🗑️ Delete</Text>
+          </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+    );
+  };
 
   // ---------- UI ----------
   return (
@@ -364,7 +355,7 @@ export default function VehicleSelector({
             <Text style={styles.modalTitle}>Your Garage</Text>
             <FlatList
               data={vehicles}
-              keyExtractor={(item) => item.vin || Math.random().toString()}
+              keyExtractor={(item) => ensureId(item).id}
               renderItem={renderVehicle}
               contentContainerStyle={{ paddingBottom: 40 }}
             />
@@ -386,7 +377,7 @@ export default function VehicleSelector({
 
               <Text style={styles.modalTitle}>Add Your Vehicle</Text>
 
-              {/* Camera option (optionally gated) */}
+              {/* Camera option */}
               <TouchableOpacity
                 style={[styles.optionButton, (adLoading) && { opacity: 0.7 }]}
                 onPress={handleCaptureVin}
@@ -405,7 +396,7 @@ export default function VehicleSelector({
                 )}
               </TouchableOpacity>
 
-              {/* Typed VIN entry (always gated by ad) */}
+              {/* Typed VIN entry */}
               <View style={{ width: '100%', marginTop: 10 }}>
                 <Text style={styles.sectionTitle}>Or Type Your VIN</Text>
                 <Text style={styles.helperText}>Enter the full 17-character VIN (no I/O/Q). We’ll verify it after an ad.</Text>

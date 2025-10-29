@@ -23,7 +23,7 @@ import ChatBoxFixed from './components/ChatBoxFixed';
 import SavedChatsPanel from './components/SavedChatsPanel';
 import VehicleSelector from './components/VehicleSelector';
 import LoginScreen from './components/LoginScreen';
-import { saveChat, getAllChats } from './utils/storage';
+import { saveChat } from './utils/storage';
 import { LogBox, LayoutAnimation, UIManager } from 'react-native';
 import VinCamera from './components/VinCamera';
 import VinPreview from './components/VinPreview';
@@ -55,6 +55,16 @@ const trimTurns = (history, maxTurns = 6) => {
     }
   }
   return turns;
+};
+
+// ✅ Ensure every vehicle has a stable id
+const normalizeVehicle = (v = {}) => {
+  const id =
+    v.id?.toString?.() ||
+    (v.vin ? String(v.vin) : undefined) ||
+    [v.year, v.make, v.model].filter(Boolean).join('-') ||
+    undefined;
+  return id ? { ...v, id } : { ...v, id: Math.random().toString(36).slice(2) };
 };
 
 // ---- Local helper: call backend (replaces GptService.js)
@@ -118,7 +128,7 @@ export default function App() {
     });
   };
 
-  // VIN decode helpers
+  // VIN decode helpers (unchanged)
   const parseVinReply = (text) => {
     const data = {};
     const jsonMatch = text.match(/```json\s*([\s\S]+?)\s*```/);
@@ -186,92 +196,93 @@ export default function App() {
   };
 
   const decodeVinWithAd = async (base64Image) => {
-  // Gate on rewarded ad first
-  return new Promise((resolve) => {
-    const rewarded = RewardedAd.createForAdRequest(adUnitId, { requestNonPersonalizedAdsOnly: true });
+    return new Promise((resolve) => {
+      const rewarded = RewardedAd.createForAdRequest(adUnitId, { requestNonPersonalizedAdsOnly: true });
+      const cleanup = () => rewarded.removeAllListeners();
 
-    const cleanup = () => rewarded.removeAllListeners();
+      let timeoutId = setTimeout(() => {
+        Alert.alert('⚠️ Ad not ready', 'Try again in a few seconds.');
+        cleanup();
+        resolve();
+      }, 10000);
 
-    let timeoutId = setTimeout(() => {
-      Alert.alert('⚠️ Ad not ready', 'Try again in a few seconds.');
-      cleanup();
-      resolve();
-    }, 10000);
+      rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
+        clearTimeout(timeoutId);
+        try { rewarded.show(); } catch { cleanup(); resolve(); }
+      });
 
-    rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
-      clearTimeout(timeoutId);
-      try { rewarded.show(); } catch { cleanup(); resolve(); }
-    });
+      rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, async () => {
+        setShowDecodingModal(true);
+        try {
+          const resp = await fetch('http://192.168.1.246:3001/decode-vin', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ base64Image }),
+          });
 
-    rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, async () => {
-      // Only AFTER reward do we call the backend
-      setShowDecodingModal(true);
-      try {
-        const resp = await fetch('http://192.168.1.246:3001/decode-vin', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ base64Image }),
-        });
+          const data = await resp.json();
 
-        const data = await resp.json();
+          if (!resp.ok) {
+            Alert.alert('❌ VIN Decode Failed', data?.error || `HTTP ${resp.status}`);
+            setVinPhoto(null);
+            setShowDecodingModal(false);
+            cleanup();
+            return resolve();
+          }
 
-        if (!resp.ok) {
-          Alert.alert('❌ VIN Decode Failed', data?.error || `HTTP ${resp.status}`);
+          const vehicleFromPhoto = data?.vehicle;
+          if (vehicleFromPhoto && vehicleFromPhoto.vin && vehicleFromPhoto.make && vehicleFromPhoto.model) {
+            const normalized = normalizeVehicle(vehicleFromPhoto);
+            await saveVehicle(normalized); // persist with id
+            setVehicle(normalized);        // set in state
+            setActiveChatVehicle(null);    // ✅ ensure chat uses *current* car next send
+            setVinPhoto(null);
+
+            const name = `${normalized.year || ''} ${normalized.make || ''} ${normalized.model || ''}`.trim();
+            Alert.alert(`✅ ${name} added to garage`, normalized.engine || '');
+          } else {
+            Alert.alert('⚠️ No valid vehicle data', 'Could not parse a VIN from that image.');
+            setVinPhoto(null);
+          }
+        } catch (err) {
+          Alert.alert('❌ Error', err?.message || 'Could not decode VIN.');
           setVinPhoto(null);
+        } finally {
           setShowDecodingModal(false);
           cleanup();
-          return resolve();
+          resolve();
         }
+      });
 
-        const vehicleFromPhoto = data?.vehicle;
-        if (vehicleFromPhoto && vehicleFromPhoto.vin && vehicleFromPhoto.make && vehicleFromPhoto.model) {
-          const newVehicle = vehicleFromPhoto;
-          setVehicle(newVehicle);
-          await saveVehicle(newVehicle);
-          setVinPhoto(null);
-
-          const name = `${newVehicle.year || ''} ${newVehicle.make || ''} ${newVehicle.model || ''}`.trim();
-          Alert.alert(`✅ ${name} added to garage`, newVehicle.engine || '');
-        } else {
-          Alert.alert('⚠️ No valid vehicle data', 'Could not parse a VIN from that image.');
-          setVinPhoto(null);
-        }
-      } catch (err) {
-        Alert.alert('❌ Error', err?.message || 'Could not decode VIN.');
-        setVinPhoto(null);
-      } finally {
-        setShowDecodingModal(false);
+      try { rewarded.load(); rewardedRef.current = rewarded; }
+      catch (error) {
+        clearTimeout(timeoutId);
         cleanup();
+        Alert.alert('❌ Ad error', error?.message || 'Unknown error');
         resolve();
       }
     });
-
-    try {
-      rewarded.load();
-      rewardedRef.current = rewarded;
-    } catch (error) {
-      clearTimeout(timeoutId);
-      cleanup();
-      Alert.alert('❌ Ad error', error?.message || 'Unknown error');
-      resolve();
-    }
-  });
-};
-
+  };
 
   // login + vehicle bootstrap
   useEffect(() => { (async () => {
     const user = await AsyncStorage.getItem('user');
     setIsLoggedIn(!!user);
   })(); }, []);
+
   useEffect(() => { (async () => {
     const saved = await getAllVehicles();
-    if (saved.length > 0) setVehicle(saved[0]);
+    const normalizedList = (saved || []).map(normalizeVehicle);
+    if (normalizedList.length > 0) {
+      setVehicle(normalizeVehicle(normalizedList[0]));
+    }
   })(); }, []);
+
+  // Persist selected vehicle & clear any chat vehicle override whenever it changes
   useEffect(() => {
     if (vehicle) {
-      AsyncStorage.setItem('selectedVehicle', JSON.stringify(vehicle))
-        .catch(e => console.error('Failed to save vehicle:', e));
+      AsyncStorage.setItem('selectedVehicle', JSON.stringify(vehicle)).catch(() => {});
+      setActiveChatVehicle(null); // ✅ chat will use the new `vehicle` immediately
     }
   }, [vehicle]);
 
@@ -299,8 +310,6 @@ export default function App() {
     setLoading(true);
 
     const trimmedHistory = trimTurns(newHistory);
-
-    // Prefer overridden vehicle if the model switched earlier in the chat
     const vehicleForChat =
       activeChatVehicle?.source === 'overridden' ? activeChatVehicle : vehicle;
 
@@ -341,6 +350,14 @@ export default function App() {
     if (!isChatting) setIsChatting(true);
   };
 
+  // ✅ Wrap onSelectVehicle so every selection is normalized + clears chat override
+  const handleSelectVehicle = async (v) => {
+    const normalized = normalizeVehicle(v);
+    await saveVehicle(normalized);     // make sure it persists with id
+    setVehicle(normalized);
+    setActiveChatVehicle(null);        // ensure chat context flips to the newly selected car
+  };
+
   const renderContent = () => {
     if (isLoggedIn === null) {
       return (
@@ -360,11 +377,11 @@ export default function App() {
         {!isChatting && (
           <>
             <VehicleSelector
-             selectedVehicle={vehicle}
-  onSelectVehicle={setVehicle}
-  triggerVinCamera={() => setShowCamera(true)}
-  onShowRewardedAd={showRewardedAd}     // must resolve true ONLY when user earned reward
-  gateCameraWithAd={false}    
+              selectedVehicle={vehicle}
+              onSelectVehicle={handleSelectVehicle}    // ✅ normalized + persist
+              triggerVinCamera={() => setShowCamera(true)}
+              onShowRewardedAd={showRewardedAd}
+              gateCameraWithAd={false}
             />
             <ServiceBox selectedVehicle={vehicle} />
           </>
