@@ -1,31 +1,11 @@
-// VehicleSelector.js
+// components/VehicleSelector.js
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  Modal,
-  FlatList,
-  Alert,
-  TextInput,
-  SafeAreaView,
-  Image,
-  ScrollView,
-  ActivityIndicator,
-  Platform,
+  View, Text, StyleSheet, TouchableOpacity, Modal, FlatList, Alert, TextInput,
+  SafeAreaView, Image, ScrollView, ActivityIndicator, Platform,
 } from 'react-native';
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
-  withSpring,
-} from 'react-native-reanimated';
-import {
-  RewardedAd,
-  RewardedAdEventType,
-} from 'react-native-google-mobile-ads';
-
+import Animated, { useSharedValue, useAnimatedStyle, withTiming, withSpring } from 'react-native-reanimated';
+import { RewardedAd, RewardedAdEventType } from 'react-native-google-mobile-ads';
 import { getAllVehicles, deleteVehicleByVin, saveVehicle } from '../utils/VehicleStorage';
 
 // ---------- CONFIG ----------
@@ -33,16 +13,13 @@ const API_BASE = 'http://192.168.1.246:3001';
 
 const adUnitId = __DEV__
   ? Platform.OS === 'ios'
-    ? 'ca-app-pub-3940256099942544/1712485313' // iOS test rewarded ad unit ID
-    : 'ca-app-pub-3940256099942544/5224354917' // Android test rewarded ad unit ID
-  : 'your-real-admob-id-here'; // <- replace for production
+    ? 'ca-app-pub-3940256099942544/1712485313'
+    : 'ca-app-pub-3940256099942544/5224354917'
+  : 'your-real-admob-id-here';
 
 // ---------- VIN HELPERS ----------
 const normalizeVin = (str = '') =>
-  String(str)
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '')
-    .replace(/[IOQ]/g, '');
+  String(str).toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/[IOQ]/g, '');
 
 const isValidVin = (vin = '') => /^[A-HJ-NPR-Z0-9]{17}$/.test(vin);
 
@@ -64,11 +41,10 @@ const vinLocations = [
   { id: '4', label: 'Windshield Corner', image: require('../assets/vin_windshield.png') },
 ];
 
-// ---------- COMPONENT ----------
 export default function VehicleSelector({
   selectedVehicle = null,
   onSelectVehicle,
-  triggerVinCamera,
+  triggerVinCamera,        // ✅ passed from App to open camera
   onShowRewardedAd,
   gateCameraWithAd = false,
 }) {
@@ -93,9 +69,7 @@ export default function VehicleSelector({
   const modalOpacity = useSharedValue(0);
   const modalTranslateY = useSharedValue(100);
 
-  useEffect(() => {
-    if (modalVisible) loadGarage();
-  }, [modalVisible]);
+  useEffect(() => { if (modalVisible) loadGarage(); }, [modalVisible]);
 
   useEffect(() => {
     const isOpen = modalVisible || showVinModal || editMode;
@@ -124,10 +98,7 @@ export default function VehicleSelector({
   const showRewardedAdFallback = () =>
     new Promise((resolve) => {
       try {
-        const rewarded = RewardedAd.createForAdRequest(adUnitId, {
-          requestNonPersonalizedAdsOnly: true,
-        });
-
+        const rewarded = RewardedAd.createForAdRequest(adUnitId, { requestNonPersonalizedAdsOnly: true });
         const cleanup = () => rewarded.removeAllListeners();
         const timeoutId = setTimeout(() => { cleanup(); resolve(false); }, 15000);
 
@@ -163,9 +134,7 @@ export default function VehicleSelector({
   const handleCaptureVin = async () => {
     if (gateCameraWithAd) {
       setAdLoading(true);
-      const rewarded = onShowRewardedAd
-        ? await onShowRewardedAd()
-        : await showRewardedAdFallback();
+      const rewarded = onShowRewardedAd ? await onShowRewardedAd() : await showRewardedAdFallback();
       setAdLoading(false);
       if (!rewarded) {
         Alert.alert('Ad Required', 'Please watch the full ad to use the VIN camera.');
@@ -173,7 +142,7 @@ export default function VehicleSelector({
       }
     }
     setShowVinModal(false);
-    triggerVinCamera();
+    triggerVinCamera?.(); // ✅ open VinCamera (App mounts it)
   };
 
   // ---------- Typed VIN flow ----------
@@ -186,10 +155,7 @@ export default function VehicleSelector({
 
     setAdLoading(true);
     try {
-      const rewarded = onShowRewardedAd
-        ? await onShowRewardedAd()
-        : await showRewardedAdFallback();
-
+      const rewarded = onShowRewardedAd ? await onShowRewardedAd() : await showRewardedAdFallback();
       if (!rewarded) {
         setAdLoading(false);
         Alert.alert('Ad Required', 'Please watch the full ad to unlock VIN decoding.');
@@ -221,7 +187,7 @@ export default function VehicleSelector({
       const withId = ensureId(vehicle);
       await saveVehicle(withId);
       setVehicles(prev => [withId, ...prev]);
-      onSelectVehicle(withId);             // ✅ selection always has id
+      onSelectVehicle(withId);
 
       const name = `${withId.year || ''} ${withId.make || ''} ${withId.model || ''}`.trim();
       Alert.alert(`✅ ${name} added to garage`, withId.engine || '');
@@ -239,8 +205,7 @@ export default function VehicleSelector({
     Alert.alert('Delete Vehicle?', 'This will remove it from your garage.', [
       { text: 'Cancel', style: 'cancel' },
       {
-        text: 'Delete',
-        style: 'destructive',
+        text: 'Delete', style: 'destructive',
         onPress: async () => {
           await deleteVehicleByVin(vin);
           const updatedList = vehicles.filter(v => v.vin !== vin);
@@ -258,10 +223,7 @@ export default function VehicleSelector({
       let highway = '';
       if (vehicle.mpg && typeof vehicle.mpg === 'string') {
         const match = vehicle.mpg.match(/(\d+)\s*city\s*\/\s*(\d+)\s*highway/);
-        if (match) {
-          city = match[1];
-          highway = match[2];
-        }
+        if (match) { city = match[1]; highway = match[2]; }
       }
       setEditableVehicle({
         ...vehicle,
@@ -288,7 +250,7 @@ export default function VehicleSelector({
     const updatedList = vehicles.map(v => (v.vin === updatedVehicle.vin ? updatedVehicle : v));
     setVehicles(updatedList);
     if (selectedVehicle?.vin === updatedVehicle.vin) {
-      onSelectVehicle(updatedVehicle);     // ✅ keep id stable
+      onSelectVehicle(updatedVehicle);
     }
     setEditMode(false);
     setEditableVehicle(null);
@@ -299,17 +261,14 @@ export default function VehicleSelector({
     if (!mpg || typeof mpg !== 'string') return '--/--';
     const match = mpg.match(/(\d+)\s*city\s*\/\s*(\d+)\s*highway/);
     return match ? `${match[1]}/${match[2]}` : '--/--';
-  };
+    };
 
   const renderVehicle = ({ item }) => {
     const withId = ensureId(item);
     return (
       <TouchableOpacity
         style={styles.vehicleCard}
-        onPress={() => {
-          onSelectVehicle(withId);        // ✅ ensure id on selection
-          setModalVisible(false);
-        }}
+        onPress={() => { onSelectVehicle(withId); setModalVisible(false); }}
       >
         <Text style={styles.title}>{withId.year} {withId.make} {withId.model}</Text>
         <Text style={styles.details}>
@@ -379,7 +338,7 @@ export default function VehicleSelector({
 
               {/* Camera option */}
               <TouchableOpacity
-                style={[styles.optionButton, (adLoading) && { opacity: 0.7 }]}
+                style={[styles.optionButton, adLoading && { opacity: 0.7 }]}
                 onPress={handleCaptureVin}
                 disabled={adLoading}
                 activeOpacity={0.9}
@@ -411,10 +370,7 @@ export default function VehicleSelector({
                   maxLength={25}
                 />
                 <TouchableOpacity
-                  style={[
-                    styles.decodeBtn,
-                    (!isValidVin(normalizeVin(typedVin)) || decoding || adLoading) && styles.decodeBtnDisabled,
-                  ]}
+                  style={[styles.decodeBtn, (!isValidVin(normalizeVin(typedVin)) || decoding || adLoading) && styles.decodeBtnDisabled]}
                   onPress={handleDecodeTypedVin}
                   disabled={!isValidVin(normalizeVin(typedVin)) || decoding || adLoading}
                   activeOpacity={0.9}
@@ -431,9 +387,7 @@ export default function VehicleSelector({
 
               {/* VIN help & locations */}
               <Text style={styles.modalSubtitle}>What’s a VIN?</Text>
-              <Text style={styles.helperText}>
-                A VIN (Vehicle Identification Number) is a unique 17-digit code that identifies your car.
-              </Text>
+              <Text style={styles.helperText}>A VIN (Vehicle Identification Number) is a unique 17-digit code that identifies your car.</Text>
 
               <Text style={styles.sectionTitle}>Where to Find Your VIN</Text>
               {vinLocations.map((item) => (
@@ -444,9 +398,7 @@ export default function VehicleSelector({
                   </View>
                 </View>
               ))}
-              <Text style={[styles.helperText, { marginTop: 12 }]}>
-                Snap a clear photo of any of these VIN locations, and we’ll do the rest. 🚗
-              </Text>
+              <Text style={[styles.helperText, { marginTop: 12 }]}>Snap a clear photo of any of these VIN locations, and we’ll do the rest. 🚗</Text>
             </ScrollView>
           </SafeAreaView>
         </Animated.View>
@@ -477,34 +429,18 @@ export default function VehicleSelector({
                   {key === 'transmission' ? (
                     <View style={styles.transmissionSelector}>
                       <TouchableOpacity
-                        style={[
-                          styles.transmissionButton,
-                          editableVehicle.transmission === 'Automatic' && styles.transmissionButtonSelected,
-                        ]}
+                        style={[styles.transmissionButton, editableVehicle.transmission === 'Automatic' && styles.transmissionButtonSelected]}
                         onPress={() => setEditableVehicle({ ...editableVehicle, transmission: 'Automatic' })}
                       >
-                        <Text
-                          style={[
-                            styles.transmissionButtonText,
-                            editableVehicle.transmission === 'Automatic' && styles.transmissionButtonTextSelected,
-                          ]}
-                        >
+                        <Text style={[styles.transmissionButtonText, editableVehicle.transmission === 'Automatic' && styles.transmissionButtonTextSelected]}>
                           Automatic
                         </Text>
                       </TouchableOpacity>
                       <TouchableOpacity
-                        style={[
-                          styles.transmissionButton,
-                          editableVehicle.transmission === 'Manual' && styles.transmissionButtonSelected,
-                        ]}
+                        style={[styles.transmissionButton, editableVehicle.transmission === 'Manual' && styles.transmissionButtonSelected]}
                         onPress={() => setEditableVehicle({ ...editableVehicle, transmission: 'Manual' })}
                       >
-                        <Text
-                          style={[
-                            styles.transmissionButtonText,
-                            editableVehicle.transmission === 'Manual' && styles.transmissionButtonTextSelected,
-                          ]}
-                        >
+                        <Text style={[styles.transmissionButtonText, editableVehicle.transmission === 'Manual' && styles.transmissionButtonTextSelected]}>
                           Manual
                         </Text>
                       </TouchableOpacity>
@@ -533,252 +469,70 @@ export default function VehicleSelector({
 
 // ---------- STYLES ----------
 const styles = StyleSheet.create({
-  container: {
-    width: '100%',
-    paddingVertical: 20,
-    alignSelf: 'center',
-  },
+  container: { width: '100%', paddingVertical: 20, alignSelf: 'center' },
   placeholder: {
-    backgroundColor: '#444',
-    padding: 32,
-    borderRadius: 15,
-    alignItems: 'center',
-    borderColor: '#888',
-    borderWidth: 1,
+    backgroundColor: '#444', padding: 32, borderRadius: 15, alignItems: 'center', borderColor: '#888', borderWidth: 1,
   },
   plus: { fontSize: 40, color: '#ccc' },
   label: { fontSize: 16, color: '#aaa', marginTop: 8 },
-  selectedCard: {
-    backgroundColor: '#333',
-    padding: 28,
-    borderRadius: 15,
-    alignItems: 'center',
-  },
+  selectedCard: { backgroundColor: '#333', padding: 28, borderRadius: 15, alignItems: 'center' },
   title: { fontSize: 20, fontWeight: 'bold', color: '#fff' },
   details: { fontSize: 14, color: '#ccc', marginVertical: 4 },
   stats: { fontSize: 12, color: '#aaa' },
 
   // Modals
-  modalContainer: {
-    flex: 1,
-    backgroundColor: '#121212',
-    padding: 30,
-    paddingTop: 50,
-  },
-  modalTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 16,
-    alignSelf: 'center',
-  },
-  modalSubtitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#eee',
-    marginTop: 10,
-    marginBottom: 6,
-    textAlign: 'center',
-  },
+  modalContainer: { flex: 1, backgroundColor: '#121212', padding: 30, paddingTop: 50 },
+  modalTitle: { fontSize: 24, fontWeight: 'bold', color: '#fff', marginBottom: 16, alignSelf: 'center' },
+  modalSubtitle: { fontSize: 18, fontWeight: 'bold', color: '#eee', marginTop: 10, marginBottom: 6, textAlign: 'center' },
 
-  vehicleCard: {
-    backgroundColor: '#222',
-    padding: 20,
-    marginBottom: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  inlineBtns: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 12,
-    gap: 10,
-  },
-  actionBtn: {
-    padding: 10,
-    backgroundColor: '#333',
-    borderRadius: 10,
-  },
+  vehicleCard: { backgroundColor: '#222', padding: 20, marginBottom: 14, borderRadius: 12, alignItems: 'center' },
+  inlineBtns: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, gap: 10 },
+  actionBtn: { padding: 10, backgroundColor: '#333', borderRadius: 10 },
   smallText: { fontSize: 16, color: '#fff' },
 
   addNewButton: {
-    marginTop: 30,
-    padding: 16,
-    backgroundColor: '#4CAF50',
-    borderRadius: 12,
-    alignItems: 'center',
-    width: '80%',
-    alignSelf: 'center',
+    marginTop: 30, padding: 16, backgroundColor: '#4CAF50', borderRadius: 12, alignItems: 'center', width: '80%', alignSelf: 'center',
   },
   addNewText: { color: '#fff', fontSize: 17 },
 
   vinModalContainer: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.9)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingTop: 50,
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center', paddingTop: 50,
   },
   vinModalContent: {
-    backgroundColor: 'rgba(0,0,0,0.9)',
-    borderRadius: 20,
-    width: '92%',
-    maxHeight: '94%',
-    paddingVertical: 24,
-    paddingHorizontal: 20,
+    backgroundColor: 'rgba(0,0,0,0.9)', borderRadius: 20, width: '92%', maxHeight: '94%', paddingVertical: 24, paddingHorizontal: 20,
   },
-  vinScrollContent: {
-    paddingBottom: 60,
-    alignItems: 'center',
-  },
-  closeIcon: {
-    position: 'absolute',
-    right: 16,
-    zIndex: 10,
-    backgroundColor: '#fff',
-    borderRadius: 20,
-  },
-  closeIconText: {
-    fontSize: 22,
-    color: '#000',
-    fontWeight: 'bold',
-  },
+  vinScrollContent: { paddingBottom: 60, alignItems: 'center' },
+  closeIcon: { position: 'absolute', right: 16, zIndex: 10, backgroundColor: '#fff', borderRadius: 20 },
+  closeIconText: { fontSize: 22, color: '#000', fontWeight: 'bold' },
+
   optionButton: {
-    backgroundColor: '#22c55e',
-    paddingVertical: 20,
-    paddingHorizontal: 24,
-    borderRadius: 14,
-    marginBottom: 18,
-    width: '100%',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.1,
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 4,
-    elevation: 3,
+    backgroundColor: '#22c55e', paddingVertical: 20, paddingHorizontal: 24, borderRadius: 14, marginBottom: 18,
+    width: '100%', alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.1, shadowOffset: { width: 0, height: 2 }, shadowRadius: 4, elevation: 3,
   },
-  optionButtonText: {
-    color: '#0f172a',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  optionSubText: {
-    color: '#14532d',
-    fontSize: 13,
-    marginTop: 4,
-    textAlign: 'center',
-  },
-  helperText: {
-    color: '#94a3b8',
-    fontSize: 14,
-    textAlign: 'center',
-    marginVertical: 10,
-    lineHeight: 20,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    color: '#eee',
-    fontWeight: '600',
-    marginTop: 6,
-    marginBottom: 8,
-    textAlign: 'center',
-  },
+  optionButtonText: { color: '#0f172a', fontSize: 16, fontWeight: '600' },
+  optionSubText: { color: '#14532d', fontSize: 13, marginTop: 4, textAlign: 'center' },
+
+  helperText: { color: '#94a3b8', fontSize: 14, textAlign: 'center', marginVertical: 10, lineHeight: 20 },
+  sectionTitle: { fontSize: 18, color: '#eee', fontWeight: '600', marginTop: 6, marginBottom: 8, textAlign: 'center' },
   vinCardWrapper: { width: '100%' },
-  vinCardStacked: {
-    alignItems: 'center',
-    backgroundColor: '#1e293b',
-    padding: 20,
-    borderRadius: 16,
-    marginBottom: 20,
-    width: '100%',
-  },
-  vinImageLarge: {
-    width: '100%',
-    height: 180,
-    resizeMode: 'contain',
-    marginTop: 12,
-    borderRadius: 8,
-  },
-  vinLabelLarge: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: '#e2e8f0',
-    textAlign: 'center',
-  },
+  vinCardStacked: { alignItems: 'center', backgroundColor: '#1e293b', padding: 20, borderRadius: 16, marginBottom: 20, width: '100%' },
+  vinImageLarge: { width: '100%', height: 180, resizeMode: 'contain', marginTop: 12, borderRadius: 8 },
+  vinLabelLarge: { fontSize: 16, fontWeight: '500', color: '#e2e8f0', textAlign: 'center' },
 
-  inputLabel: {
-    color: '#ccc',
-    marginBottom: 4,
-    fontSize: 14,
-  },
-  input: {
-    backgroundColor: '#222',
-    color: '#fff',
-    padding: 12,
-    borderRadius: 8,
-    borderColor: '#444',
-    borderWidth: 1,
-  },
+  inputLabel: { color: '#ccc', marginBottom: 4, fontSize: 14 },
+  input: { backgroundColor: '#222', color: '#fff', padding: 12, borderRadius: 8, borderColor: '#444', borderWidth: 1 },
 
-  transmissionSelector: {
-    flexDirection: 'row',
-    backgroundColor: '#222',
-    borderRadius: 8,
-    borderColor: '#444',
-    borderWidth: 1,
-    height: 44,
-    overflow: 'hidden',
-  },
-  transmissionButton: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#222',
-  },
-  transmissionButtonSelected: {
-    backgroundColor: '#4CAF50',
-  },
-  transmissionButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  transmissionButtonTextSelected: {
-    color: '#fff',
-    fontWeight: 'bold',
-  },
+  transmissionSelector: { flexDirection: 'row', backgroundColor: '#222', borderRadius: 8, borderColor: '#444', borderWidth: 1, height: 44, overflow: 'hidden' },
+  transmissionButton: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#222' },
+  transmissionButtonSelected: { backgroundColor: '#4CAF50' },
+  transmissionButtonText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  transmissionButtonTextSelected: { color: '#fff', fontWeight: 'bold' },
 
-  EditModalContainer: {
-    width: '100%',
-    height: '100%',
-  },
-  closeIconMod: {
-    position: 'absolute',
-    right: 16,
-    top: 50,
-    zIndex: 10,
-    backgroundColor: '#fff',
-    borderRadius: 20,
-  },
-  closeIconTextMod: {
-    fontSize: 22,
-    color: '#000',
-    fontWeight: 'bold',
-  },
+  EditModalContainer: { width: '100%', height: '100%' },
+  closeIconMod: { position: 'absolute', right: 16, top: 50, zIndex: 10, backgroundColor: '#fff', borderRadius: 20 },
+  closeIconTextMod: { fontSize: 22, color: '#000', fontWeight: 'bold' },
 
-  decodeBtn: {
-    marginTop: 10,
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    backgroundColor: '#22c55e',
-  },
-  decodeBtnDisabled: {
-    opacity: 0.6,
-  },
-  decodeBtnText: {
-    color: '#0f172a',
-    fontSize: 16,
-    fontWeight: '700',
-  },
+  decodeBtn: { marginTop: 10, paddingVertical: 14, borderRadius: 12, alignItems: 'center', backgroundColor: '#22c55e' },
+  decodeBtnDisabled: { opacity: 0.6 },
+  decodeBtnText: { color: '#0f172a', fontSize: 16, fontWeight: '700' },
 });

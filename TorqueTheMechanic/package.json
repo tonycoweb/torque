@@ -43,7 +43,8 @@
     "react-native-syntax-highlighter": "^2.1.0",
     "react-native-typewriter-effect": "^0.1.4",
     "react-native-vector-icons": "^10.2.0",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "expo-image-manipulator": "~13.1.7"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",

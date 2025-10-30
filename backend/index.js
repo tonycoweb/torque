@@ -21,6 +21,7 @@ const MODEL_PRICING = {
   },
 };
 const OPENAI_FREE_MODE = String(process.env.OPENAI_FREE_MODE || 'false') === 'true';
+const ENRICH_INTERVALS = String(process.env.ENRICH_INTERVALS || 'true') === 'true';
 
 // Track usage
 const tracker = { totals:{}, byRoute:{}, byTier:{}, recent:[], savedJSON:[] };
@@ -30,7 +31,6 @@ function costFor(model, usage = {}) {
   const p = priceFor(model);
   const pt = Number(usage.prompt_tokens || 0);
   const ct = Number(usage.completion_tokens || 0);
-  // pricing is per *million*
   return (pt * p.in + ct * p.out) / 1_000_000;
 }
 function ensureBucket(obj,key,seed=null){
@@ -62,7 +62,6 @@ function logUsage({ route, model, tier, usage, ms, meta }) {
      meta?.note?`— ${meta.note}`:''
     ].join(' | ')
   );
-
   if (total_tokens>4500) console.warn(`⚠️ High token usage on ${route}: ${total_tokens} tokens`);
 }
 
@@ -88,9 +87,61 @@ async function openAIChat({ route, model='gpt-4o', tier='token', payload, header
 app.use((req,res,next)=>{ req._rid=Math.random().toString(36).slice(2,10); req._t0=Date.now(); res.setHeader('X-Request-Id', req._rid); next(); });
 
 // ======================= Helpers =======================
-// VIN
-function normalizeVin(str=''){ return String(str).toUpperCase().replace(/[^A-Z0-9]/g,'').replace(/[IOQ]/g,''); }
+
+// ====== Compact Service Catalog (ID-coded => text on expansion) ======
+const SERVICE_CATALOG = {
+  1: "Engine oil & filter",
+  2: "Tire rotation",
+  3: "Cabin air filter",
+  4: "Engine air filter",
+  5: "Brake inspection",
+  6: "Brake fluid replace/bleed",
+  7: "Coolant / antifreeze service",
+  8: "Transmission fluid service",
+  9: "Spark plugs replacement",
+  10: "Belts replace/inspect",
+  11: "Battery",
+  12: "Fuel filter replacement",
+  13: "Differential / transfer case fluid",
+  14: "Power steering fluid check/service",
+  15: "Timing belt/chain replace/inspect",
+};
+const ALLOWED_SERVICE_IDS = Object.keys(SERVICE_CATALOG).map(n => Number(n));
+
+// NOTE: also returns `id` so we can map label overrides by id reliably.
+function expandCompactPlan(compact = []) {
+  const toNum = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  return compact
+    .filter(item => ALLOWED_SERVICE_IDS.includes(Number(item.id)))
+    .map(item => {
+      const p = String(item.pr || '').toLowerCase().trim();
+      const priority =
+        p === 'h' ? 'high' :
+        p === 'm' ? 'medium' :
+        p === 'l' ? 'low' : 'low';
+
+      return {
+        id: Number(item.id),
+        text: SERVICE_CATALOG[item.id],
+        priority,
+        mileage: toNum(item.mi),
+        time_months: toNum(item.mo),
+        applies: !!Number(item.ap),
+      };
+    });
+}
+
+// ======================= VIN helpers (ISO 3779) =======================
+function normalizeVin(str='') {
+  const up = String(str).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return up.replace(/I/g, '1').replace(/[OQ]/g, '0');
+}
 function isValidVinBasic(vin=''){ return /^[A-HJ-NPR-Z0-9]{17}$/.test(vin); }
+
 const VIN_WEIGHTS = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2];
 const VIN_MAP = (() => {
   const map = {};
@@ -114,8 +165,41 @@ function isValidVin(vin=''){
   const check = computeVinCheckDigit(vin);
   return check === vin[8];
 }
+function tryAutoFixVin(vin) {
+  if (vin.length !== 17) return { vin, fixed: false };
+  const expectedCheck = computeVinCheckDigit(vin);
+  if (expectedCheck && expectedCheck !== vin[8]) {
+    const fixed = vin.slice(0,8) + expectedCheck + vin.slice(9);
+    if (isValidVin(fixed)) return { vin: fixed, fixed: true, reason: 'check-digit corrected' };
+  }
+  const AMBIGUOUS_MAP = {
+    '0': ['O','Q'], 'O': ['0'], 'Q': ['0'],
+    '1': ['I','L'], 'I': ['1'], 'L': ['1'],
+    '5': ['S'],     'S': ['5'],
+    '8': ['B'],     'B': ['8'],
+    '6': ['G'],     'G': ['6'],
+    '2': ['Z'],     'Z': ['2','7'],
+    '7': ['Z']
+  };
+  const chars = vin.split('');
+  for (let i = 0; i < 17; i++) {
+    const ch = chars[i];
+    const alts = AMBIGUOUS_MAP[ch];
+    if (!alts) continue;
+    for (const alt of alts) {
+      const candidate = [...chars];
+      candidate[i] = alt;
+      const candVin = candidate.join('');
+      if (isValidVinBasic(candVin)) {
+        const exp = computeVinCheckDigit(candVin);
+        if (exp && exp === candVin[8]) return { vin: candVin, fixed: true, reason: `ambiguous swap @${i+1}: ${ch}->${alt}` };
+      }
+    }
+  }
+  return { vin, fixed: false };
+}
 
-// Persona (token-based; no Pro upsell)
+// Persona
 const getTorquePrompt = () => `
 You are Torque — the in-app mechanic for TorqueTheMechanic. You are an automotive expert.
 Speak like a helpful, confident technician. Never mention OpenAI or internal model names.
@@ -129,7 +213,6 @@ When diagnosing, include a short section:
 Keep replies compact and practical. Use markdown bullets, not long paragraphs.
 `.trim();
 
-// Vehicle helpers
 function summarizeVehicle(v={}){ if(!v||typeof v!=='object') return ''; const parts=[]; if(v.year) parts.push(String(v.year)); if(v.make) parts.push(String(v.make)); if(v.model) parts.push(String(v.model));
   const main=parts.join(' '); const extras=[ v.trim&&`Trim: ${v.trim}`, v.engine&&`Engine: ${v.engine}`, v.transmission&&`Trans: ${v.transmission}`, v.drive_type&&`Drive: ${v.drive_type}`, v.body_style&&`Body: ${v.body_style}`].filter(Boolean).join(' | ');
   return extras ? `${main} (${extras})` : main;
@@ -149,10 +232,10 @@ METADATA CONTRACT:
 }
 
 // Token controls + summary memory
-const HISTORY_WINDOW_TURNS = 3;     // last 3 user + 3 assistant
-const SUMMARY_EVERY_N_USER = 2;     // summarize every 2 user messages
-const SUMMARY_MAX_TOKENS = 100;     // short!
-const memoryStore = new Map();      // convoId -> { summary: string, userTurns: number }
+const HISTORY_WINDOW_TURNS = 3;
+const SUMMARY_EVERY_N_USER = 2;
+const SUMMARY_MAX_TOKENS = 100;
+const memoryStore = new Map();
 
 function estimateTokenCount(messages){
   const joined=messages.map(m => {
@@ -161,13 +244,6 @@ function estimateTokenCount(messages){
   }).join('\n');
   return Math.round(joined.length/4);
 }
-function trimToRecent(messages, maxTurns=HISTORY_WINDOW_TURNS){
-  const systems = messages.filter(m => m.role==='system');
-  const convo   = messages.filter(m => m.role!=='system');
-  const recent  = convo.slice(-maxTurns*2);
-  return [...systems, ...recent];
-}
-
 function packWithSummary({ messages, summaryText, maxTurns }){
   const systems = messages.filter(m => m.role==='system');
   const convo   = messages.filter(m => m.role!=='system');
@@ -181,9 +257,7 @@ function packWithSummary({ messages, summaryText, maxTurns }){
   }
   return [...out, ...recent];
 }
-
 async function autosummarize(convoId, messages){
-  // Summarize only user/assistant parts (skip system)
   const convo = messages.filter(m => m.role !== 'system');
   const text = convo.map(m => `${m.role.toUpperCase()}: ${typeof m.content==='string'?m.content:JSON.stringify(m.content)}`).join('\n');
   const payload = {
@@ -204,15 +278,12 @@ async function autosummarize(convoId, messages){
   });
   return resp.data?.choices?.[0]?.message?.content?.trim() || '';
 }
-
-// Light sanitizer for assistant text: cap svg/diagram blocks to keep payload tiny
 function sanitizeAssistantText(s, maxBlock = 20000){
   if (!s || typeof s !== 'string') return s;
   const replacer = (tag) => {
     const re = new RegExp("```"+tag+"\\s*([\\s\\S]*?)```","g");
     return s.replace(re, (_m, inner) => {
       let clean = String(inner || '');
-      // basic minification for svg
       if (tag === 'svg') {
         clean = clean.replace(/<!--[\s\S]*?-->/g, '').replace(/\s{2,}/g,' ').trim();
       }
@@ -311,9 +382,223 @@ horsepower_hp, gvw_lbs, mpg_city, mpg_highway, mpg_combined.
   return { vehicle: folded, usage: response.data.usage };
 }
 
+// ---------- Serviceability / timing hints ----------
+async function getServiceabilityHints(vehicle) {
+  const vtxt = [
+    vehicle?.year, vehicle?.make, vehicle?.model,
+    vehicle?.trim ? `trim:${vehicle.trim}` : null,
+    vehicle?.engine ? `engine:${vehicle.engine}` : null,
+    vehicle?.transmission ? `trans:${vehicle.transmission}` : null,
+  ].filter(Boolean).join(' ');
+
+  const payload = {
+    model: 'gpt-4o-mini',
+    messages: [
+      { role:'system', content: `
+Return ONLY strict JSON with these exact keys:
+{
+  "fuel_filter_serviceable": true | false | null,
+  "timing_drive": "belt" | "chain" | null,
+  "timing_service": "replace" | "inspect" | null
+}
+Rules:
+- If most trims/engines for this vehicle have an in-tank non-serviceable fuel filter, set fuel_filter_serviceable=false.
+- If unclear, set null (do NOT guess).
+- "timing_drive" is the main timing mechanism.
+- If timing is belt: timing_service="replace".
+- If timing is chain and manufacturer calls for periodic inspection: timing_service="inspect".
+- If timing is chain and no periodic service is recommended: timing_service=null.
+`.trim() },
+      { role:'user', content: `Vehicle: ${vtxt}` },
+    ],
+    temperature: 0.0,
+    max_tokens: 120,
+  };
+
+  try {
+    const resp = await openAIChat({
+      route: '/serviceability-hints',
+      model: 'gpt-4o-mini',
+      tier: 'token',
+      payload,
+      meta: { note: `hints for ${vtxt}` },
+    });
+
+    const raw = resp.data?.choices?.[0]?.message?.content?.trim() || '{}';
+    let data;
+    try { data = JSON.parse(raw); }
+    catch { const m = raw.match(/\{[\s\S]*\}$/); data = m ? JSON.parse(m[0]) : {}; }
+
+    return {
+      fuel_filter_serviceable: typeof data.fuel_filter_serviceable === 'boolean' ? data.fuel_filter_serviceable : null,
+      timing_drive: (data.timing_drive === 'belt' || data.timing_drive === 'chain') ? data.timing_drive : null,
+      timing_service: (data.timing_service === 'replace' || data.timing_service === 'inspect') ? data.timing_service : null,
+    };
+  } catch {
+    return { fuel_filter_serviceable: null, timing_drive: null, timing_service: null };
+  }
+}
+
+// ---------- NEW: Cheap interval enricher (per-vehicle, cached) ----------
+const intervalCache = new Map(); // key = JSON.stringify({year,make,model,trim,engine,trans})
+
+function vehicleKey(v) {
+  const k = {
+    year: v?.year||null,
+    make: v?.make||null,
+    model: v?.model||null,
+    trim: v?.trim||null,
+    engine: v?.engine||null,
+    transmission: v?.transmission||null,
+  };
+  return JSON.stringify(k);
+}
+
+// sanity clamps so GPT can’t go wild
+function clampReasonable(id, mi, mo) {
+  const n = (x)=> Number.isFinite(Number(x)) ? Number(x) : null;
+  let miles = n(mi), months = n(mo);
+
+  const clamp = (lo, x, hi) => x==null?null:Math.max(lo, Math.min(x, hi));
+
+  switch (id) {
+    case 1: // oil & filter
+      miles = clamp(2500, miles, 15000);
+      months = clamp(3, months, 24);
+      break;
+    case 2: // tire rotation
+      miles = clamp(3000, miles, 15000);
+      months = clamp(3, months, 24);
+      break;
+    case 3: // cabin
+    case 4: // engine air
+      miles = clamp(8000, miles, 45000);
+      months = clamp(6, months, 48);
+      break;
+    case 6: // brake fluid
+      miles = clamp(15000, miles, 80000);
+      months = clamp(18, months, 72);
+      break;
+    case 7: // coolant
+      miles = clamp(30000, miles, 150000);
+      months = clamp(24, months, 120);
+      break;
+    case 8: // transmission
+      miles = clamp(30000, miles, 150000);
+      months = clamp(24, months, 120);
+      break;
+    case 9: // plugs
+      miles = clamp(30000, miles, 150000);
+      months = clamp(24, months, 144);
+      break;
+    case 15: // timing belt/chain (we override later but keep sane)
+      miles = clamp(60000, miles, 120000);
+      months = clamp(48, months, 120);
+      break;
+    default:
+      // general clamp
+      miles = miles==null?null:clamp(3000, miles, 200000);
+      months = months==null?null:clamp(3, months, 180);
+  }
+  return { mi: miles, mo: months };
+}
+
+async function enrichRecommendedIntervals(vehicle, compactPlan) {
+  if (!ENRICH_INTERVALS) return { enriched: null, usage: null, fromCache: false };
+  const key = vehicleKey(vehicle);
+  if (intervalCache.has(key)) return { enriched: intervalCache.get(key), usage: null, fromCache: true };
+
+  // Build minimal payload: only ap=1 items, with names, and the current mi/mo (so the model only fills holes)
+  const items = compactPlan
+    .filter(x => Number(x.ap) === 1)
+    .map(x => ({
+      id: x.id,
+      name: SERVICE_CATALOG[x.id],
+      mi: x.mi ?? null,
+      mo: x.mo ?? null
+    }));
+
+  const vtxt = [
+    vehicle?.year, vehicle?.make, vehicle?.model,
+    vehicle?.trim ? `trim:${vehicle.trim}` : null,
+    vehicle?.engine ? `engine:${vehicle.engine}` : null,
+    vehicle?.transmission ? `trans:${vehicle.transmission}` : null,
+  ].filter(Boolean).join(' ');
+
+  const system = `
+You are a service-schedule assistant. Return STRICT JSON: {"updates":[...]}.
+For each input item, if miles ("mi") or months ("mo") is null or clearly unrealistic,
+fill with a manufacturer-style recommended interval for THIS vehicle.
+DO NOT change items that already look reasonable.
+Keep values integers or null. No markdown, no prose.
+
+For each updated item, output:
+{"id": <number>, "mi": <int|null>, "mo": <int|null>, "confidence": 0.0-1.0, "note": "<<=40 chars>"}.
+
+Rules:
+- Prefer what's typical for ${vtxt}. If unclear, pick conservative mainstream values.
+- Never invent crazy values (e.g., oil 120000 mi).
+- If no recommendation exists (sealed, lifetime), set both mi and mo to null and skip the update.
+- Do not change applicability.
+`.trim();
+
+  const user = `
+Vehicle: ${vtxt}
+Items (update only where helpful):
+${JSON.stringify({ items }, null, 2)}
+`.trim();
+
+  const payload = {
+    model: 'gpt-4o-mini',
+    messages: [
+      { role:'system', content: system },
+      { role:'user', content: user },
+    ],
+    temperature: 0.1,
+    max_tokens: 350,
+  };
+
+  try {
+    const resp = await openAIChat({
+      route: '/interval-enricher',
+      model: 'gpt-4o-mini',
+      tier: 'token',
+      payload,
+      meta: { note:`vehicle=${vtxt}` },
+    });
+
+    const raw = resp.data?.choices?.[0]?.message?.content?.trim() || '{}';
+    let parsed = {};
+    try { parsed = JSON.parse(raw); }
+    catch { const m = raw.match(/\{[\s\S]*\}$/); parsed = m ? JSON.parse(m[0]) : {}; }
+
+    const updates = Array.isArray(parsed?.updates) ? parsed.updates : [];
+
+    // Normalize & clamp
+    const byId = {};
+    for (const u of updates) {
+      const id = Number(u?.id);
+      if (!ALLOWED_SERVICE_IDS.includes(id)) continue;
+      const clamped = clampReasonable(id, u?.mi, u?.mo);
+      byId[id] = {
+        mi: clamped.mi,
+        mo: clamped.mo,
+        confidence: Math.min(1, Math.max(0, Number(u?.confidence || 0))),
+        note: (typeof u?.note === 'string' ? u.note.slice(0, 40) : '')
+      };
+    }
+
+    intervalCache.set(key, byId);
+    return { enriched: byId, usage: resp.data?.usage || null, fromCache: false };
+  } catch (e) {
+    console.warn('Interval enricher failed; continuing without:', e?.message || e);
+    return { enriched: null, usage: null, fromCache: false };
+  }
+}
+
 // ======================= Routes =======================
 app.get('/pricing', (req, res) => {
-  res.json({ per_1M_tokens: MODEL_PRICING, free_mode: OPENAI_FREE_MODE });
+  res.json({ per_1M_tokens: MODEL_PRICING, free_mode: OPENAI_FREE_MODE, enrich_intervals: ENRICH_INTERVALS });
 });
 
 app.get('/metrics', (req, res) => {
@@ -334,7 +619,7 @@ app.post('/chat', async (req, res) => {
     messages = [],
     vehicle = null,
     convoId = 'default',
-    model: requestedModel,          // optional override
+    model: requestedModel,
   } = req.body;
 
   const model = requestedModel || 'gpt-4o';
@@ -344,25 +629,19 @@ app.post('/chat', async (req, res) => {
   const hasPersona = messages.some(m => m.role === 'system' && /TorqueTheMechanic/i.test(m.content));
   const injected = hasPersona ? messages : [baseSystem, vehicleSystem, ...messages];
 
-  // Summary cadence
   const mem = memoryStore.get(convoId) || { summary: '', userTurns: 0 };
   const userTurnsThisReq = messages.filter(m => m.role === 'user').length;
   const shouldSummarize = ((mem.userTurns + userTurnsThisReq) >= SUMMARY_EVERY_N_USER);
 
-  // Pack baseline (no new summary)
   let packed = packWithSummary({ messages: injected, summaryText: mem.summary, maxTurns: HISTORY_WINDOW_TURNS });
   let estBase = estimateTokenCount(packed);
 
-  // Try autosummary only if cadence says so
   if (shouldSummarize) {
     const newSummary = await autosummarize(convoId, injected);
     const tryPacked = packWithSummary({ messages: injected, summaryText: newSummary, maxTurns: HISTORY_WINDOW_TURNS });
     const estTry = estimateTokenCount(tryPacked);
     if (estTry <= estBase) {
-      packed = tryPacked;
-      estBase = estTry;
-      mem.summary = newSummary;
-      mem.userTurns = 0; // reset after summarizing
+      packed = tryPacked; estBase = estTry; mem.summary = newSummary; mem.userTurns = 0;
       console.log(`✂️  History packed: est ${estimateTokenCount(injected)} -> ${estBase} tokens (summary used)`);
     } else {
       console.log(`ℹ️  Summary skipped this turn: ${estBase} -> ${estTry} (would increase)`);
@@ -382,7 +661,6 @@ app.post('/chat', async (req, res) => {
     let raw = response.data.choices?.[0]?.message?.content ?? '';
     raw = sanitizeAssistantText(raw);
 
-    // strip final [[META...]] line into field
     let vehicle_used = null;
     const metaMatch = raw.match(/\[\[META:\s*(\{[\s\S]*?\})\s*\]\]\s*$/);
     if (metaMatch) {
@@ -397,65 +675,110 @@ app.post('/chat', async (req, res) => {
   }
 });
 
-// --------- VIN photo route (2-stage: extract -> decode) ---------
+// --------- VIN photo route (vision candidates + auto-fix) ---------
 app.post('/decode-vin', async (req, res) => {
   try {
     let { base64Image, model: requestedModel } = req.body;
     if (!base64Image) return res.status(400).json({ error: 'Missing base64Image in request body.' });
 
     const optimized = await optimizeImageBase64(base64Image, { maxWidth: 900, quality: 45, toGrayscale: true, normalize: true });
-
     const visionModel = 'gpt-4o-mini';
-    const payloadVision = {
-      model: visionModel,
-      messages: [
-        { role:'system', content: `
+
+    async function visionPass(detail = 'low') {
+      const payloadVision = {
+        model: visionModel,
+        messages: [
+          { role:'system', content: `
 You will receive a photo likely containing a VIN.
-Return ONLY: {"vin":"<17-chars>"} or {"vin": null}
-Rules: 17 chars; uppercase A–Z (no I,O,Q) + digits.
+Return ONLY JSON with either:
+  {"vin":"<17-chars>"}       OR
+  {"vins":["<17-chars>", "..."]}
+Rules:
+- VIN is exactly 17 chars.
+- Use uppercase A–Z (no I,O,Q) and digits 0–9.
+- If you see I→1, O→0, Q→0.
+- Do not return any other keys or prose.
 `.trim() },
-        {
-          role:'user',
-          content: [
-            { type:'text', text:'Extract the VIN as JSON: {"vin":"..."}' },
-            { type:'image_url', image_url: { url: optimized, detail: 'low' } },
-          ],
-        },
-      ],
-      temperature: 0.0,
-      max_tokens: 60,
-    };
+          {
+            role:'user',
+            content: [
+              { type:'text', text:'Extract VIN(s) as JSON as specified above.' },
+              { type:'image_url', image_url: { url: optimized, detail } },
+            ],
+          },
+        ],
+        temperature: 0.0,
+        max_tokens: 80,
+      };
 
-    const respVision = await openAIChat({
-      route: '/decode-vin#vision',
-      model: visionModel,
-      tier: 'token',
-      payload: payloadVision,
-      meta: { note:`rid=${req._rid}, vision-extract` },
-    });
+      const resp = await openAIChat({
+        route: '/decode-vin#vision',
+        model: visionModel,
+        tier: 'token',
+        payload: payloadVision,
+        meta: { note:`rid=${req._rid}, vision-extract(${detail})` },
+      });
 
-    const rawV = respVision.data?.choices?.[0]?.message?.content?.trim() || '{}';
-    let vinObj;
-    try { vinObj = JSON.parse(rawV); }
-    catch { const m = rawV.match(/\{[\s\S]*\}$/); vinObj = m ? JSON.parse(m[0]) : {}; }
+      const raw = resp.data?.choices?.[0]?.message?.content?.trim() || '{}';
+      let out = {};
+      try { out = JSON.parse(raw); }
+      catch { const m = raw.match(/\{[\s\S]*\}$/); out = m ? JSON.parse(m[0]) : {}; }
+      return { out, usage: resp.data?.usage || {} };
+    }
 
-    let vin = normalizeVin(vinObj?.vin || '');
-    if (!isValidVinBasic(vin)) return res.status(422).json({ error: 'Could not find a valid VIN in the image.' });
-    if (!isValidVin(vin)) return res.status(422).json({ error: 'Found VIN failed check-digit validation.' });
+    let { out, usage: usageVisionLow } = await visionPass('low');
+    let candidates = [];
+    if (typeof out?.vin === 'string') candidates.push(out.vin);
+    if (Array.isArray(out?.vins)) candidates.push(...out.vins);
+
+    let usageVisionHigh = null;
+    if (candidates.length === 0) {
+      const second = await visionPass('high');
+      out = second.out;
+      usageVisionHigh = second.usage;
+      if (typeof out?.vin === 'string') candidates.push(out.vin);
+      if (Array.isArray(out?.vins)) candidates.push(...out.vins);
+    }
+
+    let picked = null;
+    let fixReason = null;
+
+    for (const cand of candidates) {
+      let vin = normalizeVin(cand || '');
+      if (vin.length !== 17) {
+        const fx = tryAutoFixVin(vin);
+        vin = fx.vin;
+      }
+      if (isValidVin(vin)) { picked = vin; break; }
+      const fx = tryAutoFixVin(vin);
+      if (fx.fixed && isValidVin(fx.vin)) { picked = fx.vin; fixReason = fx.reason || null; break; }
+    }
+
+    if (!picked) return res.status(422).json({ error: 'Could not find a valid 17-character VIN in the image.' });
+    if (fixReason) console.log(`ℹ️  VIN auto-fixed (${fixReason}): ${picked}`);
 
     const textModel = requestedModel || 'gpt-4o';
-    const { vehicle, usage: usageText } = await decodeVinTextWithOpenAI(vin, textModel);
+    const { vehicle, usage: usageText } = await decodeVinTextWithOpenAI(picked, textModel);
 
-    tracker.savedJSON.push({ ts:new Date().toISOString(), route:'/decode-vin', vin, json:vehicle });
+    tracker.savedJSON.push({ ts:new Date().toISOString(), route:'/decode-vin', vin: picked, json:vehicle });
     if(tracker.savedJSON.length>100) tracker.savedJSON.shift();
 
-    const usageVision = respVision.data?.usage || {};
+    const usageVision = (() => {
+      const a = usageVisionLow || {};
+      const b = usageVisionHigh || {};
+      return {
+        prompt_tokens: (a.prompt_tokens||0) + (b.prompt_tokens||0),
+        completion_tokens: (a.completion_tokens||0) + (b.completion_tokens||0),
+        total_tokens: (a.total_tokens||0) + (b.total_tokens||0),
+      };
+    })();
+
     const costVision = costFor(visionModel, usageVision);
     const costText = costFor(textModel, usageText || {});
     const totalCost = (costVision + costText);
 
     return res.json({
-      vin_extracted: vin,
+      vin_extracted: picked,
       vehicle,
       usage_breakdown: {
         vision: { model: visionModel, usage: usageVision, estimated_cost_usd: Number(costVision.toFixed(6)) },
@@ -469,13 +792,23 @@ Rules: 17 chars; uppercase A–Z (no I,O,Q) + digits.
   }
 });
 
-// --------- Typed VIN route ---------
+// --------- Typed VIN route (with auto-fix) ---------
 app.post('/decode-vin-text', async (req, res) => {
   try {
     const model = req.body?.model || 'gpt-4o';
-    const vin = normalizeVin(req.body?.vin || '');
-    if (!isValidVinBasic(vin)) return res.status(400).json({ error: 'Invalid VIN. Must be 17 chars (no I/O/Q).' });
-    if (!isValidVin(vin))   return res.status(400).json({ error: 'Invalid VIN check digit.' });
+    let vin = normalizeVin(req.body?.vin || '');
+
+    if (!isValidVinBasic(vin)) {
+      const fx = tryAutoFixVin(vin);
+      vin = fx.vin;
+      if (!isValidVinBasic(vin)) return res.status(400).json({ error: 'Invalid VIN. Must be 17 chars (no I/O/Q).' });
+    }
+    if (!isValidVin(vin)) {
+      const fx = tryAutoFixVin(vin);
+      vin = fx.vin;
+      if (!isValidVin(vin)) return res.status(400).json({ error: 'Invalid VIN check digit.' });
+      if (fx.fixed) console.log(`ℹ️  VIN auto-fixed (manual): ${fx.reason || 'check/ambiguous'}`);
+    }
 
     const { vehicle, usage } = await decodeVinTextWithOpenAI(vin, model);
     return res.json({ vehicle, usage });
@@ -485,85 +818,237 @@ app.post('/decode-vin-text', async (req, res) => {
   }
 });
 
-// --------- Manual validator ---------
-app.post('/validate-manual', async (req, res) => {
-  const { year, make, model, engine } = req.body;
-  const mdl = req.body?.model || 'gpt-4o';
-  try {
-    const payload = {
-      model: mdl,
-      messages:[
-        { role:'system', content: `
-You are a precise vehicle decoder. A user will input partial information (like year, make, model, or engine). Your job is to:
-1. Use the provided fields as-is and do not change them.
-2. Identify which fields are **missing** or ambiguous.
-3. For each missing/uncertain field, return an array of valid options.
-4. For certain fields, return canonical strings.
-5. Return raw JSON only (no markdown).
-Keys: year, make, model, engine, transmission, drive_type, body_style, fuel_type, mpg, horsepower, gvw, trim (optional), variants (optional)
-`.trim() },
-        { role:'user', content:`Year: ${year}, Make: ${make}, Model: ${model}, Engine: ${engine || '(blank)'}` },
-      ],
-      temperature:0.3,
-      max_tokens:600,
-    };
-
-    const response = await openAIChat({ route:'/validate-manual', model: mdl, tier:'token', payload, meta:{ note:`rid=${req._rid}` } });
-    const reply = response.data.choices[0].message.content.trim();
-    res.json({ result: reply, usage: response.data.usage });
-  } catch (error) {
-    console.error(`Manual Validation Error:`, error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to validate vehicle.' });
-  }
-});
-
-// --------- Service recommendations ---------
+// --------- Service recommendations (COMPACT, CHEAP) — EXACTLY 15 ITEMS ---------
+const ALLOWED_SERVICE_IDS_LIST = ALLOWED_SERVICE_IDS.join(',');
 app.post('/generate-service-recommendations', async (req, res) => {
   const { vehicle, currentMileage } = req.body;
-  const mdl = req.body?.model || 'gpt-4o';
   if (!vehicle || !vehicle.year || !vehicle.make || !vehicle.model) {
     return res.status(400).json({ error: 'Missing required vehicle data (year, make, model).' });
   }
+
+  const TEMPLATE_15 = ALLOWED_SERVICE_IDS.map((id) => ({
+    id,
+    pr: null,
+    mi: null,
+    mo: null,
+    ap: 1
+  }));
+
   try {
+    const vparts = [
+      vehicle.year, vehicle.make, vehicle.model,
+      vehicle.engine ? `engine:${vehicle.engine}` : null,
+      vehicle.transmission ? `trans:${vehicle.transmission}` : null,
+      vehicle.drive_type ? `drive:${vehicle.drive_type}` : null,
+      vehicle.trim ? `trim:${vehicle.trim}` : null,
+    ].filter(Boolean).join(' ');
+
+    const systemPrompt = `
+You are a certified master mechanic. You will receive a JSON array of 15 maintenance items with IDs in [${ALLOWED_SERVICE_IDS_LIST}].
+For EACH item, fill in realistic values for:
+- "pr": one of "h" | "m" | "l"
+- "mi": interval miles (integer) or null
+- "mo": interval months (integer) or null
+- "ap": 1 if applicable, else 0
+
+STRICT RULES:
+- Return ONLY the UPDATED JSON ARRAY.
+- KEEP ARRAY LENGTH EXACTLY 15.
+- KEEP THE SAME ORDER AND THE SAME "id" VALUES.
+- NO extra keys, no comments, no markdown.
+- Choose intervals consistent with factory-style schedules for the vehicle named.
+- Consider ${currentMileage ? `current mileage = ${currentMileage}` : 'unknown mileage'}; do not set past-due items to null—still provide their nominal interval.
+`.trim();
+
+    const userPrompt = `
+Vehicle: ${vparts}
+Template (update in place and return):
+${JSON.stringify(TEMPLATE_15)}
+`.trim();
+
     const payload = {
-      model: mdl,
-      messages:[
-        { role:'system', content: `
-You are a certified master mechanic building a factory-style maintenance plan that combines mileage **and** time intervals.
-REQUIREMENTS:
-1) ONLY JSON array of objects, no markdown.
-2) Each object MUST have: text, priority, mileage?, time_months?, applies
-3) Include baseline list; set applies=false for non-applicable items; pick realistic intervals.
-`.trim() },
-        { role:'user', content:`Generate service recommendations for a ${vehicle.year} ${vehicle.make} ${vehicle.model}${vehicle.engine?` with ${vehicle.engine}`:''}${currentMileage?`, current mileage: ${currentMileage}`:''}.` },
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
       ],
-      temperature:0.2,
-      max_tokens:1200,
+      temperature: 0.1,
+      max_tokens: 700,
+      response_format: { type: 'json_object' }
     };
 
-    const response = await openAIChat({ route:'/generate-service-recommendations', model: mdl, tier:'token', payload, meta:{ note:`rid=${req._rid}` } });
-    const reply = response.data.choices[0].message.content;
-    const usage = response.data.usage;
-
-    let result;
-    try {
-      result = JSON.parse(reply);
-      if (!Array.isArray(result)) throw new Error('Response is not an array');
-    } catch (error) {
-      console.error('Parse Error:', error.message, reply);
-      return res.status(500).json({ error: 'Failed to parse service recommendations.' });
-    }
-
-    const cleanText = (t)=>{ const s=String(t||'').trim(); const rx=/\s*(?:[-–—]\s*)?(?:every\s+)?\d[\d,\.kK]*\s*(?:mi|miles?)\s*(?:\/\s*\d+\s*months?)?$/i; return s.replace(rx,'').trim(); };
-    const toNum = (v)=>{ const n=Number(v); return Number.isFinite(n)?n:undefined; };
-
-    const sanitized = result.map((item)=>{
-      const priority = String(item.priority||'').toLowerCase();
-      const normalized = ['high','medium','low'].includes(priority) ? priority : 'low';
-      return { text: cleanText(item.text), priority: normalized, mileage: toNum(item.mileage), time_months: toNum(item.time_months), applies: Boolean(item.applies) };
+    const response = await openAIChat({
+      route: '/generate-service-recommendations',
+      model: 'gpt-4o-mini',
+      tier: 'token',
+      payload,
+      meta: { note: `rid=${req._rid}, compact-plan (15)` },
     });
 
-    res.json({ result: sanitized, usage });
+    const raw = response.data?.choices?.[0]?.message?.content?.trim() || '[]';
+    let compact = [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) compact = parsed;
+      else if (Array.isArray(parsed?.data)) compact = parsed.data;
+    } catch {
+      const m = raw.match(/\[[\s\S]*\]/);
+      compact = m ? JSON.parse(m[0]) : [];
+    }
+
+    const byId = new Map();
+    for (const item of compact) {
+      const idNum = Number(item?.id);
+      if (ALLOWED_SERVICE_IDS.includes(idNum)) byId.set(idNum, item);
+    }
+    const fixedCompact = ALLOWED_SERVICE_IDS.map((id) => {
+      const src = byId.get(id) || {};
+      const p = String(src?.pr || '').toLowerCase().trim();
+      const pr = p === 'h' || p === 'm' || p === 'l' ? p : 'l';
+      const toNum = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      return {
+        id,
+        pr,
+        mi: toNum(src?.mi),
+        mo: toNum(src?.mo),
+        ap: (src?.ap === 0 || src?.ap === 1) ? src.ap : 1,
+      };
+    });
+
+    // ---------- timing & fuel filter hints ----------
+    const hints = await getServiceabilityHints(vehicle);
+    const FUEL_FILTER_ID = 12;
+    const TIMING_ID = 15;
+    const labelOverrides = {};
+
+    if (hints.fuel_filter_serviceable === false) {
+      const idx = fixedCompact.findIndex(x => Number(x.id) === FUEL_FILTER_ID);
+      if (idx >= 0) {
+        fixedCompact[idx].ap = 0;
+        fixedCompact[idx].mi = null;
+        fixedCompact[idx].mo = null;
+        labelOverrides[FUEL_FILTER_ID] = 'Fuel filter (non-serviceable / in-tank)';
+      }
+    } else if (hints.fuel_filter_serviceable === true) {
+      const idx = fixedCompact.findIndex(x => Number(x.id) === FUEL_FILTER_ID);
+      if (idx >= 0) fixedCompact[idx].ap = 1;
+    }
+
+    {
+      const idx = fixedCompact.findIndex(x => Number(x.id) === TIMING_ID);
+      if (idx >= 0) {
+        const card = fixedCompact[idx];
+        const setIfBlank = (k, val) => { if (card[k] == null || !Number.isFinite(Number(card[k]))) card[k] = val; };
+
+        if (hints.timing_drive === 'belt') {
+          card.ap = 1;
+          setIfBlank('mi', 90000);
+          setIfBlank('mo', 72);
+          labelOverrides[TIMING_ID] = 'Timing belt — replace';
+        } else if (hints.timing_drive === 'chain') {
+          if (hints.timing_service === 'inspect') {
+            card.ap = 1;
+            if (card.mi && Number(card.mi) < 150000) card.mi = null;
+            labelOverrides[TIMING_ID] = 'Timing chain — inspect';
+          } else {
+            card.ap = 0;
+            card.mi = null; card.mo = null;
+            labelOverrides[TIMING_ID] = 'Timing chain (no scheduled service)';
+          }
+        } else {
+          if ((card.mi == null) && (card.mo == null)) {
+            labelOverrides[TIMING_ID] = 'Timing belt/chain — inspect';
+          }
+        }
+      }
+    }
+    // ---------- end hints ----------
+
+    // ---------- NEW: interval enricher ----------
+    let enricherUsage = null;
+    if (ENRICH_INTERVALS) {
+      const { enriched, usage } = await enrichRecommendedIntervals(vehicle, fixedCompact);
+      enricherUsage = usage || null;
+      if (enriched) {
+        for (const item of fixedCompact) {
+          const upd = enriched[item.id];
+          if (!upd) continue;
+          // Only apply if missing or obviously off
+          const currentMi = Number(item.mi);
+          const currentMo = Number(item.mo);
+          const proposedMi = upd.mi;
+          const proposedMo = upd.mo;
+
+          const needMi = !(Number.isFinite(currentMi)) || currentMi <= 0;
+          const needMo = !(Number.isFinite(currentMo)) || currentMo <= 0;
+
+          if (needMi && proposedMi != null) item.mi = proposedMi;
+          if (needMo && proposedMo != null) item.mo = proposedMo;
+
+          // clamp again for safety
+          const c = clampReasonable(item.id, item.mi, item.mo);
+          item.mi = c.mi; item.mo = c.mo;
+        }
+      }
+    }
+
+    // Expand into UI shape (now includes id) & apply labels
+    let expanded = expandCompactPlan(fixedCompact);
+    if (Object.keys(labelOverrides).length) {
+      expanded = expanded.map((item) => {
+        if (labelOverrides[item.id]) return { ...item, text: labelOverrides[item.id] };
+        if (item.id === 12 && item.applies === false) return { ...item, text: 'Fuel filter (non-serviceable / in-tank)' };
+        return item;
+      });
+    } else {
+      expanded = expanded.map((item) =>
+        (item.id === 12 && item.applies === false)
+          ? { ...item, text: 'Fuel filter (non-serviceable / in-tank)' }
+          : item
+      );
+    }
+
+    if (!expanded.length || expanded.length !== 15) {
+      const baseline = ALLOWED_SERVICE_IDS.map((id) => {
+        const defaults = {
+          1: { pr:'h', mi:5000,  mo:6,  ap:1 },
+          2: { pr:'m', mi:6000,  mo:6,  ap:1 },
+          3: { pr:'l', mi:15000, mo:18, ap:1 },
+          4: { pr:'l', mi:15000, mo:18, ap:1 },
+          5: { pr:'m', mi:12000, mo:12, ap:1 },
+          6: { pr:'m', mi:30000, mo:24, ap:1 },
+          7: { pr:'m', mi:60000, mo:48, ap:1 },
+          8: { pr:'m', mi:60000, mo:48, ap:1 },
+          9: { pr:'m', mi:100000,mo:96, ap:1 },
+          10:{ pr:'l', mi:60000, mo:48, ap:1 },
+          11:{ pr:'m', mi:null,  mo:48, ap:1 },
+          12:{ pr:'l', mi:60000, mo:48, ap:1 },
+          13:{ pr:'l', mi:60000, mo:48, ap:1 },
+          14:{ pr:'l', mi:60000, mo:48, ap:1 },
+          15:{ pr:'m', mi:90000, mo:72, ap:1 },
+        }[id] || { pr:'l', mi:null, mo:null, ap:1 };
+        return { id, ...defaults };
+      });
+      res.json({
+        compact: baseline,
+        result: expandCompactPlan(baseline),
+        usage: response.data?.usage || {},
+        enricher_usage: enricherUsage || undefined,
+        note: 'Returned baseline due to incomplete model output.',
+      });
+      return;
+    }
+
+    res.json({
+      compact: fixedCompact,
+      result: expanded,
+      usage: response.data?.usage || {},
+      enricher_usage: enricherUsage || undefined,
+      flags: { enriched_intervals: ENRICH_INTERVALS },
+    });
   } catch (error) {
     console.error('Service Recommendations Error:', error.response?.data || error.message);
     res.status(500).json({ error: 'Failed to generate service recommendations.' });
@@ -575,4 +1060,5 @@ app.listen(PORT, () => {
   console.log(`🚀 Backend running on http://localhost:${PORT}`);
   console.log(`ℹ️  Pricing at http://localhost:${PORT}/pricing`);
   console.log(`ℹ️  Metrics at http://localhost:${PORT}/metrics`);
+  console.log(`ℹ️  Interval enricher: ${ENRICH_INTERVALS ? 'ON' : 'OFF'} (set ENRICH_INTERVALS=true|false)`);
 });
