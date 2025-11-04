@@ -382,66 +382,8 @@ horsepower_hp, gvw_lbs, mpg_city, mpg_highway, mpg_combined.
   return { vehicle: folded, usage: response.data.usage };
 }
 
-// ---------- Serviceability / timing hints ----------
-async function getServiceabilityHints(vehicle) {
-  const vtxt = [
-    vehicle?.year, vehicle?.make, vehicle?.model,
-    vehicle?.trim ? `trim:${vehicle.trim}` : null,
-    vehicle?.engine ? `engine:${vehicle.engine}` : null,
-    vehicle?.transmission ? `trans:${vehicle.transmission}` : null,
-  ].filter(Boolean).join(' ');
-
-  const payload = {
-    model: 'gpt-4o-mini',
-    messages: [
-      { role:'system', content: `
-Return ONLY strict JSON with these exact keys:
-{
-  "fuel_filter_serviceable": true | false | null,
-  "timing_drive": "belt" | "chain" | null,
-  "timing_service": "replace" | "inspect" | null
-}
-Rules:
-- If most trims/engines for this vehicle have an in-tank non-serviceable fuel filter, set fuel_filter_serviceable=false.
-- If unclear, set null (do NOT guess).
-- "timing_drive" is the main timing mechanism.
-- If timing is belt: timing_service="replace".
-- If timing is chain and manufacturer calls for periodic inspection: timing_service="inspect".
-- If timing is chain and no periodic service is recommended: timing_service=null.
-`.trim() },
-      { role:'user', content: `Vehicle: ${vtxt}` },
-    ],
-    temperature: 0.0,
-    max_tokens: 120,
-  };
-
-  try {
-    const resp = await openAIChat({
-      route: '/serviceability-hints',
-      model: 'gpt-4o-mini',
-      tier: 'token',
-      payload,
-      meta: { note: `hints for ${vtxt}` },
-    });
-
-    const raw = resp.data?.choices?.[0]?.message?.content?.trim() || '{}';
-    let data;
-    try { data = JSON.parse(raw); }
-    catch { const m = raw.match(/\{[\s\S]*\}$/); data = m ? JSON.parse(m[0]) : {}; }
-
-    return {
-      fuel_filter_serviceable: typeof data.fuel_filter_serviceable === 'boolean' ? data.fuel_filter_serviceable : null,
-      timing_drive: (data.timing_drive === 'belt' || data.timing_drive === 'chain') ? data.timing_drive : null,
-      timing_service: (data.timing_service === 'replace' || data.timing_service === 'inspect') ? data.timing_service : null,
-    };
-  } catch {
-    return { fuel_filter_serviceable: null, timing_drive: null, timing_service: null };
-  }
-}
-
-// ---------- NEW: Cheap interval enricher (per-vehicle, cached) ----------
-const intervalCache = new Map(); // key = JSON.stringify({year,make,model,trim,engine,trans})
-
+// ---------- Vehicle facts (authoritative, cached) ----------
+const factsCache = new Map(); // key = vehicleKey(v)
 function vehicleKey(v) {
   const k = {
     year: v?.year||null,
@@ -450,11 +392,129 @@ function vehicleKey(v) {
     trim: v?.trim||null,
     engine: v?.engine||null,
     transmission: v?.transmission||null,
+    fuel_type: v?.fuel_type||null,
   };
   return JSON.stringify(k);
 }
 
-// sanity clamps so GPT can’t go wild
+// local heuristics as last resort only
+function localHeuristicFacts(vehicle) {
+  const txt = [
+    vehicle?.year, vehicle?.make, vehicle?.model,
+    vehicle?.trim || '', vehicle?.engine || '', vehicle?.transmission || '', vehicle?.fuel_type || ''
+  ].join(' ').toLowerCase();
+
+  const isDiesel = /\bdiesel\b|tdi|td|cummins|powerstroke|duramax/.test(txt) || /b47d|n47d|m57d/.test(txt);
+  const hasEPS = /\belectric power steering\b|\beps\b/.test(txt);
+  const cylinders =
+    /\bv12\b|12cyl/.test(txt) ? 12 :
+    /\bv10\b|10cyl/.test(txt) ? 10 :
+    /\bv8\b|8cyl|8-cylinder/.test(txt) ? 8 :
+    /\bv6\b|6cyl|6-cylinder/.test(txt) ? 6 :
+    /\bi4\b|4cyl|4-cylinder|inline-4|i-4/.test(txt) ? 4 : null;
+
+  // Chain-likely hints (won’t force; only used if model gives nulls) — BMW N-series, etc.
+  const timingChainLikely =
+    /n\d{2}|pushrod|ohv|ls\d|ford 302|5\.0l v8|5\.7l v8/.test(txt);
+
+  const yr = Number(vehicle?.year);
+  const sparkMaterial =
+    isDiesel ? null :
+    isNaN(yr) ? null :
+    yr >= 2005 ? 'iridium' :
+    yr >= 1995 ? 'platinum' : 'copper';
+
+  return {
+    is_diesel: isDiesel || null,
+    cylinders,
+    spark_plug_material_hint: sparkMaterial,
+    timing_drive_hint: timingChainLikely ? 'chain' : null,
+    has_electric_ps_hint: hasEPS || null,
+    fuel_filter_serviceable_hint: isDiesel ? true : null
+  };
+}
+
+async function getVehicleFacts(vehicle) {
+  const key = vehicleKey(vehicle);
+  if (factsCache.has(key)) return { facts: factsCache.get(key), usage: null, fromCache: true };
+
+  const vtxt = [
+    vehicle?.year, vehicle?.make, vehicle?.model,
+    vehicle?.trim ? `trim:${vehicle.trim}` : null,
+    vehicle?.engine ? `engine:${vehicle.engine}` : null,
+    vehicle?.transmission ? `trans:${vehicle.transmission}` : null,
+    vehicle?.fuel_type ? `fuel:${vehicle.fuel_type}` : null,
+  ].filter(Boolean).join(' ');
+
+  const sys = `
+Return STRICT JSON with ONLY these keys:
+{
+  "is_diesel": true | false | null,
+  "cylinders": 3 | 4 | 5 | 6 | 8 | 10 | 12 | null,
+  "spark_plug_material": "copper" | "platinum" | "iridium" | null,
+  "fuel_filter_serviceable": true | false | null,
+  "timing_drive": "belt" | "chain" | null,
+  "timing_service": "replace" | "inspect" | null,
+  "power_steering": "hydraulic" | "electric" | null
+}
+Rules:
+- If fuel is diesel: is_diesel=true and spark_plug_material=null.
+- If timing=chain and no scheduled service: timing_service=null; if periodic check: "inspect".
+- If timing=belt: timing_service="replace".
+- If fuel filter is in-tank 'lifetime': fuel_filter_serviceable=false.
+- If unclear for any field: null (do not guess).
+`.trim();
+
+  const payload = {
+    model: 'gpt-4o-mini',
+    messages: [
+      { role:'system', content: sys },
+      { role:'user', content: `Vehicle: ${vtxt}` },
+    ],
+    temperature: 0.0,
+    max_tokens: 160,
+  };
+
+  try {
+    const resp = await openAIChat({
+      route: '/vehicle-facts',
+      model: 'gpt-4o-mini',
+      tier: 'token',
+      payload,
+      meta: { note: `facts for ${vtxt}` },
+    });
+
+    const raw = resp.data?.choices?.[0]?.message?.content?.trim() || '{}';
+    let data;
+    try { data = JSON.parse(raw); }
+    catch { const m = raw.match(/\{[\s\S]*\}$/); data = m ? JSON.parse(m[0]) : {}; }
+
+    const heur = localHeuristicFacts(vehicle);
+    const facts = {
+      is_diesel: (typeof data.is_diesel === 'boolean') ? data.is_diesel
+                : (vehicle?.fuel_type && /diesel/i.test(vehicle.fuel_type) ? true : (heur.is_diesel ?? null)),
+      cylinders: data.cylinders ?? heur.cylinders ?? null,
+      spark_plug_material: (data.is_diesel === true) ? null : (data.spark_plug_material ?? heur.spark_plug_material_hint ?? null),
+      fuel_filter_serviceable: (typeof data.fuel_filter_serviceable === 'boolean')
+                ? data.fuel_filter_serviceable : (heur.fuel_filter_serviceable_hint ?? null),
+      timing_drive: (data.timing_drive === 'belt' || data.timing_drive === 'chain') ? data.timing_drive : (heur.timing_drive_hint ?? null),
+      timing_service: (['replace','inspect'].includes(data.timing_service)) ? data.timing_service : null,
+      power_steering: (data.power_steering === 'hydraulic' || data.power_steering === 'electric')
+                ? data.power_steering : (heur.has_electric_ps_hint ? 'electric' : null),
+    };
+
+    factsCache.set(key, facts);
+    return { facts, usage: resp.data?.usage || null, fromCache: false };
+  } catch {
+    const facts = localHeuristicFacts(vehicle);
+    factsCache.set(key, facts);
+    return { facts, usage: null, fromCache: false };
+  }
+}
+
+// ---------- NEW: Cheap interval enricher (per-vehicle, cached) ----------
+const intervalCache = new Map(); // key = JSON.stringify({year,make,model,trim,engine,trans})
+
 function clampReasonable(id, mi, mo) {
   const n = (x)=> Number.isFinite(Number(x)) ? Number(x) : null;
   let miles = n(mi), months = n(mo);
@@ -462,41 +522,16 @@ function clampReasonable(id, mi, mo) {
   const clamp = (lo, x, hi) => x==null?null:Math.max(lo, Math.min(x, hi));
 
   switch (id) {
-    case 1: // oil & filter
-      miles = clamp(2500, miles, 15000);
-      months = clamp(3, months, 24);
-      break;
-    case 2: // tire rotation
-      miles = clamp(3000, miles, 15000);
-      months = clamp(3, months, 24);
-      break;
-    case 3: // cabin
-    case 4: // engine air
-      miles = clamp(8000, miles, 45000);
-      months = clamp(6, months, 48);
-      break;
-    case 6: // brake fluid
-      miles = clamp(15000, miles, 80000);
-      months = clamp(18, months, 72);
-      break;
-    case 7: // coolant
-      miles = clamp(30000, miles, 150000);
-      months = clamp(24, months, 120);
-      break;
-    case 8: // transmission
-      miles = clamp(30000, miles, 150000);
-      months = clamp(24, months, 120);
-      break;
-    case 9: // plugs
-      miles = clamp(30000, miles, 150000);
-      months = clamp(24, months, 144);
-      break;
-    case 15: // timing belt/chain (we override later but keep sane)
-      miles = clamp(60000, miles, 120000);
-      months = clamp(48, months, 120);
-      break;
+    case 1: miles = clamp(2500, miles, 15000); months = clamp(3, months, 24); break;
+    case 2: miles = clamp(3000, miles, 15000); months = clamp(3, months, 24); break;
+    case 3:
+    case 4: miles = clamp(8000, miles, 45000); months = clamp(6, months, 48); break;
+    case 6: miles = clamp(15000, miles, 80000); months = clamp(18, months, 72); break;
+    case 7: miles = clamp(30000, miles, 150000); months = clamp(24, months, 120); break;
+    case 8: miles = clamp(30000, miles, 150000); months = clamp(24, months, 120); break;
+    case 9: miles = clamp(30000, miles, 150000); months = clamp(24, months, 144); break;
+    case 15: miles = clamp(60000, miles, 120000); months = clamp(48, months, 120); break;
     default:
-      // general clamp
       miles = miles==null?null:clamp(3000, miles, 200000);
       months = months==null?null:clamp(3, months, 180);
   }
@@ -508,7 +543,6 @@ async function enrichRecommendedIntervals(vehicle, compactPlan) {
   const key = vehicleKey(vehicle);
   if (intervalCache.has(key)) return { enriched: intervalCache.get(key), usage: null, fromCache: true };
 
-  // Build minimal payload: only ap=1 items, with names, and the current mi/mo (so the model only fills holes)
   const items = compactPlan
     .filter(x => Number(x.ap) === 1)
     .map(x => ({
@@ -537,8 +571,8 @@ For each updated item, output:
 
 Rules:
 - Prefer what's typical for ${vtxt}. If unclear, pick conservative mainstream values.
-- Never invent crazy values (e.g., oil 120000 mi).
-- If no recommendation exists (sealed, lifetime), set both mi and mo to null and skip the update.
+- Never invent extreme values (e.g., oil 120000 mi).
+- If no recommendation exists (sealed/lifetime), set both mi and mo to null and skip the update.
 - Do not change applicability.
 `.trim();
 
@@ -574,7 +608,6 @@ ${JSON.stringify({ items }, null, 2)}
 
     const updates = Array.isArray(parsed?.updates) ? parsed.updates : [];
 
-    // Normalize & clamp
     const byId = {};
     for (const u of updates) {
       const id = Number(u?.id);
@@ -593,6 +626,91 @@ ${JSON.stringify({ items }, null, 2)}
   } catch (e) {
     console.warn('Interval enricher failed; continuing without:', e?.message || e);
     return { enriched: null, usage: null, fromCache: false };
+  }
+}
+
+// ---------- Truthiness guard (final authority before UI expand) ----------
+function enforceCardTruthiness(facts, fixedCompact) {
+  const SPARK_ID = 9, FUEL_ID = 12, PS_ID = 14, TIMING_ID = 15;
+
+  const idxById = Object.fromEntries(fixedCompact.map((x,i)=>[x.id,i]));
+  const idx = (id)=> idxById[id] ?? -1;
+
+  // Spark plugs: only NA on diesel
+  {
+    const i = idx(SPARK_ID);
+    if (i >= 0) {
+      if (facts.is_diesel === true) {
+        fixedCompact[i].ap = 0; fixedCompact[i].mi = null; fixedCompact[i].mo = null;
+      } else {
+        if (fixedCompact[i].ap === 0) fixedCompact[i].ap = 1;
+        if (fixedCompact[i].mi == null) {
+          const mat = String(facts.spark_plug_material || '').toLowerCase();
+          fixedCompact[i].mi = (mat === 'iridium') ? 100000 : (mat === 'platinum' ? 60000 : 30000);
+        }
+        if (fixedCompact[i].mo == null) {
+          const mat = String(facts.spark_plug_material || '').toLowerCase();
+          fixedCompact[i].mo = (mat === 'iridium') ? 96 : (mat === 'platinum' ? 72 : 36);
+        }
+      }
+    }
+  }
+
+  // Fuel filter: NA if non-serviceable; serviceable stays
+  {
+    const i = idx(FUEL_ID);
+    if (i >= 0) {
+      if (facts.fuel_filter_serviceable === false) {
+        fixedCompact[i].ap = 0; fixedCompact[i].mi = null; fixedCompact[i].mo = null;
+      } else if (facts.fuel_filter_serviceable === true) {
+        fixedCompact[i].ap = 1;
+      }
+    }
+  }
+
+  // Power steering: EPS => NA; hydraulic => keep
+  {
+    const i = idx(PS_ID);
+    if (i >= 0) {
+      if (facts.power_steering === 'electric') {
+        fixedCompact[i].ap = 0; fixedCompact[i].mi = null; fixedCompact[i].mo = null;
+      } else if (facts.power_steering === 'hydraulic') {
+        if (fixedCompact[i].ap === 0) fixedCompact[i].ap = 1;
+      } else {
+        if (fixedCompact[i].ap == null) fixedCompact[i].ap = 1;
+      }
+    }
+  }
+
+  // Timing drive: belt vs chain
+  {
+    const i = idx(TIMING_ID);
+    if (i >= 0) {
+      const card = fixedCompact[i];
+      const setIfBlank = (k, val) => { if (card[k] == null || !Number.isFinite(Number(card[k]))) card[k] = val; };
+
+      if (facts.timing_drive === 'belt') {
+        card.ap = 1;
+        setIfBlank('mi', 90000);
+        setIfBlank('mo', 72);
+      } else if (facts.timing_drive === 'chain') {
+        if (facts.timing_service === 'inspect') {
+          card.ap = 1;
+          if (card.mi && Number(card.mi) < 150000) card.mi = null;
+        } else {
+          card.ap = 0; card.mi = null; card.mo = null;
+        }
+      } else {
+        if (card.mi && Number(card.mi) < 60000) card.mi = null;
+      }
+    }
+  }
+
+  // Final clamp
+  for (const item of fixedCompact) {
+    const c = clampReasonable(item.id, item.mi, item.mo);
+    item.mi = c.mi; item.mo = c.mo;
+    if (item.ap !== 0 && item.ap !== 1) item.ap = 1;
   }
 }
 
@@ -841,10 +959,28 @@ app.post('/generate-service-recommendations', async (req, res) => {
       vehicle.transmission ? `trans:${vehicle.transmission}` : null,
       vehicle.drive_type ? `drive:${vehicle.drive_type}` : null,
       vehicle.trim ? `trim:${vehicle.trim}` : null,
+      vehicle.fuel_type ? `fuel:${vehicle.fuel_type}` : null,
     ].filter(Boolean).join(' ');
 
+    // ---- get authoritative facts (cached + heuristics) ----
+    const { facts, usage: factsUsage } = await getVehicleFacts(vehicle);
+
+    // Build a compact facts block for the model to OBEY
+    const FACTS = {
+      is_diesel: facts.is_diesel,
+      cylinders: facts.cylinders,
+      spark_plug_material: facts.spark_plug_material, // null for diesel
+      fuel_filter_serviceable: facts.fuel_filter_serviceable,
+      timing_drive: facts.timing_drive,               // belt|chain|null
+      timing_service: facts.timing_service,           // replace|inspect|null
+      power_steering: facts.power_steering           // hydraulic|electric|null
+    };
+
     const systemPrompt = `
-You are a certified master mechanic. You will receive a JSON array of 15 maintenance items with IDs in [${ALLOWED_SERVICE_IDS_LIST}].
+You are a certified master mechanic. You will receive:
+1) A FACTS object about the vehicle, and
+2) A JSON array of 15 maintenance items with IDs in [${ALLOWED_SERVICE_IDS_LIST}].
+
 For EACH item, fill in realistic values for:
 - "pr": one of "h" | "m" | "l"
 - "mi": interval miles (integer) or null
@@ -852,17 +988,30 @@ For EACH item, fill in realistic values for:
 - "ap": 1 if applicable, else 0
 
 STRICT RULES:
-- Return ONLY the UPDATED JSON ARRAY.
-- KEEP ARRAY LENGTH EXACTLY 15.
-- KEEP THE SAME ORDER AND THE SAME "id" VALUES.
-- NO extra keys, no comments, no markdown.
-- Choose intervals consistent with factory-style schedules for the vehicle named.
-- Consider ${currentMileage ? `current mileage = ${currentMileage}` : 'unknown mileage'}; do not set past-due items to null—still provide their nominal interval.
+- Return ONLY the UPDATED JSON ARRAY (length 15), same order, same "id" values. No extra keys/prose.
+- **You MUST obey FACTS when setting applicability and labels.**
+- If FACTS.is_diesel=true => set the Spark Plugs (id 9) "ap": 0 and mi/mo null.
+- If FACTS.fuel_filter_serviceable=false => set Fuel Filter (id 12) "ap": 0 and mi/mo null.
+- If FACTS.timing_drive="belt" => Timing (id 15) "ap": 1 and "mo"/"mi" as replacement interval.
+- If FACTS.timing_drive="chain":
+   - If FACTS.timing_service="inspect" => "ap":1 and mi/mo may be null or long; DO NOT set for replacement.
+   - Else => "ap":0 and mi/mo null (no scheduled service).
+- If FACTS.power_steering="electric" => Power steering fluid (id 14) "ap":0 and mi/mo null.
+- Consider ${currentMileage ? `current mileage = ${currentMileage}` : 'unknown mileage'}; still output nominal intervals.
+- Use conservative mainstream values if intervals are unclear; do NOT output extremes.
+
+PRIORITY GUIDANCE:
+- Oil/filter (1) and brake inspection (5) are at least "m"; raise to "h" if currentMileage is high and intervals suggest due soon.
+- Safety-critical fluid services (6 brake fluid, 7 coolant, 8 trans) typically "m".
 `.trim();
 
     const userPrompt = `
 Vehicle: ${vparts}
-Template (update in place and return):
+
+FACTS (obey these when setting ap/mi/mo):
+${JSON.stringify(FACTS)}
+
+Template (update in place and return the ARRAY only):
 ${JSON.stringify(TEMPLATE_15)}
 `.trim();
 
@@ -873,8 +1022,7 @@ ${JSON.stringify(TEMPLATE_15)}
         { role: 'user', content: userPrompt },
       ],
       temperature: 0.1,
-      max_tokens: 700,
-      response_format: { type: 'json_object' }
+      max_tokens: 700
     };
 
     const response = await openAIChat({
@@ -896,6 +1044,7 @@ ${JSON.stringify(TEMPLATE_15)}
       compact = m ? JSON.parse(m[0]) : [];
     }
 
+    // Normalize to valid per-id objects
     const byId = new Map();
     for (const item of compact) {
       const idNum = Number(item?.id);
@@ -918,56 +1067,7 @@ ${JSON.stringify(TEMPLATE_15)}
       };
     });
 
-    // ---------- timing & fuel filter hints ----------
-    const hints = await getServiceabilityHints(vehicle);
-    const FUEL_FILTER_ID = 12;
-    const TIMING_ID = 15;
-    const labelOverrides = {};
-
-    if (hints.fuel_filter_serviceable === false) {
-      const idx = fixedCompact.findIndex(x => Number(x.id) === FUEL_FILTER_ID);
-      if (idx >= 0) {
-        fixedCompact[idx].ap = 0;
-        fixedCompact[idx].mi = null;
-        fixedCompact[idx].mo = null;
-        labelOverrides[FUEL_FILTER_ID] = 'Fuel filter (non-serviceable / in-tank)';
-      }
-    } else if (hints.fuel_filter_serviceable === true) {
-      const idx = fixedCompact.findIndex(x => Number(x.id) === FUEL_FILTER_ID);
-      if (idx >= 0) fixedCompact[idx].ap = 1;
-    }
-
-    {
-      const idx = fixedCompact.findIndex(x => Number(x.id) === TIMING_ID);
-      if (idx >= 0) {
-        const card = fixedCompact[idx];
-        const setIfBlank = (k, val) => { if (card[k] == null || !Number.isFinite(Number(card[k]))) card[k] = val; };
-
-        if (hints.timing_drive === 'belt') {
-          card.ap = 1;
-          setIfBlank('mi', 90000);
-          setIfBlank('mo', 72);
-          labelOverrides[TIMING_ID] = 'Timing belt — replace';
-        } else if (hints.timing_drive === 'chain') {
-          if (hints.timing_service === 'inspect') {
-            card.ap = 1;
-            if (card.mi && Number(card.mi) < 150000) card.mi = null;
-            labelOverrides[TIMING_ID] = 'Timing chain — inspect';
-          } else {
-            card.ap = 0;
-            card.mi = null; card.mo = null;
-            labelOverrides[TIMING_ID] = 'Timing chain (no scheduled service)';
-          }
-        } else {
-          if ((card.mi == null) && (card.mo == null)) {
-            labelOverrides[TIMING_ID] = 'Timing belt/chain — inspect';
-          }
-        }
-      }
-    }
-    // ---------- end hints ----------
-
-    // ---------- NEW: interval enricher ----------
+    // ---------- interval enricher (optional) ----------
     let enricherUsage = null;
     if (ENRICH_INTERVALS) {
       const { enriched, usage } = await enrichRecommendedIntervals(vehicle, fixedCompact);
@@ -976,7 +1076,6 @@ ${JSON.stringify(TEMPLATE_15)}
         for (const item of fixedCompact) {
           const upd = enriched[item.id];
           if (!upd) continue;
-          // Only apply if missing or obviously off
           const currentMi = Number(item.mi);
           const currentMo = Number(item.mo);
           const proposedMi = upd.mi;
@@ -988,14 +1087,22 @@ ${JSON.stringify(TEMPLATE_15)}
           if (needMi && proposedMi != null) item.mi = proposedMi;
           if (needMo && proposedMo != null) item.mo = proposedMo;
 
-          // clamp again for safety
           const c = clampReasonable(item.id, item.mi, item.mo);
           item.mi = c.mi; item.mo = c.mo;
         }
       }
     }
 
-    // Expand into UI shape (now includes id) & apply labels
+    // ---------- FINAL TRUTHINESS GUARD ----------
+    enforceCardTruthiness(facts, fixedCompact);
+
+    // Expand into UI shape & apply labels for a few NAs
+    const labelOverrides = {};
+    if (facts.is_diesel === true) labelOverrides[9] = 'Spark plugs (not applicable — diesel)';
+    if (facts.fuel_filter_serviceable === false) labelOverrides[12] = 'Fuel filter (non-serviceable / in-tank)';
+    if (facts.timing_drive === 'chain' && facts.timing_service !== 'inspect') labelOverrides[15] = 'Timing chain (no scheduled service)';
+    if (facts.power_steering === 'electric') labelOverrides[14] = 'Power steering (electric — no fluid service)';
+
     let expanded = expandCompactPlan(fixedCompact);
     if (Object.keys(labelOverrides).length) {
       expanded = expanded.map((item) => {
@@ -1022,13 +1129,13 @@ ${JSON.stringify(TEMPLATE_15)}
           6: { pr:'m', mi:30000, mo:24, ap:1 },
           7: { pr:'m', mi:60000, mo:48, ap:1 },
           8: { pr:'m', mi:60000, mo:48, ap:1 },
-          9: { pr:'m', mi:100000,mo:96, ap:1 },
+          9: { pr:'m', mi:100000,mo:96, ap: facts.is_diesel === true ? 0 : 1 },
           10:{ pr:'l', mi:60000, mo:48, ap:1 },
           11:{ pr:'m', mi:null,  mo:48, ap:1 },
-          12:{ pr:'l', mi:60000, mo:48, ap:1 },
+          12:{ pr:'l', mi:60000, mo:48, ap: facts.fuel_filter_serviceable === false ? 0 : 1 },
           13:{ pr:'l', mi:60000, mo:48, ap:1 },
-          14:{ pr:'l', mi:60000, mo:48, ap:1 },
-          15:{ pr:'m', mi:90000, mo:72, ap:1 },
+          14:{ pr:'l', mi:60000, mo:48, ap: facts.power_steering === 'electric' ? 0 : 1 },
+          15:{ pr:'m', mi: facts.timing_drive === 'belt' ? 90000 : null, mo: facts.timing_drive === 'belt' ? 72 : null, ap: facts.timing_drive === 'belt' ? 1 : (facts.timing_drive === 'chain' && facts.timing_service === 'inspect' ? 1 : 0) },
         }[id] || { pr:'l', mi:null, mo:null, ap:1 };
         return { id, ...defaults };
       });
@@ -1036,6 +1143,7 @@ ${JSON.stringify(TEMPLATE_15)}
         compact: baseline,
         result: expandCompactPlan(baseline),
         usage: response.data?.usage || {},
+        facts_usage: factsUsage || undefined,
         enricher_usage: enricherUsage || undefined,
         note: 'Returned baseline due to incomplete model output.',
       });
@@ -1046,6 +1154,7 @@ ${JSON.stringify(TEMPLATE_15)}
       compact: fixedCompact,
       result: expanded,
       usage: response.data?.usage || {},
+      facts_usage: factsUsage || undefined,
       enricher_usage: enricherUsage || undefined,
       flags: { enriched_intervals: ENRICH_INTERVALS },
     });

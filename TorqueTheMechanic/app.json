@@ -6,18 +6,23 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": false, 
- "plugins": [
-  [
-    "react-native-google-mobile-ads",
-    {
-      "androidAppId": "ca-app-pub-3940256099942544~3347511713",
-      "iosAppId": "ca-app-pub-2558791123800753~7979227019"
-    }
-  ],
-  "expo-apple-authentication"
-],
-    
+    "newArchEnabled": false,
+    "plugins": [
+      [
+        "react-native-google-mobile-ads",
+        {
+          "androidAppId": "ca-app-pub-3940256099942544~3347511713",
+          "iosAppId": "ca-app-pub-2558791123800753~7979227019"
+        }
+      ],
+      "expo-apple-authentication",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow $(PRODUCT_NAME) to access your microphone for recording car sounds."
+        }
+      ]
+    ],
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -29,7 +34,11 @@
       "usesAppleSignIn": true,
       "infoPlist": {
         "NSCameraUsageDescription": "We need access to your camera to allow you to take photos of your receipts or car parts for diagnosis.",
-        "NSPhotoLibraryUsageDescription": "We need access to your photo library to allow you to select existing photos of receipts or car parts for diagnosis."
+        "NSPhotoLibraryUsageDescription": "We need access to your photo library to allow you to select existing photos of receipts or car parts for diagnosis.",
+        "NSMicrophoneUsageDescription": "We need access to your microphone so Torque can reference car sounds for diagnosis.",
+        "UIBackgroundModes": [
+          "audio"
+        ]
       }
     },
     "android": {

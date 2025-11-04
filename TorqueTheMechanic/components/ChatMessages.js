@@ -1,3 +1,4 @@
+// ChatMessages.js
 import React, { useRef, useEffect, useMemo } from 'react';
 import {
   ScrollView,

@@ -33,8 +33,6 @@ export default function VinCamera({ onCapture, onCancel }) {
     });
 
     // Map overlay rect (screen coords) to image pixels
-    // Assumes the camera fills the screen (StyleSheet.absoluteFillObject).
-    // If letterboxing occurs, you can adjust with aspect calculations.
     const imgW = photo.width;
     const imgH = photo.height;
 
@@ -50,20 +48,20 @@ export default function VinCamera({ onCapture, onCancel }) {
 
     let cropped = null;
     try {
+      // Keep final width in ~700–900px band; slightly lower JPEG to 0.7 for lean payload
       cropped = await ImageManipulator.manipulateAsync(
         photo.uri,
         [
           { crop },
-          { resize: { width: Math.min(1200, Math.max(700, Math.round(crop.width))) } }, // light resize to help OCR
+          { resize: { width: Math.min(900, Math.max(700, Math.round(crop.width))) } },
         ],
-        { compress: 0.8, base64: true, format: ImageManipulator.SaveFormat.JPEG }
+        { compress: 0.7, base64: true, format: ImageManipulator.SaveFormat.JPEG }
       );
     } catch (e) {
       // Fallback to original if cropping fails
       cropped = { uri: photo.uri, base64: photo.base64, width: imgW, height: imgH };
     }
 
-    // Return both cropped (primary) and original (fallback)
     onCapture?.({
       uri: cropped.uri,
       base64: cropped.base64,

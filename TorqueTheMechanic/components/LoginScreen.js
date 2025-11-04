@@ -18,13 +18,18 @@ export default function LoginScreen({ onLogin }) {
   const [loading, setLoading] = useState(false);
   const [phraseIndex, setPhraseIndex] = useState(0);
   const [displayedText, setDisplayedText] = useState('');
+
   const fullTextRef = useRef('');
   const typingTimeout = useRef(null);
+  const autoAdvanceTimeout = useRef(null);
+  const isTypingRef = useRef(false);
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(20)).current;
   const torqueSlideIn = useRef(new Animated.Value(-200)).current;
   const bubblePulse = useRef(new Animated.Value(1)).current;
+
+  const AUTO_ADVANCE_MS = 5000;
 
   const phrases = [
     "👋 Hey, I’m Torque — your pocket mechanic. \n >>>",
@@ -41,7 +46,7 @@ export default function LoginScreen({ onLogin }) {
   ];
 
   useEffect(() => {
-    AsyncStorage.removeItem('user'); // clear stored session for fresh login
+    AsyncStorage.removeItem('user'); // fresh session
   }, []);
 
   useEffect(() => {
@@ -67,57 +72,94 @@ export default function LoginScreen({ onLogin }) {
   }, []);
 
   useEffect(() => {
+    // new phrase: reset typing + text + timers
+    clearTimeouts();
     fullTextRef.current = phrases[phraseIndex];
     setDisplayedText('');
-    clearTimeout(typingTimeout.current);
-    typeText(0);
+    startTyping();
+    return clearTimeouts;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phraseIndex]);
 
-  const typeText = (i) => {
-    if (i === 1) {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(bubblePulse, {
-            toValue: 1.02,
-            duration: 300,
-            useNativeDriver: true,
-          }),
-          Animated.timing(bubblePulse, {
-            toValue: 1,
-            duration: 300,
-            useNativeDriver: true,
-          }),
-        ])
-      ).start();
-    }
+  // ---- Typing logic ----
+  function startTyping() {
+    isTypingRef.current = true;
 
-    if (i <= fullTextRef.current.length) {
-      setDisplayedText(fullTextRef.current.slice(0, i));
-      typingTimeout.current = setTimeout(() => typeText(i + 1), 24);
+    // gentle pulse while typing
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(bubblePulse, { toValue: 1.02, duration: 300, useNativeDriver: true }),
+        Animated.timing(bubblePulse, { toValue: 1.0, duration: 300, useNativeDriver: true }),
+      ])
+    ).start();
+
+    typeNextChar(0);
+  }
+
+  function typeNextChar(i) {
+    const full = fullTextRef.current;
+    if (i <= full.length) {
+      setDisplayedText(full.slice(0, i));
+      typingTimeout.current = setTimeout(() => typeNextChar(i + 1), 24);
     } else {
-      bubblePulse.stopAnimation();
+      // done typing
+      stopTypingPulse();
+      isTypingRef.current = false;
+      // start the auto-advance timer only after the whole line is visible
+      autoAdvanceTimeout.current = setTimeout(handleNextAdvance, AUTO_ADVANCE_MS);
     }
-  };
+  }
 
-  const nextPhrase = () => {
-    setPhraseIndex((prev) => (prev + 1) % phrases.length);
-  };
+  function stopTypingPulse() {
+    bubblePulse.stopAnimation();
+  }
 
+  function clearTimeouts() {
+    if (typingTimeout.current) {
+      clearTimeout(typingTimeout.current);
+      typingTimeout.current = null;
+    }
+    if (autoAdvanceTimeout.current) {
+      clearTimeout(autoAdvanceTimeout.current);
+      autoAdvanceTimeout.current = null;
+    }
+  }
+
+  // ---- Advance logic ----
+  function handleNextAdvance() {
+    clearTimeouts();
+    setPhraseIndex(prev => (prev + 1) % phrases.length);
+  }
+
+  // Tap behavior:
+  // - If still typing: instantly complete the current phrase and start/refresh the 7s timer
+  // - If done: advance to next phrase immediately
+  function handleBubblePress() {
+    if (isTypingRef.current) {
+      clearTimeouts();
+      // complete the current phrase instantly
+      setDisplayedText(fullTextRef.current);
+      stopTypingPulse();
+      isTypingRef.current = false;
+      autoAdvanceTimeout.current = setTimeout(handleNextAdvance, AUTO_ADVANCE_MS);
+    } else {
+      handleNextAdvance();
+    }
+  }
+
+  // ---- Login flows ----
   const handleBiometricFallback = async () => {
     try {
       const hasHardware = await LocalAuthentication.hasHardwareAsync();
       const enrolled = await LocalAuthentication.isEnrolledAsync();
-
       if (!hasHardware || !enrolled) {
         Alert.alert('Unavailable', 'Biometric authentication is not available on this device.');
         return;
       }
-
       const result = await LocalAuthentication.authenticateAsync({
         promptMessage: 'Use Face ID / Touch ID to log in',
         fallbackLabel: 'Use Passcode',
       });
-
       if (result.success) {
         const fallbackUser = {
           userId: 'biometric-fallback-user',
@@ -164,10 +206,11 @@ export default function LoginScreen({ onLogin }) {
       onLogin();
     } catch (e) {
       console.error('❌ Apple Login Error:', e);
-      if (e.code !== 'ERR_CANCELED') {
-        Alert.alert('Apple Login Failed', 'Try biometric login instead?', [
+      // Offer biometric only if Apple sign-in actually errors (not canceled)
+      if (e?.code !== 'ERR_CANCELED') {
+        Alert.alert('Apple Login Failed', 'Try Face/Touch ID instead?', [
           { text: 'Cancel', style: 'cancel' },
-          { text: 'Try Biometric', onPress: handleBiometricFallback },
+          { text: 'Use Biometric', onPress: handleBiometricFallback },
         ]);
       }
     } finally {
@@ -175,9 +218,17 @@ export default function LoginScreen({ onLogin }) {
     }
   };
 
+  useEffect(() => {
+    return () => {
+      // cleanup on unmount
+      clearTimeouts();
+      stopTypingPulse();
+    };
+  }, []);
+
   return (
     <View style={styles.container}>
-      <Text style={styles.brand}>Pocket Mechanic</Text>
+      <Text style={styles.brand}>Torque The Mechanic</Text>
 
       {loading ? (
         <ActivityIndicator size="large" color="#4CAF50" style={{ marginTop: 40 }} />
@@ -190,23 +241,7 @@ export default function LoginScreen({ onLogin }) {
             style={styles.appleButton}
             onPress={handleAppleLogin}
           />
-
-          <TouchableOpacity onPress={handleBiometricFallback}>
-            <Text style={styles.bypassText}>Login with Face ID / Touch ID</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            onPress={async () => {
-              await AsyncStorage.setItem('user', JSON.stringify({
-                userId: 'bypass-dev-user',
-                email: 'dev@bypass.com',
-                name: 'Bypass User',
-              }));
-              onLogin();
-            }}
-          >
-            <Text style={styles.bypassText}>Bypass Login (Dev Only)</Text>
-          </TouchableOpacity>
+          {/* Removed: Manual FaceID/TouchID link and Dev Bypass link */}
         </>
       )}
 
@@ -220,9 +255,14 @@ export default function LoginScreen({ onLogin }) {
           />
         </Animated.View>
 
-        <TouchableOpacity onPress={nextPhrase} activeOpacity={0.8}>
+        <TouchableOpacity onPress={handleBubblePress} activeOpacity={0.8}>
           <Animated.View style={[styles.chatBubble, { transform: [{ scale: bubblePulse }] }]}>
-            <Animated.Text style={[styles.chatText, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
+            <Animated.Text
+              style={[
+                styles.chatText,
+                { opacity: fadeAnim, transform: [{ translateY: slideAnim }] },
+              ]}
+            >
               {displayedText}
             </Animated.Text>
             <View style={styles.chatTail} />
@@ -242,7 +282,7 @@ const styles = StyleSheet.create({
     padding: 24,
   },
   brand: {
-    fontSize: 36,
+    fontSize: 32,
     color: '#4CAF50',
     fontWeight: 'bold',
     marginBottom: 40,
@@ -251,12 +291,6 @@ const styles = StyleSheet.create({
     width: 260,
     height: 50,
     marginBottom: 20,
-  },
-  bypassText: {
-    marginTop: 10,
-    color: '#bbb',
-    fontSize: 14,
-    textDecorationLine: 'underline',
   },
   torqueIntroSection: {
     flexDirection: 'row',

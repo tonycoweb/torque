@@ -1,9 +1,9 @@
-// ServiceBox.js — show mileage card only AFTER generation + refreshed CTA button styling + "Apply to vehicle" action
+// ServiceBox.js — search + smart sorting (urgent first), inverted progress bar, refined actions
 import React, { useState, useEffect, useRef } from 'react';
-import { KeyboardAvoidingView, Platform, ActivityIndicator } from 'react-native';
+import { KeyboardAvoidingView, Platform, ActivityIndicator, useWindowDimensions } from 'react-native';
 import DatePicker from 'react-native-date-picker';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView, Alert, Image, TextInput,
+  View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView, Alert, Image, TextInput, StatusBar,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -13,12 +13,25 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { showRewardedAd, preloadRewardedAd } from '../components/RewardedAdManager';
 
+// Tiny helper to animate "..." without extra libs
+function AnimatedEllipsis({ style }) {
+  const [dots, setDots] = React.useState('');
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      setDots(prev => (prev.length >= 3 ? '' : prev + '.'));
+    }, 450);
+    return () => clearInterval(id);
+  }, []);
+  return <Text style={style}>Generating your service list{dots}</Text>;
+}
+
 export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMileage, onRequestAddVehicle }) {
   const [modalVisible, setModalVisible] = useState(false);
 
   // data
   const [services, setServices] = useState([]);
   const [hasGeneratedServices, setHasGeneratedServices] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
   // vehicle mileage
   const [vehicleMiles, setVehicleMiles] = useState('');
@@ -54,7 +67,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
   const [customTitle, setCustomTitle] = useState('');
   const [customInterval, setCustomInterval] = useState('');
   const [customMonths, setCustomMonths] = useState('');
-  const [customPriority, setCustomPriority] = useState('low'); // 'low' | 'medium' | 'high'
+  const [customPriority, setCustomPriority] = useState('low'); // kept for compatibility
   const [customNotes, setCustomNotes] = useState('');
 
   // edit months overlay
@@ -65,6 +78,9 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
   const [mediaPermission, requestMediaPermission] = ImagePicker.useMediaLibraryPermissions();
   const scrollViewRef = useRef(null);
   const saveTimeoutRef = useRef(null);
+
+  const { width } = useWindowDimensions();
+  const sheetWidth = Math.min(width - 24, 720);
 
   // ---------- helpers ----------
   const digitsOnly = (s) => String(s ?? '').replace(/[^\d]/g, '');
@@ -190,6 +206,100 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
     try { await AsyncStorage.setItem(`vehicleMileage_${selectedVehicle.id}`, String(value ?? '')); } catch {}
   };
 
+  // ---------- progress helper (INVERTED) ----------
+  const clamp = (n, min = 0, max = 1) => Math.max(min, Math.min(max, n));
+  const getOriginalProgress = (svc, currentMilesNumber) => {
+    if (svc.intervalMiles && Number.isFinite(svc.intervalMiles) &&
+        Number.isFinite(svc.completedMileageNumber) && Number.isFinite(currentMilesNumber)) {
+      const start = svc.completedMileageNumber;
+      const end = svc.completedMileageNumber + svc.intervalMiles;
+      if (end > start) return clamp((currentMilesNumber - start) / (end - start));
+    }
+    if (svc.intervalMonths && svc.lastCompletedDate) {
+      const start = new Date(svc.lastCompletedDate).getTime();
+      const end = new Date(new Date(svc.lastCompletedDate)).setMonth(
+        new Date(svc.lastCompletedDate).getMonth() + svc.intervalMonths
+      );
+      const now = Date.now();
+      if (end > start) return clamp((now - start) / (end - start));
+    }
+    return 0;
+  };
+  const getInvertedProgress = (svc, currentMilesNumber) => {
+    const p = getOriginalProgress(svc, currentMilesNumber);
+    const inverted = 1 - p; // full -> empty
+    return clamp(inverted, 0, 1);
+  };
+  const getProgressColor = (p) => {
+    if (p <= 0.2) return '#ef4444';
+    if (p <= 0.4) return '#f59e0b';
+    return '#22c55e';
+  };
+
+  // ---- sorting & filtering helpers ----
+  const severityRank = { red: 3, yellow: 2, green: 1, neutral: 0 };
+  const priorityRank = { high: 2, medium: 1, low: 0 };
+  const safeTitle = (svc) => String(svc?.text || '').toLowerCase();
+
+  const compareServicesFactory = (currentMilesNumber, searchLower) => (a, b) => {
+    const bucket = (s) => (!s.applies ? 3 : s.completed ? 2 : 1);
+    const ba = bucket(a), bb = bucket(b);
+    if (ba !== bb) return ba - bb;
+
+    if (ba === 1 && bb === 1) {
+      const sa = severityRank[getSeverityForService(a, currentMilesNumber)] ?? 0;
+      const sb = severityRank[getSeverityForService(b, currentMilesNumber)] ?? 0;
+      if (sa !== sb) return sb - sa;
+
+      const remA = getRemainingMiles(a, currentMilesNumber);
+      const remB = getRemainingMiles(b, currentMilesNumber);
+      const daysA = daysUntil(a.dueDateIso);
+      const daysB = daysUntil(b.dueDateIso);
+
+      const overMilesA = remA != null && remA <= 0 ? Math.abs(remA) : 0;
+      const overMilesB = remB != null && remB <= 0 ? Math.abs(remB) : 0;
+      if (overMilesA !== overMilesB) return overMilesB - overMilesA;
+
+      const overDaysA = daysA != null && daysA <= 0 ? Math.abs(daysA) : 0;
+      const overDaysB = daysB != null && daysB <= 0 ? Math.abs(daysB) : 0;
+      if (overDaysA !== overDaysB) return overDaysB - overDaysA;
+
+      const soonMilesA = remA != null && remA > 0 ? remA : Number.POSITIVE_INFINITY;
+      const soonMilesB = remB != null && remB > 0 ? remB : Number.POSITIVE_INFINITY;
+      if (soonMilesA !== soonMilesB) return soonMilesA - soonMilesB;
+
+      const soonDaysA = daysA != null && daysA > 0 ? daysA : Number.POSITIVE_INFINITY;
+      const soonDaysB = daysB != null && daysB > 0 ? daysB : Number.POSITIVE_INFINITY;
+      if (soonDaysA !== soonDaysB) return soonDaysA - soonDaysB;
+
+      const pa = priorityRank[a.priority] ?? 0;
+      const pb = priorityRank[b.priority] ?? 0;
+      if (pa !== pb) return pb - pa;
+
+      if (searchLower) {
+        const ia = safeTitle(a).indexOf(searchLower);
+        const ib = safeTitle(b).indexOf(searchLower);
+        if (ia !== ib) return (ia === -1 ? 9999 : ia) - (ib === -1 ? 9999 : ib);
+      }
+    }
+
+    if (ba === 2 && bb === 2) {
+      const da = a.lastCompletedDate ? new Date(a.lastCompletedDate).getTime() : 0;
+      const db = b.lastCompletedDate ? new Date(b.lastCompletedDate).getTime() : 0;
+      if (da !== db) return da - db;
+    }
+
+    return safeTitle(a).localeCompare(safeTitle(b));
+  };
+
+  const getSortedServices = (arr, currentMilesNumber, search) => {
+    const searchLower = String(search || '').trim().toLowerCase();
+    const filtered = !searchLower
+      ? arr
+      : arr.filter((s) => safeTitle(s).includes(searchLower));
+    return filtered.slice().sort(compareServicesFactory(currentMilesNumber, searchLower));
+  };
+
   // ---------- load/save ----------
   useEffect(() => {
     const loadData = async () => {
@@ -245,7 +355,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
   const startGenerationAfterMileage = async () => {
     if (!selectedVehicle?.id) { setOverlay(null); return; }
     if (isGenerating) return;
-    setOverlay('thinking');
+    setOverlay('thinking');     // show blocking overlay immediately
     setIsGenerating(true);
     try {
       let adOK = false;
@@ -258,7 +368,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
       Alert.alert('Error', String(e?.message || e));
     } finally {
       setIsGenerating(false);
-      setOverlay(null);
+      setOverlay(null);        // hide overlay after GPT finishes
     }
   };
 
@@ -518,7 +628,10 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
 
   const saveCustomService = () => {
     if (!selectedVehicle?.id) { setOverlay(null); return; }
-    if (!customTitle.trim()) return Alert.alert('Missing Title', 'Please enter a service title.');
+    if (!customTitle.trim()) {
+      Alert.alert('Missing Title', 'Please enter a service title.');
+      return;
+    }
     const { value: intervalVal } = normalizeNumber(customInterval);
     const monthsVal = parseInt(digitsOnly(customMonths), 10);
     const intervalMonths = Number.isFinite(monthsVal) ? monthsVal : undefined;
@@ -581,7 +694,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
     setModalVisible(false);
   };
 
-  // ---------- APPLY SERVICE (new) ----------
+  // ---------- applies toggle ----------
   const applyServiceToVehicle = (id) => {
     setServices((prev) => {
       const updated = prev.map((s) => (s.id === id ? { ...s, applies: true } : s));
@@ -589,17 +702,34 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
       return updated;
     });
   };
+  const deactivateServiceForVehicle = (id) => {
+    setServices((prev) => {
+      const updated = prev.map((s) => (s.id === id ? { ...s, applies: false } : s));
+      saveServicesToStorage(updated);
+      return updated;
+    });
+  };
 
   // ---------- render ----------
-  const listToRender = services;
+  const currentMilesNumber = parseInt(digitsOnly(vehicleMiles)) || undefined;
+  const listToRender = getSortedServices(services, currentMilesNumber, searchQuery);
+
   const vehicleLabel = (() => {
     const v = selectedVehicle || {};
     const year = v.year ? String(v.year) : '';
     const base = [year, v.make, v.model].filter(Boolean).join(' ');
     return base || 'vehicle';
   })();
-  const currentMilesNumber = parseInt(digitsOnly(vehicleMiles)) || undefined;
   const hasVehicle = !!selectedVehicle?.id;
+
+  // Validation helpers for overlays
+  const customValid = Boolean(customTitle.trim());
+  const editMileageRequired = pendingCompleteServiceId === editService?.id;
+  const editValid = !editMileageRequired || digitsOnly(tempCompletedMileage).length > 0;
+
+  // We avoid SafeArea by using static offsets + padding.
+  const kvo = Platform.OS === 'ios' ? 12 : (StatusBar.currentHeight || 0);
+  const topPad = Platform.OS === 'ios' ? 48 : (StatusBar.currentHeight || 24);
 
   return (
     <>
@@ -624,7 +754,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
           style={[styles.container, styles.disabledContainer]}
           onPress={() => {
             if (onRequestAddVehicle) onRequestAddVehicle();
-            else Alert.alert('Add Your Vehicle', 'Add your vehicle to generate a service report.');
+            else Alert.alert('Add Your Car', 'Add your ride in the box above first to generate a service report for the added car.');
           }}
           activeOpacity={0.95}
         >
@@ -639,16 +769,17 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
         visible={modalVisible && hasVehicle}
         transparent={false}
         animationType="slide"
-        onRequestClose={closeAll}
+        onRequestClose={() => { if (!isGenerating) closeAll(); }}  // block closing while generating
         presentationStyle="fullScreen"
-        statusBarTranslucent
+        // Avoid translucent status bar to prevent notch overlay without SafeArea
+        statusBarTranslucent={false}
       >
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={{ flex: 1, backgroundColor: '#121212' }}
-          keyboardVerticalOffset={Platform.OS === 'ios' ? 40 : 0}
+          keyboardVerticalOffset={kvo}
         >
-          <View style={styles.modalWrapper}>
+          <View style={[styles.modalWrapper, { paddingTop: topPad }]}>
             <View style={styles.modalBox}>
               {/* Header */}
               <View style={styles.headerRow}>
@@ -656,8 +787,8 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                   <MaterialIcons name="info-outline" size={24} color="#fff" />
                 </TouchableOpacity>
                 <Text style={styles.modalTitle} numberOfLines={1} adjustsFontSizeToFit>All Service Recommendations</Text>
-                <TouchableOpacity onPress={closeAll} style={styles.headerButton}>
-                  <Text style={styles.modalCloseText}>×</Text>
+                <TouchableOpacity onPress={() => { if (!isGenerating) closeAll(); }} style={styles.headerButton} disabled={isGenerating}>
+                  <Text style={[styles.modalCloseText, isGenerating && { opacity: 0.4 }]}>×</Text>
                 </TouchableOpacity>
               </View>
 
@@ -695,6 +826,24 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 </View>
               )}
 
+              {/* SEARCH */}
+              <View style={styles.searchRow}>
+                <MaterialIcons name="search" size={20} color="#bbb" />
+                <TextInput
+                  style={styles.searchInput}
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                  placeholder="Search services (e.g., oil, brake, filter)"
+                  placeholderTextColor="#777"
+                  returnKeyType="search"
+                />
+                {Boolean(searchQuery) && (
+                  <TouchableOpacity onPress={() => setSearchQuery('')}>
+                    <MaterialIcons name="close" size={20} color="#bbb" />
+                  </TouchableOpacity>
+                )}
+              </View>
+
               {/* LIST */}
               <ScrollView
                 ref={scrollViewRef}
@@ -703,7 +852,6 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 windowSize={5}
                 keyboardShouldPersistTaps="handled"
               >
-                {/* Add Custom CTA near top as well (consistent) */}
                 {hasGeneratedServices && (
                   <View style={{ paddingHorizontal: 16, marginBottom: 8 }}>
                     <TouchableOpacity style={styles.ctaBtnSecondary} onPress={openCustomOverlay} activeOpacity={0.95}>
@@ -726,42 +874,64 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                   let remainingText = '';
                   if (remaining != null) {
                     remainingText = remaining <= 0
-                      ? ` (OVERDUE by ${formatThousands(String(Math.abs(remaining)))} mi)`
-                      : ` (${formatThousands(String(remaining))} mi left)`;
+                      ? `OVERDUE by ${formatThousands(String(Math.abs(remaining)))} mi`
+                      : `${formatThousands(String(remaining))} mi left`;
                   } else if (!service.completedMileageNumber && !service.completedMileage) {
-                    remainingText = ' (log a completion to start tracking)';
+                    remainingText = 'Log a completion to start tracking';
                   }
 
                   const daysLeft = daysUntil(service.dueDateIso);
                   const dueDateText = service.dueDateIso ? formatDateDisplay(service.dueDateIso) : '—';
                   let timeRemainingText = '';
                   if (daysLeft != null) {
-                    timeRemainingText = daysLeft <= 0 ? ` (OVERDUE by ${Math.abs(daysLeft)} days)` : ` (${daysLeft} days left)`;
+                    timeRemainingText = daysLeft <= 0 ? `OVERDUE by ${Math.abs(daysLeft)} days` : `${daysLeft} days left`;
                   }
 
-                  const muted = service.applies ? null : { opacity: 0.45 };
+                  const isInactive = !service.applies;
+                  const progress = getInvertedProgress(service, currentMilesNumber);
+                  const barColor = getProgressColor(progress);
 
                   return (
-                    <View key={service.id} style={[styles.serviceItem, severityStyle, muted]}>
-                      {!service.applies && (
-                        <Text style={{ color: '#bbb', fontSize: 11, marginBottom: 4 }}>
-                          (Not applicable to this vehicle)
-                        </Text>
+                    <View key={service.id} style={[styles.serviceItem, severityStyle, styles.serviceCard]}>
+                      {isInactive && (
+                        <View style={styles.inactiveRibbon}>
+                          <MaterialCommunityIcons name="pause-circle-outline" size={14} color="#fff" />
+                          <Text style={styles.inactiveRibbonText}>Inactive</Text>
+                        </View>
                       )}
 
-                      {/* Header */}
-                      <View style={styles.serviceHeaderRow}>
-                        <View style={{ flex: 1, flexWrap: 'wrap' }}>
-                          <Text style={styles.serviceTitleText}>{service.text}</Text>
-                          <View style={styles.milesEditRow}>
-                            <Text style={styles.serviceSubLabel}>Interval: </Text>
+                      <View style={styles.titleRow}>
+                        <View style={{ flex: 1, paddingRight: 8, opacity: isInactive ? 0.6 : 1 }}>
+                          <Text style={styles.titleText} numberOfLines={2}>{service.text}</Text>
 
-                            {/* Miles (editable inline) */}
-                            {isEditing ? (
-                              <>
+                          <View style={styles.metaRow}>
+                            <TouchableOpacity
+                              onPress={() => {
+                                setEditingHeaderId(service.id);
+                                setTempHeaderMiles(formatThousands(service.intervalMiles ?? ''));
+                                setTimeout(() => headerMilesRef.current?.focus?.(), 30);
+                              }}
+                              activeOpacity={0.8}
+                            >
+                              <Text style={styles.pillLink}>
+                                {service.intervalMiles ? `${formatThousands(service.intervalMiles)} miles` : 'set miles'}
+                              </Text>
+                            </TouchableOpacity>
+
+                            <Text style={styles.dot}>•</Text>
+
+                            <Text style={styles.pillStatic}>
+                              {service.intervalMonths ? `${service.intervalMonths} months` : 'set time'}
+                            </Text>
+                            <TouchableOpacity onPress={() => openMonthsEditor(service)} activeOpacity={0.85}>
+                              <Text style={styles.pillEdit}>Edit</Text>
+                            </TouchableOpacity>
+
+                            {isEditing && (
+                              <View style={styles.inlineEditWrap}>
                                 <TextInput
                                   ref={headerMilesRef}
-                                  style={[styles.inlineInput, { paddingVertical: 4, minWidth: 90 }]}
+                                  style={[styles.inlineInput, { minWidth: 110 }]}
                                   value={tempHeaderMiles}
                                   onChangeText={(t) => setTempHeaderMiles(formatThousands(t))}
                                   placeholder="miles"
@@ -769,95 +939,86 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                                   keyboardType="numeric"
                                   inputMode="numeric"
                                   maxLength={12}
-                                  autoFocus
                                   returnKeyType="done"
                                   onSubmitEditing={() => saveIntervalInline(service.id)}
                                 />
-                                <Text style={styles.serviceSubLabel}> miles</Text>
                                 <TouchableOpacity style={[styles.smallBtn, { backgroundColor: '#4CAF50' }]} onPress={() => saveIntervalInline(service.id)}>
                                   <Text style={styles.smallBtnText}>Save</Text>
                                 </TouchableOpacity>
                                 <TouchableOpacity style={[styles.smallBtn, { backgroundColor: '#FF5252' }]} onPress={() => { setEditingHeaderId(null); setTempHeaderMiles(''); }}>
                                   <Text style={styles.smallBtnText}>Cancel</Text>
                                 </TouchableOpacity>
-                              </>
-                            ) : (
-                              <TouchableOpacity
-                                onPress={() => {
-                                  setEditingHeaderId(service.id);
-                                  setTempHeaderMiles(formatThousands(service.intervalMiles ?? ''));
-                                  setTimeout(() => headerMilesRef.current?.focus?.(), 30);
-                                }}
-                              >
-                                <Text style={styles.clickableMiles}>
-                                  {service.intervalMiles ? `${formatThousands(service.intervalMiles)} miles` : 'set miles'}
-                                </Text>
-                              </TouchableOpacity>
+                              </View>
                             )}
-
-                            {/* Time (months) */}
-                            <Text style={[styles.serviceSubLabel, { marginLeft: 8 }]}>
-                              • {service.intervalMonths ? `${service.intervalMonths} months` : 'set time'}
-                            </Text>
-                            <TouchableOpacity
-                              onPress={() => openMonthsEditor(service)}
-                              style={[styles.smallBtn, { backgroundColor: 'rgba(255,255,255,0.12)', marginLeft: 6 }]}
-                            >
-                              <Text style={styles.smallBtnText}>Edit</Text>
-                            </TouchableOpacity>
                           </View>
                         </View>
 
-                        {/* Right-side actions: Apply (if not applicable) + Delete */}
-                        <View style={styles.headerActions}>
-                          {!service.applies && (
-                            <TouchableOpacity
-                              style={styles.iconBtn}
-                              onPress={() =>
-                                Alert.alert(
-                                  'Apply Service',
-                                  'Apply this service to this vehicle?',
-                                  [
-                                    { text: 'Cancel', style: 'cancel' },
-                                    { text: 'Apply', onPress: () => applyServiceToVehicle(service.id) },
-                                  ]
-                                )
-                              }
-                              activeOpacity={0.85}
-                            >
-                              <MaterialCommunityIcons name="backup-restore" size={16} color="#fff" />
-                            </TouchableOpacity>
-                          )}
-
-                          <TouchableOpacity style={styles.deleteButton} onPress={() => {
+                        <TouchableOpacity
+                          style={styles.deleteBtnBig}
+                          onPress={() => {
                             Alert.alert('Delete Service', 'Are you sure?', [
                               { text: 'Cancel', style: 'cancel' },
-                              { text: 'Delete', style: 'destructive', onPress: () => {
-                                setServices((prev) => {
-                                  const updated = prev.filter((s) => s.id !== service.id);
-                                  saveServicesToStorage(updated);
-                                  return updated;
-                                });
-                              }},
+                              {
+                                text: 'Delete',
+                                style: 'destructive',
+                                onPress: () => {
+                                  setServices((prev) => {
+                                    const updated = prev.filter((s) => s.id !== service.id);
+                                    saveServicesToStorage(updated);
+                                    return updated;
+                                  });
+                                },
+                              },
                             ]);
-                          }}>
-                            <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
-                          </TouchableOpacity>
+                          }}
+                        >
+                          <MaterialCommunityIcons name="trash-can-outline" size={18} color="#fff" />
+                        </TouchableOpacity>
+                      </View>
+
+                      <View style={styles.badgeRow}>
+                        <View style={styles.badge}>
+                          <Text style={styles.badgeLabel}>Due Miles</Text>
+                          <Text style={styles.badgeValue}>{dueMilesText}</Text>
+                        </View>
+                        <View style={styles.badge}>
+                          <Text style={styles.badgeLabel}>Due Date</Text>
+                          <Text style={styles.badgeValue}>{dueDateText}</Text>
                         </View>
                       </View>
 
-                      {/* Due line */}
-                      <View style={{ marginTop: 4 }}>
-                        <Text style={styles.dueText}>
-                          Due: <Text style={styles.dueValue}>{dueMilesText}</Text>
-                          <Text style={styles.dueRemaining}>{remainingText}</Text>
-                          {'  '}•{'  '}
-                          <Text style={styles.dueValue}>{dueDateText}</Text>
-                          <Text style={styles.dueRemaining}>{timeRemainingText}</Text>
-                        </Text>
+                      <View style={styles.progressWrap} accessible accessibilityLabel="Service health">
+                        <View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%`, backgroundColor: barColor }]} />
+                      </View>
+                      <Text style={styles.progressHint}>
+                        {remaining != null
+                          ? remaining <= 0
+                            ? `0% health • ${formatThousands(String(Math.abs(remaining)))} mi overdue${timeRemainingText ? ` • ${timeRemainingText}` : ''}`
+                            : `${Math.max(1, Math.round(progress * 100))}% health • ${formatThousands(String(remaining))} mi left${timeRemainingText ? ` • ${timeRemainingText}` : ''}`
+                          : `Tracking starts after first completion${timeRemainingText ? ` • ${timeRemainingText}` : ''}`
+                        }
+                      </Text>
+
+                      <View style={styles.detailsPanel}>
+                        <View style={styles.detailRow}>
+                          <MaterialCommunityIcons name="note-text-outline" size={16} color="#bbb" />
+                          <Text style={styles.detailKey}>Notes</Text>
+                          <Text style={styles.detailVal} numberOfLines={2}>{service.notes || 'N/A'}</Text>
+                        </View>
+                        <View style={styles.detailRow}>
+                          <MaterialCommunityIcons name="counter" size={16} color="#bbb" />
+                          <Text style={styles.detailKey}>Completed Mileage</Text>
+                          <Text style={styles.detailVal}>
+                            {service.completedMileage || (service.completedMileageNumber != null ? formatThousands(service.completedMileageNumber) : 'N/A')}
+                          </Text>
+                        </View>
+                        <View style={styles.detailRow}>
+                          <MaterialCommunityIcons name="calendar-month-outline" size={16} color="#bbb" />
+                          <Text style={styles.detailKey}>Date</Text>
+                          <Text style={styles.detailVal}>{service.date || 'N/A'}</Text>
+                        </View>
                       </View>
 
-                      {/* Proof thumbnails */}
                       {service.proofUris.length > 0 && (
                         <ScrollView horizontal style={styles.proofRow} contentContainerStyle={styles.proofRowContent}>
                           {service.proofUris.map((uri, index) => (
@@ -865,7 +1026,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                               key={index}
                               onPress={() => { setImageForServiceId(service.id); setCurrentIndex(index); setOverlay('image'); }}
                               style={styles.thumbnailContainer}
-                              activeOpacity={0.7}
+                              activeOpacity={0.8}
                             >
                               <Image source={{ uri }} style={styles.thumbnail} />
                             </TouchableOpacity>
@@ -873,46 +1034,53 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                         </ScrollView>
                       )}
 
-                      {/* Details summary */}
-                      <View style={styles.detailsBox}>
-                        <Text style={styles.detailText}>Notes: {service.notes || 'N/A'}</Text>
-                        <Text style={styles.detailText}>
-                          Completed Mileage:{' '}
-                          {service.completedMileage || (service.completedMileageNumber != null ? formatThousands(service.completedMileageNumber) : 'N/A')}
-                        </Text>
-                        <Text style={styles.detailText}>Date: {service.date || 'N/A'}</Text>
-                      </View>
-
-                      {/* Actions */}
                       <View style={styles.buttonRow}>
-                        {!service.completed ? (
-                          <>
-                            <TouchableOpacity style={styles.completeButton} onPress={() => handleMarkCompleted(service.id)}>
-                              <MaterialCommunityIcons name="check-circle-outline" size={16} color="#fff" />
-                              <Text style={styles.completeText}> Mark Completed</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity style={styles.completeButton} onPress={() => { setFocusLockServiceId(service.id); openEditDetails(service); }}>
-                              <MaterialIcons name="edit" size={16} color="#fff" />
-                              <Text style={styles.completeText}> Edit Details</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity style={styles.completeButton} onPress={() => handleUploadProof(service.id)}>
-                              <MaterialCommunityIcons name="image-plus" size={16} color="#fff" />
-                              <Text style={styles.completeText}> Add Proof</Text>
-                            </TouchableOpacity>
-                          </>
+                        {!service.applies ? (
+                          <TouchableOpacity style={[styles.actionBtn, styles.actionPrimary]} onPress={() => applyServiceToVehicle(service.id)}>
+                            <MaterialCommunityIcons name="play-circle-outline" size={18} color="#0b1220" />
+                            <Text style={[styles.actionTextPrimary]}>Activate</Text>
+                          </TouchableOpacity>
                         ) : (
                           <>
-                            <TouchableOpacity style={styles.completeButton} onPress={() => { setFocusLockServiceId(service.id); openEditDetails(service); }}>
-                              <MaterialIcons name="edit" size={16} color="#fff" />
-                              <Text style={styles.completeText}> Edit Details</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity style={styles.completeButton} onPress={() => handleUploadProof(service.id)}>
-                              <MaterialCommunityIcons name="plus-circle-outline" size={16} color="#fff" />
-                              <Text style={styles.completeText}> Add Proof</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity style={styles.completeButton} onPress={() => handleUnmarkCompleted(service.id)}>
-                              <MaterialCommunityIcons name="refresh" size={16} color="#fff" />
-                              <Text style={styles.completeText}> Unmark</Text>
+                            {!service.completed ? (
+                              <>
+                                <TouchableOpacity style={[styles.actionBtn, styles.actionPrimary]} onPress={() => handleMarkCompleted(service.id)}>
+                                  <MaterialCommunityIcons name="check-circle-outline" size={18} color="#0b1220" />
+                                  <Text style={styles.actionTextPrimary}>Mark Completed</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity style={[styles.actionBtn, styles.actionNeutral]} onPress={() => { setFocusLockServiceId(service.id); openEditDetails(service); }}>
+                                  <MaterialIcons name="edit" size={18} color="#fff" />
+                                  <Text style={styles.actionText}>Edit Details</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity style={[styles.actionBtn, styles.actionOutline]} onPress={() => handleUploadProof(service.id)}>
+                                  <MaterialCommunityIcons name="image-plus" size={18} color="#fff" />
+                                  <Text style={styles.actionText}>Add Proof</Text>
+                                </TouchableOpacity>
+                              </>
+                            ) : (
+                              <>
+                                <TouchableOpacity style={[styles.actionBtn, styles.actionNeutral]} onPress={() => { setFocusLockServiceId(service.id); openEditDetails(service); }}>
+                                  <MaterialIcons name="edit" size={18} color="#fff" />
+                                  <Text style={styles.actionText}>Edit Details</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity style={[styles.actionBtn, styles.actionOutline]} onPress={() => handleUploadProof(service.id)}>
+                                  <MaterialCommunityIcons name="plus-circle-outline" size={18} color="#fff" />
+                                  <Text style={styles.actionText}>Add Proof</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity style={[styles.actionBtn, styles.actionNeutral]} onPress={() => handleUnmarkCompleted(service.id)}>
+                                  <MaterialCommunityIcons name="refresh" size={18} color="#fff" />
+                                  <Text style={styles.actionText}>Unmark</Text>
+                                </TouchableOpacity>
+                              </>
+                            )}
+
+                            <TouchableOpacity style={[styles.actionBtn, styles.actionPurple]} onPress={() => deactivateServiceForVehicle(service.id)}>
+                              <MaterialCommunityIcons name="pause-circle-outline" size={18} color="#fff" />
+                              <Text style={styles.actionText}>Make Inactive</Text>
                             </TouchableOpacity>
                           </>
                         )}
@@ -921,7 +1089,6 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                   );
                 })}
 
-                {/* Keep a second Add button near bottom for long lists */}
                 <View style={{ paddingHorizontal: 16, marginTop: 8, marginBottom: 120 }}>
                   <TouchableOpacity style={styles.ctaBtnSecondary} onPress={openCustomOverlay} activeOpacity={0.95}>
                     <Text style={styles.ctaBtnText}>+ Add Custom Service</Text>
@@ -929,20 +1096,38 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 </View>
               </ScrollView>
 
-              {/* Floating Add FAB */}
               <TouchableOpacity style={styles.addFab} onPress={openCustomOverlay} activeOpacity={0.9}>
                 <MaterialIcons name="add" size={26} color="#fff" />
               </TouchableOpacity>
 
               {/* ===================== OVERLAYS ===================== */}
+
+              {/* ——— THINKING (blocks input during ad + GPT, no Lottie) ——— */}
+              {overlay === 'thinking' && (
+                <View style={styles.overlay} pointerEvents="auto" accessible accessibilityLabel="Generating services, please wait">
+                  <View style={styles.thinkingCard}>
+                    <View style={styles.spinnerRow}>
+                      <ActivityIndicator size="large" />
+                    </View>
+                    <Text style={styles.thinkingTitle}>Torque is thinking</Text>
+                    <AnimatedEllipsis style={styles.thinkingSub} />
+                  </View>
+                </View>
+              )}
+
               {overlay === 'prompt' && (
                 <View style={styles.overlay}>
-                  <View style={styles.overlayCard}>
-                    <Text style={[styles.decodingText, { marginBottom: 8 }]}>
-                      Enter current mileage for your {vehicleLabel}
-                    </Text>
+                  <View style={[styles.sheet, { width: sheetWidth }]}>
+                    <View style={styles.sheetHeader}>
+                      <Text style={styles.sheetTitle}>Current Mileage</Text>
+                      <TouchableOpacity onPress={() => setOverlay(null)} style={styles.sheetClose}>
+                        <Text style={styles.sheetCloseText}>×</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    <Text style={styles.labelStrong}>Enter current mileage for your {vehicleLabel}</Text>
                     <TextInput
-                      style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
+                      style={[styles.inputLg]}
                       value={formatThousands(promptMileage)}
                       onChangeText={(t) => setPromptMileage(digitsOnly(t))}
                       placeholder="e.g., 181000"
@@ -954,7 +1139,9 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                       returnKeyType="done"
                       onSubmitEditing={startGenerationAfterMileage}
                     />
-                    <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
+                    <Text style={styles.helperText}>This helps prioritize urgent services.</Text>
+
+                    <View style={styles.sheetFooterRow}>
                       <TouchableOpacity onPress={() => setOverlay(null)} style={styles.btnGrey}>
                         <Text style={styles.btnText}>Cancel</Text>
                       </TouchableOpacity>
@@ -966,62 +1153,86 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 </View>
               )}
 
-              {overlay === 'thinking' && (
-                <View style={styles.overlay}>
-                  <View style={styles.overlayCardCenter}>
-                    <Text style={styles.decodingText}>🔧 Torque is generating recommendations…</Text>
-                    <ActivityIndicator size="large" color="#4CAF50" />
-                  </View>
-                </View>
-              )}
-
+              {/* ——— EDIT DETAILS (Revamped) ——— */}
               {overlay === 'edit' && editService && (
                 <View style={styles.overlay}>
-                  <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '90%' }}>
-                    <View style={[styles.overlayCard, { width: '100%' }]}>
-                      <Text style={[styles.decodingText, { marginBottom: 4 }]}>Edit Details</Text>
+                  <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: sheetWidth }} keyboardVerticalOffset={kvo}>
+                    <View style={[styles.sheet, { width: '100%' }]}>
+                      <View style={styles.sheetHeader}>
+                        <Text style={styles.sheetTitle}>Edit Details</Text>
+                        <TouchableOpacity onPress={() => { setOverlay(null); setEditService(null); setPendingCompleteServiceId(null); setFocusLockServiceId(null); }} style={styles.sheetClose}>
+                          <Text style={styles.sheetCloseText}>×</Text>
+                        </TouchableOpacity>
+                      </View>
+
                       {pendingCompleteServiceId === editService.id ? (
-                        <Text style={{ color: '#9ae6b4', marginBottom: 8 }}>
-                          Marking as completed — please enter completion mileage (required).
+                        <Text style={[styles.banner, { backgroundColor: 'rgba(34,197,94,0.15)', borderColor: '#22c55e' }]}>
+                          Marking as completed — completion mileage is required.
                         </Text>
                       ) : null}
 
-                      <Text style={{ color: '#ccc', marginTop: 6 }}>Notes</Text>
-                      <TextInput
-                        style={[styles.inlineInput, { width: '100%', marginTop: 6, minHeight: 80, textAlignVertical: 'top' }]}
-                        value={tempNotes}
-                        onChangeText={setTempNotes}
-                        placeholder="Part numbers, capacities, fluids, torque specs…"
-                        placeholderTextColor="#777"
-                        multiline
-                      />
+                      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 16 }}>
+                        {/* Mileage + Date row */}
+                        <View style={styles.formRow}>
+                          <View style={styles.formCol}>
+                            <Text style={styles.labelStrong}>Completed Mileage {editMileageRequired ? '(required)' : ''}</Text>
+                            <View style={styles.inputRow}>
+                              <MaterialCommunityIcons name="counter" size={18} color="#aaa" />
+                              <TextInput
+                                style={[styles.input, { flex: 1 }]}
+                                value={tempCompletedMileage}
+                                onChangeText={(t) => setTempCompletedMileage(formatThousands(t))}
+                                placeholder="e.g., 181,000"
+                                placeholderTextColor="#777"
+                                keyboardType="numeric"
+                                inputMode="numeric"
+                                maxLength={12}
+                              />
+                            </View>
+                            <Text style={[styles.helperText, !editValid && { color: '#ffb4b4' }]}>
+                              {editMileageRequired ? 'Enter the mileage when you performed this service.' : 'Optional if you’re only updating notes or date.'}
+                            </Text>
+                          </View>
 
-                      <Text style={{ color: '#ccc', marginTop: 12 }}>Completed Mileage {pendingCompleteServiceId === editService.id ? '(required)' : ''}</Text>
-                      <TextInput
-                        style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
-                        value={tempCompletedMileage}
-                        onChangeText={(t) => setTempCompletedMileage(formatThousands(t))}
-                        placeholder="e.g., 181,000"
-                        placeholderTextColor="#777"
-                        keyboardType="numeric"
-                        inputMode="numeric"
-                        maxLength={12}
-                      />
+                          <View style={styles.formCol}>
+                            <Text style={styles.labelStrong}>Date</Text>
+                            <TouchableOpacity
+                              onPress={() => setShowDatePicker(true)}
+                              style={styles.inputRowButton}
+                              activeOpacity={0.9}
+                            >
+                              <MaterialCommunityIcons name="calendar-month-outline" size={18} color="#aaa" />
+                              <Text style={styles.inputRowButtonText}>
+                                {tempDate || 'Select date'}
+                              </Text>
+                              <MaterialIcons name="edit-calendar" size={18} color="#ddd" style={{ marginLeft: 'auto' }} />
+                            </TouchableOpacity>
+                            <Text style={styles.helperText}>Tap to choose a completion date.</Text>
+                          </View>
+                        </View>
 
-                      <Text style={{ color: '#ccc', marginTop: 12 }}>Date</Text>
-                      <TouchableOpacity
-                        onPress={() => setShowDatePicker(true)}
-                        style={{ marginTop: 6, backgroundColor: '#222', padding: 10, borderRadius: 8 }}
-                      >
-                        <Text style={{ color: '#fff' }}>{tempDate || 'Select date'}</Text>
-                      </TouchableOpacity>
+                        {/* Notes */}
+                        <View style={{ marginTop: 10 }}>
+                          <Text style={styles.labelStrong}>Notes</Text>
+                          <TextInput
+                            style={[styles.inputMultiline]}
+                            value={tempNotes}
+                            onChangeText={setTempNotes}
+                            placeholder="Part numbers, capacities, fluids, torque specs…"
+                            placeholderTextColor="#777"
+                            multiline
+                          />
+                          <Text style={styles.helperText}>Keep your references here for later (e.g., 5W-30, 4.5 qt, NGK 93175).</Text>
+                        </View>
+                      </ScrollView>
 
-                      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
+                      {/* Sticky footer */}
+                      <View style={styles.sheetFooterRow}>
                         <TouchableOpacity onPress={() => { setOverlay(null); setEditService(null); setPendingCompleteServiceId(null); setFocusLockServiceId(null); }} style={styles.btnGrey}>
                           <Text style={styles.btnText}>Cancel</Text>
                         </TouchableOpacity>
-                        <TouchableOpacity onPress={saveEditDetails} style={styles.btnGreen}>
-                          <Text style={[styles.btnText, { fontWeight: '600' }]}>Save</Text>
+                        <TouchableOpacity onPress={saveEditDetails} style={[styles.btnGreen, !editValid && { opacity: 0.6 }]} disabled={!editValid}>
+                          <Text style={[styles.btnText, { fontWeight: '700' }]}>Save</Text>
                         </TouchableOpacity>
                       </View>
                     </View>
@@ -1042,6 +1253,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 </View>
               )}
 
+              {/* ——— IMAGE VIEWER (unchanged) ——— */}
               {overlay === 'image' && imageForServiceId && (
                 <View style={styles.overlay}>
                   <View style={styles.viewerShell}>
@@ -1117,13 +1329,140 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 </View>
               )}
 
+              {/* ——— ADD CUSTOM SERVICE (Revamped) ——— */}
+              {overlay === 'custom' && (
+                <View style={styles.overlay}>
+                  <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: sheetWidth }} keyboardVerticalOffset={kvo}>
+                    <View style={[styles.sheet, { width: '100%' }]}>
+                      <View style={styles.sheetHeader}>
+                        <Text style={styles.sheetTitle}>Add Custom Service</Text>
+                        <TouchableOpacity onPress={() => setOverlay(null)} style={styles.sheetClose}>
+                          <Text style={styles.sheetCloseText}>×</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 16 }}>
+                        {/* Title */}
+                        <Text style={styles.labelStrong}>Title *</Text>
+                        <View style={styles.inputRow}>
+                          <MaterialCommunityIcons name="wrench-outline" size={18} color="#aaa" />
+                          <TextInput
+                            style={[styles.input, { flex: 1 }]}
+                            value={customTitle}
+                            onChangeText={setCustomTitle}
+                            placeholder="e.g., Rear Differential Fluid Change"
+                            placeholderTextColor="#777"
+                          />
+                        </View>
+                        <Text style={[styles.helperText, !customValid && { color: '#ffb4b4' }]}>
+                          Short, clear action (e.g., “Engine Oil & Filter”, “Coolant Flush”)
+                        </Text>
+
+                        {/* Interval row */}
+                        <View style={styles.formRow}>
+                          <View style={styles.formCol}>
+                            <Text style={styles.labelStrong}>Interval (miles)</Text>
+                            <View style={styles.inputRow}>
+                              <MaterialCommunityIcons name="counter" size={18} color="#aaa" />
+                              <TextInput
+                                style={[styles.input, { flex: 1 }]}
+                                value={customInterval}
+                                onChangeText={(t) => setCustomInterval(formatThousands(t))}
+                                placeholder="e.g., 30,000"
+                                placeholderTextColor="#777"
+                                keyboardType="numeric"
+                                inputMode="numeric"
+                                maxLength={12}
+                              />
+                            </View>
+                            <Text style={styles.helperText}>Leave blank if time-based only.</Text>
+                          </View>
+
+                          <View style={styles.formCol}>
+                            <Text style={styles.labelStrong}>Interval (months)</Text>
+                            <View style={styles.inputRow}>
+                              <MaterialCommunityIcons name="clock-outline" size={18} color="#aaa" />
+                              <TextInput
+                                style={[styles.input, { flex: 1 }]}
+                                value={customMonths}
+                                onChangeText={(t) => setCustomMonths(digitsOnly(t))}
+                                placeholder="e.g., 24"
+                                placeholderTextColor="#777"
+                                keyboardType="numeric"
+                                inputMode="numeric"
+                                maxLength={3}
+                              />
+                            </View>
+                            <Text style={styles.helperText}>Leave blank if mileage-based only.</Text>
+                          </View>
+                        </View>
+
+                        {/* Priority segmented */}
+                        <Text style={styles.labelStrong}>Priority</Text>
+                        <View style={styles.segmentRow}>
+                          {['low', 'medium', 'high'].map((p) => {
+                            const active = customPriority === p;
+                            return (
+                              <TouchableOpacity
+                                key={p}
+                                onPress={() => setCustomPriority(p)}
+                                style={[styles.segment, active && styles.segmentActive]}
+                                activeOpacity={0.9}
+                              >
+                                <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
+                                  {p[0].toUpperCase() + p.slice(1)}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+
+                        {/* Notes */}
+                        <Text style={styles.labelStrong}>Notes (optional)</Text>
+                        <TextInput
+                          style={[styles.inputMultiline]}
+                          value={customNotes}
+                          onChangeText={setCustomNotes}
+                          placeholder="Part numbers, fluid specs, torque values, reminders…"
+                          placeholderTextColor="#777"
+                          multiline
+                        />
+                        <Text style={styles.helperText}>Examples: 0W-20 full synthetic • 4.4 qt • OEM 15208-65F0E</Text>
+                      </ScrollView>
+
+                      {/* Sticky footer */}
+                      <View style={styles.sheetFooterRow}>
+                        <TouchableOpacity onPress={() => setOverlay(null)} style={styles.btnGrey}>
+                          <Text style={styles.btnText}>Cancel</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          onPress={saveCustomService}
+                          style={[styles.btnGreen, !customValid && { opacity: 0.6 }]}
+                          disabled={!customValid}
+                        >
+                          <Text style={[styles.btnText, { fontWeight: '700' }]}>Save</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </KeyboardAvoidingView>
+                </View>
+              )}
+
+              {/* ——— MONTHS EDITOR ——— */}
               {overlay === 'editMonths' && (
                 <View style={styles.overlay}>
-                  <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '90%' }}>
-                    <View style={[styles.overlayCard, { width: '100%' }]}>
-                      <Text style={[styles.decodingText, { marginBottom: 8 }]}>Interval (Months)</Text>
+                  <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: sheetWidth }} keyboardVerticalOffset={kvo}>
+                    <View style={[styles.sheet, { width: '100%' }]}>
+                      <View style={styles.sheetHeader}>
+                        <Text style={styles.sheetTitle}>Interval (Months)</Text>
+                        <TouchableOpacity onPress={() => { setOverlay(null); setMonthsEditServiceId(null); setMonthsInput(''); }} style={styles.sheetClose}>
+                          <Text style={styles.sheetCloseText}>×</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      <Text style={styles.labelStrong}>Months</Text>
                       <TextInput
-                        style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
+                        style={[styles.inputLg]}
                         value={monthsInput}
                         onChangeText={(t) => setMonthsInput(digitsOnly(t))}
                         placeholder="e.g., 6"
@@ -1133,87 +1472,14 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                         maxLength={3}
                         autoFocus
                       />
-                      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
+                      <Text style={styles.helperText}>Leave blank to remove the time-based interval.</Text>
+
+                      <View style={styles.sheetFooterRow}>
                         <TouchableOpacity onPress={() => { setOverlay(null); setMonthsEditServiceId(null); setMonthsInput(''); }} style={styles.btnGrey}>
                           <Text style={styles.btnText}>Cancel</Text>
                         </TouchableOpacity>
                         <TouchableOpacity onPress={saveMonthsEdit} style={styles.btnGreen}>
-                          <Text style={[styles.btnText, { fontWeight: '600' }]}>Save</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  </KeyboardAvoidingView>
-                </View>
-              )}
-
-              {overlay === 'custom' && (
-                <View style={styles.overlay}>
-                  <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '90%' }}>
-                    <View style={[styles.overlayCard, { width: '100%' }]}>
-                      <Text style={[styles.decodingText, { marginBottom: 8 }]}>Add Custom Service</Text>
-
-                      <Text style={{ color: '#ccc', marginTop: 6 }}>Title</Text>
-                      <TextInput
-                        style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
-                        value={customTitle}
-                        onChangeText={setCustomTitle}
-                        placeholder="e.g., Rear Differential Fluid Change"
-                        placeholderTextColor="#777"
-                      />
-
-                      <Text style={{ color: '#ccc', marginTop: 12 }}>Interval (miles)</Text>
-                      <TextInput
-                        style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
-                        value={customInterval}
-                        onChangeText={(t) => setCustomInterval(formatThousands(t))}
-                        placeholder="e.g., 30,000"
-                        placeholderTextColor="#777"
-                        keyboardType="numeric"
-                        inputMode="numeric"
-                        maxLength={12}
-                      />
-
-                      <Text style={{ color: '#ccc', marginTop: 12 }}>Interval (months)</Text>
-                      <TextInput
-                        style={[styles.inlineInput, { width: '100%', marginTop: 6 }]}
-                        value={customMonths}
-                        onChangeText={(t) => setCustomMonths(digitsOnly(t))}
-                        placeholder="e.g., 24"
-                        placeholderTextColor="#777"
-                        keyboardType="numeric"
-                        inputMode="numeric"
-                        maxLength={3}
-                      />
-
-                      <Text style={{ color: '#ccc', marginTop: 12 }}>Priority</Text>
-                      <View style={styles.priorityRow}>
-                        {['low', 'medium', 'high'].map((p) => (
-                          <TouchableOpacity
-                            key={p}
-                            onPress={() => setCustomPriority(p)}
-                            style={[styles.prioBtn, customPriority === p && styles.prioBtnActive]}
-                          >
-                            <Text style={styles.prioText}>{p.toUpperCase()}</Text>
-                          </TouchableOpacity>
-                        ))}
-                      </View>
-
-                      <Text style={{ color: '#ccc', marginTop: 12 }}>Notes (optional)</Text>
-                      <TextInput
-                        style={[styles.inlineInput, { width: '100%', marginTop: 6, minHeight: 70, textAlignVertical: 'top' }]}
-                        value={customNotes}
-                        onChangeText={setCustomNotes}
-                        placeholder="Part numbers, capacities, fluid type/viscosity, etc."
-                        placeholderTextColor="#777"
-                        multiline
-                      />
-
-                      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
-                        <TouchableOpacity onPress={() => setOverlay(null)} style={styles.btnGrey}>
-                          <Text style={styles.btnText}>Cancel</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity onPress={saveCustomService} style={styles.btnGreen}>
-                          <Text style={[styles.btnText, { fontWeight: '600' }]}>Save</Text>
+                          <Text style={[styles.btnText, { fontWeight: '700' }]}>Save</Text>
                         </TouchableOpacity>
                       </View>
                     </View>
@@ -1232,25 +1498,26 @@ const BLUE = '#3b82f6';
 const GREEN = '#22c55e';
 
 const styles = StyleSheet.create({
-  container: { backgroundColor: '#333', borderRadius: 12, padding: 26, alignItems: 'center', marginVertical: 10 },
+  // Entry tile
+  container: { backgroundColor: '#333', borderRadius: 16, padding: 28, alignItems: 'center', marginVertical: 10 },
   disabledContainer: { backgroundColor: '#2d2d2d', borderColor: '#666', borderWidth: 1 },
-  label: { color: '#aaa', fontSize: 14 },
-  mileage: { color: '#fff', fontSize: 18, fontWeight: '600', marginVertical: 4, textAlign: 'center' },
+  label: { color: '#aaa', fontSize: 15, fontWeight: '600' },
+  mileage: { color: '#fff', fontSize: 19, fontWeight: '700', marginVertical: 6, textAlign: 'center' },
 
-  modalWrapper: { flex: 1, paddingTop: 50, backgroundColor: '#121212' },
+  modalWrapper: { flex: 1, backgroundColor: '#121212' },
   scrollContent: { flexGrow: 1, paddingBottom: 160 },
-  modalBox: { backgroundColor: '#121212', borderRadius: 20, marginHorizontal: 16, elevation: 10, paddingBottom: 20 },
+  modalBox: { backgroundColor: '#121212', borderRadius: 24, marginHorizontal: 16, elevation: 10, paddingBottom: 20 },
 
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, marginBottom: 8, width: '100%' },
-  headerButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)', borderRadius: 22 },
-  modalTitle: { color: '#fff', fontSize: 20, fontWeight: 'bold', flex: 1, textAlign: 'center', marginHorizontal: 8 },
-  modalCloseText: { color: '#fff', fontSize: 20, fontWeight: 'bold', lineHeight: 22 },
+  headerButton: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)', borderRadius: 22 },
+  modalTitle: { color: '#fff', fontSize: 22, fontWeight: '900', flex: 1, textAlign: 'center', marginHorizontal: 8 },
+  modalCloseText: { color: '#fff', fontSize: 22, fontWeight: 'bold', lineHeight: 22 },
 
   // CTAs
   ctaBtnPrimary: {
     backgroundColor: BLUE,
-    borderRadius: 16,
-    paddingVertical: 14,
+    borderRadius: 18,
+    paddingVertical: 16,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -1261,8 +1528,8 @@ const styles = StyleSheet.create({
   },
   ctaBtnSecondary: {
     backgroundColor: GREEN,
-    borderRadius: 16,
-    paddingVertical: 14,
+    borderRadius: 18,
+    paddingVertical: 16,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -1271,69 +1538,208 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 5,
   },
-  ctaBtnText: { color: '#0b1220', fontSize: 16, fontWeight: '800' },
+  ctaBtnText: { color: '#0b1220', fontSize: 17, fontWeight: '900' },
   ctaHint: { color: '#9aa5b1', fontSize: 12, marginTop: 8, marginLeft: 4 },
 
-  // Mileage "card" (only after generation)
+  // Mileage card
   mileageCard: {
     marginHorizontal: 16,
     marginTop: 6,
     marginBottom: 6,
     backgroundColor: '#1b1b1b',
-    borderRadius: 16,
+    borderRadius: 18,
     padding: 14,
     borderWidth: 1,
     borderColor: '#2b2b2b',
   },
-  mileageBarLabel: { color: '#eee', fontWeight: '700', marginBottom: 6, fontSize: 14.5 },
+  mileageBarLabel: { color: '#eee', fontWeight: '900', marginBottom: 6, fontSize: 15 },
   mileageInputRow: { flexDirection: 'row', alignItems: 'center' },
-  mileageSaveBtn: { backgroundColor: GREEN, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10, marginLeft: 8 },
-  mileageSaveText: { color: '#0b1220', fontWeight: '800' },
+  mileageSaveBtn: { backgroundColor: GREEN, paddingVertical: 12, paddingHorizontal: 18, borderRadius: 12, marginLeft: 8 },
+  mileageSaveText: { color: '#0b1220', fontWeight: '900' },
   mileageBarHint: { color: '#999', marginTop: 6, fontSize: 12 },
 
-  // List + items
-  serviceItem: { borderRadius: 10, padding: 12, marginBottom: 10 },
-  serviceHeaderRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 },
-  serviceTitleText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  milesEditRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginTop: 4 },
-
-  serviceSubLabel: { color: '#ccc', fontSize: 13 },
-  clickableMiles: { color: '#FFD700', textDecorationLine: 'underline', fontSize: 13, paddingVertical: 2 },
-
-  inlineInput: { backgroundColor: '#111', color: '#fff', borderRadius: 10, borderWidth: 1, borderColor: '#444', paddingHorizontal: 10, minWidth: 90, marginHorizontal: 4 },
-
-  dueText: { color: '#ddd', fontSize: 12, flexWrap: 'wrap' },
-  dueValue: { color: '#fff' },
-  dueRemaining: { color: '#ccc' },
-
-  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  iconBtn: {
-    backgroundColor: 'rgba(255,255,255,0.14)',
-    padding: 6,
-    borderRadius: 8,
+  // Search
+  searchRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: 8,
+    marginHorizontal: 16,
+    marginBottom: 8,
+    backgroundColor: '#1b1b1b',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2b2b2b',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  searchInput: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 15,
+    paddingVertical: 0,
   },
 
-  deleteButton: { backgroundColor: '#FF5252', padding: 6, borderRadius: 8, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
-
-  proofRow: { marginTop: 8 },
-  proofRowContent: { flexDirection: 'row', alignItems: 'center' },
-  thumbnailContainer: { marginRight: 8, borderRadius: 8, width: 60, height: 60, zIndex: 1 },
-  thumbnail: { width: '100%', height: '100%', borderRadius: 8 },
-
-  detailsBox: { marginTop: 8, backgroundColor: '#1e1e1e', padding: 8, borderRadius: 8 },
-  detailText: { color: '#ccc', fontSize: 12, marginBottom: 2 },
-
-  buttonRow: { flexDirection: 'row', justifyContent: 'flex-start', marginTop: 16, flexWrap: 'wrap' },
-  completeButton: { backgroundColor: '#4CAF50', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, flexDirection: 'row', alignItems: 'center', marginRight: 8, marginBottom: 6 },
-  completeText: { color: '#fff', fontSize: 12.5, fontWeight: '600', marginLeft: 5 },
-
+  // List + base item
+  serviceItem: { borderRadius: 10, padding: 12, marginBottom: 10 },
   serviceLow: { backgroundColor: '#424242' },
   serviceSevGreen: { backgroundColor: '#1f5f2a' },
   serviceSevYellow: { backgroundColor: '#8d6e00' },
   serviceSevRed: { backgroundColor: '#7f1d1d' },
 
+  // --- CARD UPGRADE ---
+  serviceCard: {
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+    position: 'relative',
+  },
+
+  // Inactive ribbon moved to top-left
+  inactiveRibbon: {
+    position: 'absolute',
+    top: 10,
+    left: 12,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    zIndex: 2,
+  },
+  inactiveRibbonText: { color: '#fff', fontSize: 11, fontWeight: '900', letterSpacing: 0.4 },
+
+  // Title & meta
+  titleRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  titleText: { color: '#fff', fontSize: 20, fontWeight: '900', lineHeight: 26 },
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' },
+  dot: { color: '#ddd', marginHorizontal: 6, fontSize: 14, opacity: 0.8 },
+
+  pillStatic: {
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    color: '#fff',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    overflow: 'hidden',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  pillEdit: {
+    marginLeft: 6,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    color: '#fff',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  pillLink: {
+    color: '#FFD700',
+    paddingVertical: 6,
+    paddingHorizontal: 0,
+    borderRadius: 999,
+    fontSize: 14,
+    fontWeight: '800',
+    textDecorationLine: 'underline',
+  },
+  inlineEditWrap: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 6, marginTop: 6 },
+
+  // Small inline buttons (added)
+  smallBtn: { paddingVertical: 8, paddingHorizontal: 10, borderRadius: 10 },
+  smallBtnText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+
+  // Delete button
+  deleteBtnBig: {
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 2,
+    alignSelf: 'flex-start',
+    marginLeft: 6,
+  },
+
+  // Badges
+  badgeRow: { flexDirection: 'row', gap: 10, marginTop: 10, marginBottom: 10 },
+  badge: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  badgeLabel: { color: '#bbb', fontSize: 12, fontWeight: '700' },
+  badgeValue: { color: '#fff', fontSize: 16, fontWeight: '900', marginTop: 2 },
+
+  // Inverted progress
+  progressWrap: {
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 999,
+  },
+  progressHint: { color: '#ddd', marginTop: 8, fontSize: 13, fontWeight: '700' },
+
+  // Details panel
+  detailsPanel: {
+    marginTop: 12,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  detailRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
+  detailKey: { color: '#ccc', fontSize: 13, fontWeight: '800', width: 140 },
+  detailVal: { color: '#fff', fontSize: 13, flexShrink: 1 },
+
+  // Inputs (base)
+  inlineInput: { backgroundColor: '#111', color: '#fff', borderRadius: 10, borderWidth: 1, borderColor: '#444', paddingHorizontal: 10, minWidth: 90, marginHorizontal: 4 },
+
+  // Proofs
+  proofRow: { marginTop: 8 },
+  proofRowContent: { flexDirection: 'row', alignItems: 'center' },
+  thumbnailContainer: { marginRight: 8, borderRadius: 8, width: 70, height: 70, zIndex: 1 },
+  thumbnail: { width: '100%', height: '100%', borderRadius: 8 },
+
+  // Actions
+  buttonRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 16 },
+  actionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  actionPrimary: { backgroundColor: '#22c55e', borderColor: '#22c55e' },
+  actionNeutral: { backgroundColor: 'rgba(255,255,255,0.10)', borderColor: 'rgba(255,255,255,0.15)' },
+  actionOutline: { backgroundColor: 'transparent', borderColor: 'rgba(255,255,255,0.25)' },
+  actionPurple: { backgroundColor: '#8b5cf6', borderColor: '#8b5cf6' },
+  actionTextPrimary: { color: '#0b1220', fontSize: 13.5, fontWeight: '900' },
+  actionText: { color: '#fff', fontSize: 13.5, fontWeight: '800' },
+
+  // FAB
   addFab: {
     position: 'absolute',
     right: 22,
@@ -1351,11 +1757,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
   },
 
-  decodingText: { color: '#fff', fontSize: 18, marginBottom: 20 },
-
-  smallBtn: { marginLeft: 8, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, alignSelf: 'center' },
-  smallBtnText: { color: '#fff', fontSize: 12, fontWeight: '600' },
-
+  // ---------------- SHEET / OVERLAY (revamped) ----------------
   overlay: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 99999,
@@ -1363,28 +1765,189 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.85)',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 16,
+    paddingHorizontal: 12,
   },
-  overlayCard: { backgroundColor: '#111', padding: 16, borderRadius: 12, width: '90%' },
-  overlayCardCenter: { backgroundColor: 'transparent', padding: 16, borderRadius: 12, width: '90%', alignItems: 'center' },
+  sheet: {
+    backgroundColor: '#0f0f0f',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    padding: 14,
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+  },
+  sheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  sheetTitle: { color: '#fff', fontSize: 18, fontWeight: '900', flex: 1, textAlign: 'left', paddingRight: 16 },
+  sheetClose: { width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
+  sheetCloseText: { color: '#fff', fontSize: 22, lineHeight: 22 },
 
-  btnGrey: { paddingVertical: 10, paddingHorizontal: 16, marginRight: 8, backgroundColor: '#555', borderRadius: 8 },
-  btnGreen: { paddingVertical: 10, paddingHorizontal: 16, backgroundColor: '#4CAF50', borderRadius: 8 },
-  btnText: { color: '#fff' },
+  sheetFooterRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, paddingTop: 8 },
 
-  priorityRow: { flexDirection: 'row', gap: 8, marginTop: 6 },
-  prioBtn: { backgroundColor: '#222', paddingVertical: 10, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: '#444' },
-  prioBtnActive: { backgroundColor: '#4CAF50', borderColor: '#4CAF50' },
-  prioText: { color: '#fff', fontWeight: '700', fontSize: 12 },
+  // Inputs (revamped)
+  labelStrong: { color: '#eee', fontWeight: '900', marginTop: 8, marginBottom: 6, fontSize: 14.5 },
+  helperText: { color: '#9aa5b1', fontSize: 12, marginTop: 4 },
 
+  input: {
+    backgroundColor: '#111',
+    color: '#fff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#333',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  inputLg: {
+    backgroundColor: '#111',
+    color: '#fff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#333',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+  },
+  inputMultiline: {
+    backgroundColor: '#111',
+    color: '#fff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#333',
+    minHeight: 110,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    textAlignVertical: 'top',
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#111',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#333',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  inputRowButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#111',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#333',
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  inputRowButtonText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+
+  chipAction: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  chipActionText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+
+  // Form grid
+  formRow: { flexDirection: 'row', gap: 10, marginTop: 8 },
+  formCol: { flex: 1, minWidth: 140 },
+
+  // Segmented
+  segmentRow: {
+    flexDirection: 'row',
+    gap: 8,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 12,
+    padding: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.09)',
+    marginBottom: 2,
+  },
+  segment: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  segmentActive: {
+    backgroundColor: '#22c55e',
+  },
+  segmentText: { color: '#ddd', fontWeight: '800' },
+  segmentTextActive: { color: '#0b1220', fontWeight: '900' },
+
+  // Buttons
+  decodingText: { color: '#fff', fontSize: 18, marginBottom: 20 },
+  btnGrey: { paddingVertical: 12, paddingHorizontal: 16, backgroundColor: '#555', borderRadius: 10 },
+  btnGreen: { paddingVertical: 12, paddingHorizontal: 18, backgroundColor: '#4CAF50', borderRadius: 10 },
+  btnText: { color: '#fff', fontSize: 14.5, fontWeight: '700' },
+
+  // Banner
+  banner: {
+    color: '#d6ffe4',
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 10,
+    marginBottom: 8,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+
+  // Image viewer
   viewerShell: { width: '95%', height: '82%', backgroundColor: '#080808', borderRadius: 14, overflow: 'hidden', borderColor: '#222', borderWidth: 1 },
   viewerTopBar: { height: 46, backgroundColor: 'rgba(0,0,0,0.55)', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 12, borderBottomColor: '#111', borderBottomWidth: 1 },
   viewerTopBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 4, backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 8 },
   viewerTopBarText: { color: '#fff', fontSize: 14 },
   viewerImageWrap: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
   viewerImage: { width: '100%', height: '100%' },
-
   chevron: { position: 'absolute', top: '45%', backgroundColor: 'rgba(0,0,0,0.45)', width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
   pager: { position: 'absolute', bottom: 10, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.45)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12 },
   pagerText: { color: '#fff', fontSize: 12 },
+
+  // Thinking overlay (new)
+  thinkingCard: {
+    width: '86%',
+    maxWidth: 420,
+    alignItems: 'center',
+    backgroundColor: '#0f0f0f',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    paddingVertical: 22,
+    paddingHorizontal: 16,
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+  },
+  spinnerRow: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    marginBottom: 12,
+  },
+  thinkingTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  thinkingSub: {
+    color: '#9aa5b1',
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 6,
+  },
 });
