@@ -1,5 +1,5 @@
 // components/ChatBoxFixed.js
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -7,89 +7,123 @@ import {
   TouchableOpacity,
   StyleSheet,
   Platform,
+  Keyboard,
 } from 'react-native';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 
 export default function ChatBoxFixed({
   onSend,
   onFocus,
-
-  // NEW
   onMicPress,
   onCameraPress,
   onClearAudio,
   onClearImage,
   attachedAudio, // { uri, durationMs } | null
   attachedImage, // { uri } | null
+  isSending = false,
 }) {
   const [inputText, setInputText] = useState('');
   const inputRef = useRef(null);
 
-  useEffect(() => {}, []);
+  useEffect(() => {
+    const sub = Keyboard.addListener('keyboardDidShow', () => {
+      if (onFocus) onFocus();
+    });
+    return () => sub?.remove?.();
+  }, [onFocus]);
 
-  const canSend = inputText.trim().length > 0 || !!attachedAudio || !!attachedImage;
+  const hasImage = !!attachedImage?.uri;
+  const hasAudio = !!attachedAudio?.uri;
+
+  const handleSendPress = () => {
+    if (isSending) return;
+    const txt = (inputText || '').trim();
+
+    // allow send even if only attachment (parent handles)
+    onSend?.(txt);
+    setInputText('');
+  };
 
   return (
-    <View style={styles.wrapper}>
-      {/* --- Attachment preview area --- */}
-      {(attachedAudio || attachedImage) ? (
-        <View style={styles.attachRow}>
-          {attachedAudio ? (
-            <View style={styles.pill}>
-              <MaterialCommunityIcons name="waveform" size={16} color="#fff" />
-              <Text style={styles.pillText}>
-                Audio attached{attachedAudio?.durationMs ? ` • ${Math.round(attachedAudio.durationMs / 1000)}s` : ''}
-              </Text>
-              <TouchableOpacity onPress={onClearAudio} style={styles.pillX}>
-                <Ionicons name="close" size={16} color="#fff" />
+    <View style={styles.wrap}>
+      {/* Attachment chips */}
+      {(hasImage || hasAudio) && (
+        <View style={styles.chipsRow}>
+          {hasImage && (
+            <View style={styles.chip}>
+              <Ionicons name="image-outline" size={16} color="#d8d8d8" />
+              <Text style={styles.chipText}>Photo</Text>
+              <TouchableOpacity
+                onPress={onClearImage}
+                disabled={isSending}
+                style={styles.chipX}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Ionicons name="close" size={16} color={isSending ? '#666' : '#d8d8d8'} />
               </TouchableOpacity>
             </View>
-          ) : null}
+          )}
 
-          {attachedImage ? (
-            <View style={[styles.pill, { backgroundColor: '#2a2a2a' }]}>
-              <Ionicons name="camera" size={16} color="#fff" />
-              <Text style={styles.pillText}>Photo attached</Text>
-              <TouchableOpacity onPress={onClearImage} style={styles.pillX}>
-                <Ionicons name="close" size={16} color="#fff" />
+          {hasAudio && (
+            <View style={styles.chip}>
+              <Ionicons name="mic-outline" size={16} color="#d8d8d8" />
+              <Text style={styles.chipText}>Audio</Text>
+              <TouchableOpacity
+                onPress={onClearAudio}
+                disabled={isSending}
+                style={styles.chipX}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Ionicons name="close" size={16} color={isSending ? '#666' : '#d8d8d8'} />
               </TouchableOpacity>
             </View>
-          ) : null}
+          )}
         </View>
-      ) : null}
+      )}
 
-      {/* --- Input row --- */}
+      {/* Input row */}
       <View style={styles.row}>
-        <TouchableOpacity style={styles.iconBtn} onPress={onCameraPress}>
-          <Ionicons name="camera" size={20} color="#fff" />
+        <TouchableOpacity
+          onPress={onCameraPress}
+          disabled={isSending}
+          style={[styles.iconBtn, isSending && styles.disabledBtn]}
+        >
+          <Ionicons name="camera-outline" size={20} color="#fff" />
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.iconBtn} onPress={onMicPress}>
-          <Ionicons name="mic" size={20} color="#fff" />
+        <TouchableOpacity
+          onPress={onMicPress}
+          disabled={isSending}
+          style={[styles.iconBtn, isSending && styles.disabledBtn]}
+        >
+          <Ionicons name="mic-outline" size={20} color="#fff" />
         </TouchableOpacity>
 
         <View style={styles.inputWrap}>
           <TextInput
             ref={inputRef}
             style={styles.input}
-            placeholder=""
-            placeholderTextColor="#888"
+            placeholder="Message Torque…"
+            placeholderTextColor="#8a8a8a"
             value={inputText}
             onChangeText={setInputText}
             onFocus={onFocus}
+            editable={!isSending}
             multiline
+            returnKeyType="send"
+            blurOnSubmit={false}
+            onSubmitEditing={() => {
+              if (Platform.OS !== 'ios') handleSendPress();
+            }}
           />
         </View>
 
         <TouchableOpacity
-          style={[styles.sendBtn, !canSend && styles.sendDisabled]}
-          disabled={!canSend}
-          onPress={() => {
-            onSend?.(inputText);
-            setInputText('');
-          }}
+          onPress={handleSendPress}
+          disabled={isSending}
+          style={[styles.sendBtn, isSending && styles.disabledBtn]}
         >
-          <Ionicons name="send" size={18} color="#fff" />
+          <MaterialIcons name="send" size={20} color="#fff" />
         </TouchableOpacity>
       </View>
     </View>
@@ -97,36 +131,36 @@ export default function ChatBoxFixed({
 }
 
 const styles = StyleSheet.create({
-  wrapper: {
-    paddingBottom: Platform.OS === 'ios' ? 18 : 12,
+  wrap: {
+    paddingBottom: Platform.OS === 'ios' ? 12 : 10,
+    paddingTop: 8,
   },
 
-  attachRow: {
+  chipsRow: {
     flexDirection: 'row',
-    gap: 10,
-    marginBottom: 10,
-    flexWrap: 'wrap',
-  },
-  pill: {
-    flexDirection: 'row',
-    alignItems: 'center',
     gap: 8,
-    backgroundColor: '#333',
-    borderRadius: 999,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
+    paddingHorizontal: 6,
+    paddingBottom: 8,
   },
-  pillText: { color: '#fff', fontSize: 12, fontWeight: '800' },
-  pillX: {
-    marginLeft: 6,
-    width: 22,
-    height: 22,
-    borderRadius: 999,
+  chip: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    gap: 6,
+    backgroundColor: '#1f1f1f',
+    borderWidth: 1,
+    borderColor: '#2e2e2e',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 999,
+  },
+  chipText: {
+    color: '#eaeaea',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  chipX: {
+    marginLeft: 2,
+    paddingLeft: 4,
   },
 
   row: {
@@ -138,33 +172,41 @@ const styles = StyleSheet.create({
     width: 42,
     height: 42,
     borderRadius: 14,
-    backgroundColor: '#2d2d2d',
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#2a2a2a',
+    borderWidth: 1,
+    borderColor: '#3a3a3a',
   },
   inputWrap: {
     flex: 1,
-    backgroundColor: '#1f1f1f',
-    borderRadius: 16,
+    minHeight: 42,
+    maxHeight: 140,
+    borderRadius: 18,
+    backgroundColor: '#1c1c1c',
+    borderWidth: 1,
+    borderColor: '#2e2e2e',
     paddingHorizontal: 12,
     paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
   },
   input: {
     color: '#fff',
-    fontSize: 14,
-    maxHeight: 110,
+    fontSize: 15,
+    lineHeight: 20,
+    padding: 0,
+    margin: 0,
   },
   sendBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
-    backgroundColor: '#3b82f6',
+    width: 44,
+    height: 44,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#2f6fed',
+    borderWidth: 1,
+    borderColor: '#2f6fed',
   },
-  sendDisabled: {
+  disabledBtn: {
     opacity: 0.45,
   },
 });

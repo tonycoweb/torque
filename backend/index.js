@@ -15,7 +15,7 @@ const MODEL_PRICING = {
     in: Number(process.env.PRICE_GPT4O_IN_PER_1M || 5),
     out: Number(process.env.PRICE_GPT4O_OUT_PER_1M || 15),
   },
-  'gpt-4o-mini': {
+  'gpt-4o': {
     in: Number(process.env.PRICE_GPT4OMINI_IN_PER_1M || 0.15),
     out: Number(process.env.PRICE_GPT4OMINI_OUT_PER_1M || 0.60),
   },
@@ -305,7 +305,7 @@ async function autosummarize(convoId, messages){
   const convo = messages.filter(m => m.role !== 'system');
   const text = convo.map(m => `${m.role.toUpperCase()}: ${typeof m.content==='string'?m.content:JSON.stringify(m.content)}`).join('\n');
   const payload = {
-    model: 'gpt-4o-mini',
+    model: 'gpt-4o',
     messages: [
       { role:'system', content: 'Summarize the dialog into a compact, tool-usable memory. 4-6 bullets max. No fluff.' },
       { role:'user', content: text }
@@ -315,7 +315,7 @@ async function autosummarize(convoId, messages){
   };
   const resp = await openAIChat({
     route: '/chat#autosummary',
-    model: 'gpt-4o-mini',
+    model: 'gpt-4o',
     tier: 'token',
     payload,
     meta: { note:`autosummarize(${SUMMARY_MAX_TOKENS})` },
@@ -510,7 +510,7 @@ Rules:
 `.trim();
 
   const payload = {
-    model: 'gpt-4o-mini',
+    model: 'gpt-4o',
     messages: [
       { role:'system', content: sys },
       { role:'user', content: `Vehicle: ${vtxt}` },
@@ -522,7 +522,7 @@ Rules:
   try {
     const resp = await openAIChat({
       route: '/vehicle-facts',
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       tier: 'token',
       payload,
       meta: { note: `facts for ${vtxt}` },
@@ -627,7 +627,7 @@ ${JSON.stringify({ items }, null, 2)}
 `.trim();
 
   const payload = {
-    model: 'gpt-4o-mini',
+    model: 'gpt-4o',
     messages: [
       { role:'system', content: system },
       { role:'user', content: user },
@@ -639,7 +639,7 @@ ${JSON.stringify({ items }, null, 2)}
   try {
     const resp = await openAIChat({
       route: '/interval-enricher',
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       tier: 'token',
       payload,
       meta: { note:`vehicle=${vtxt}` },
@@ -758,7 +758,7 @@ function enforceCardTruthiness(facts, fixedCompact) {
   }
 }
 
-async function openAIAudioTranscribe({ route, model = 'gpt-4o-mini-transcribe', buffer, filename = 'audio.m4a', mimeType = 'audio/mp4', prompt = '' }) {
+async function openAIAudioTranscribe({ route, model = 'gpt-4o-transcribe', buffer, filename = 'audio.m4a', mimeType = 'audio/mp4', prompt = '' }) {
   const t0 = Date.now();
 
   const form = new FormData();
@@ -906,7 +906,7 @@ app.post('/image-diagnose', async (req, res) => {
       normalize: true,
     });
 
-    const model = requestedModel || 'gpt-4o-mini'; // cheap vision by default
+    const model = requestedModel || 'gpt-4o'; // cheap vision by default
 
     const vSummary = summarizeVehicle(vehicle) || 'unknown';
 
@@ -928,7 +928,9 @@ ${(text || '').trim() || '(no text provided)'}
 
 Task: analyze the attached photo for whatever the user asks for as long as its car related, if the user sends the
 image with no context, try to identify what part it is and make sure to search online for images to verify with
-high confidence you correctly identified the part. return found part numbers for it too`,
+high confidence you correctly identified the part, if you're not sure or think it could be multiple things, look up each image
+online in regards to the car info provided to return what you think something like its either this part or this part
+the image is not too clear etc. a professional way to excuse yourself. return found part numbers for it too`,
             },
             { type: 'image_url', image_url: { url: optimized, detail: 'low' } },
           ],
@@ -964,17 +966,16 @@ high confidence you correctly identified the part. return found part numbers for
 // Body: { audioBase64: "<base64>", prompt?: string, vehicle?: object }
 app.post('/audio-diagnose', async (req, res) => {
   try {
-    const { audioBase64, prompt = 'Diagnose this sound.', vehicle = null } = req.body || {};
-    if (!audioBase64) return res.status(400).json({ error: 'Missing audioBase64.' });
+  const { audioBase64, prompt = 'Diagnose this sound.', vehicle = null, mimeType, filename } = req.body || {};
+const audioBuffer = Buffer.from(audioBase64, 'base64');
 
-    // Convert base64 -> Buffer
-    const audioBuffer = Buffer.from(audioBase64, 'base64');
+const form = new FormData();
+form.append('file', audioBuffer, {
+  filename: filename || 'audio.m4a',
+  contentType: mimeType || 'audio/mp4',
+});
+form.append('model', 'whisper-1');
 
-    // 1) Transcribe (cheap + reliable)
-    const form = new FormData();
-    form.append('file', audioBuffer, { filename: 'audio.m4a', contentType: 'audio/mp4' });
-    // whisper-1 is the standard transcription model
-    form.append('model', 'whisper-1');
 
     const t0 = Date.now();
     const tr = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
@@ -1009,7 +1010,7 @@ Task:
     ];
 
     const payload = {
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       messages: packedMessages,
       temperature: 0.3,
       max_tokens: 450,
@@ -1017,7 +1018,7 @@ Task:
 
     const response = await openAIChat({
       route: '/audio-diagnose',
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       tier: 'token',
       payload,
       meta: { note: `rid=${req._rid}, transcript_ms=${ms}` },
@@ -1038,7 +1039,7 @@ app.post('/decode-vin', async (req, res) => {
     if (!base64Image) return res.status(400).json({ error: 'Missing base64Image in request body.' });
 
     const optimized = await optimizeImageBase64(base64Image, { maxWidth: 900, quality: 45, toGrayscale: true, normalize: true });
-    const visionModel = 'gpt-4o-mini';
+    const visionModel = 'gpt-4o';
 
     async function visionPass(detail = 'low') {
       const payloadVision = {
@@ -1254,7 +1255,7 @@ ${JSON.stringify(TEMPLATE_15)}
 `.trim();
 
     const payload = {
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
@@ -1265,7 +1266,7 @@ ${JSON.stringify(TEMPLATE_15)}
 
     const response = await openAIChat({
       route: '/generate-service-recommendations',
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       tier: 'token',
       payload,
       meta: { note: `rid=${req._rid}, compact-plan (15)` },

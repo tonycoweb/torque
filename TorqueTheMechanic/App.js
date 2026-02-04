@@ -43,7 +43,7 @@ import mobileAds, { RewardedAd, RewardedAdEventType } from 'react-native-google-
 const BACKEND_BASE = 'http://192.168.1.246:3001';
 const API_CHAT_URL = `${BACKEND_BASE}/chat`;
 const API_AUDIO_URL = `${BACKEND_BASE}/audio-diagnose`;
-const API_IMAGE_URL = `${BACKEND_BASE}/image-diagnose`; // ✅ NEW (matches index.js)
+const API_IMAGE_URL = `${BACKEND_BASE}/image-diagnose`;
 const API_DECODE_VIN_URL = `${BACKEND_BASE}/decode-vin`;
 
 const adUnitId = __DEV__
@@ -99,6 +99,14 @@ const normalizeMsgContent = (content) => {
   }
 };
 
+const stripDataUrl = (b64OrDataUrl) => {
+  if (!b64OrDataUrl) return null;
+  const s = String(b64OrDataUrl);
+  const idx = s.indexOf('base64,');
+  if (s.startsWith('data:') && idx !== -1) return s.slice(idx + 'base64,'.length);
+  return s;
+};
+
 // ✅ Convert base64 -> data URL (what your /image-diagnose route expects)
 const asDataUrlJpeg = (b64) => {
   if (!b64) return null;
@@ -107,45 +115,57 @@ const asDataUrlJpeg = (b64) => {
   return `data:image/jpeg;base64,${s}`;
 };
 
+const inferAudioMeta = (uri = '') => {
+  const clean = String(uri).split('?')[0];
+  const ext = (clean.split('.').pop() || '').toLowerCase();
+
+  const map = {
+    m4a: { mimeType: 'audio/mp4', filename: 'audio.m4a' },
+    mp4: { mimeType: 'audio/mp4', filename: 'audio.mp4' },
+    aac: { mimeType: 'audio/aac', filename: 'audio.aac' },
+    caf: { mimeType: 'audio/x-caf', filename: 'audio.caf' },
+    wav: { mimeType: 'audio/wav', filename: 'audio.wav' },
+    mp3: { mimeType: 'audio/mpeg', filename: 'audio.mp3' },
+  };
+
+  return map[ext] || { mimeType: 'audio/mp4', filename: 'audio.m4a' };
+};
+
+/**
+ * ✅ FIX: normalize audio/file URIs coming from native code.
+ * Handles:
+ * - object payloads like { uri: "file://..." }
+ * - Swift Optional(file:///...) strings
+ * - quoted URIs
+ */
+const normalizeFileUri = (input) => {
+  let uri =
+    typeof input === 'string'
+      ? input
+      : input?.uri || input?.soundUri || input?.soundURI || input?.recordingUri || input?.recordingURI;
+
+  if (!uri) return null;
+
+  uri = String(uri).trim();
+
+  if (uri.startsWith('Optional(') && uri.endsWith(')')) {
+    uri = uri.slice('Optional('.length, -1);
+  }
+
+  uri = uri.replace(/^"+|"+$/g, '');
+
+  return uri;
+};
+
 // ===================== API CALLS =====================
 
-// ✅ TEXT-ONLY CHAT (do NOT send images here; /chat strips attachments in index.js)
+// ✅ TEXT-ONLY CHAT (do NOT send images here)
 async function chatWithBackend({ messages, vehicle }) {
   const resp = await fetch(API_CHAT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       messages,
-      vehicle: vehicle || null,
-      // Optional (safe): you can add convoId/model later if you want
-      // convoId: 'default',
-      // model: 'gpt-4o'
-    }),
-  });
-
-  let data = null;
-  try {
-    data = await resp.json();
-  } catch {}
-
-  if (!resp.ok) {
-    throw new Error(data?.error || `HTTP ${resp.status}`);
-  }
-  return data;
-}
-
-// ✅ AUDIO -> /audio-diagnose (your backend transcribes + diagnoses)
-async function sendAudioToBackend({ uri, prompt, vehicle }) {
-  const base64 = await FileSystem.readAsStringAsync(uri, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
-
-  const resp = await fetch(API_AUDIO_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      audioBase64: base64,
-      prompt: prompt || 'Diagnose this sound.',
       vehicle: vehicle || null,
     }),
   });
@@ -159,16 +179,49 @@ async function sendAudioToBackend({ uri, prompt, vehicle }) {
   return data;
 }
 
-// ✅ IMAGE -> /image-diagnose (this is the missing link)
+// ✅ AUDIO -> /audio-diagnose
+async function sendAudioToBackend({ uri, prompt, vehicle, mimeType, filename }) {
+  const cleanUri = normalizeFileUri(uri);
+  if (!cleanUri) throw new Error('Audio URI is missing/invalid (could not normalize).');
+
+  // ✅ Verify exists early so we don't get the "cannot be cast to URL" / Optional(...) crash
+  const info = await FileSystem.getInfoAsync(cleanUri);
+  if (!info?.exists) throw new Error(`Audio file not found: ${cleanUri}`);
+
+  const base64 = await FileSystem.readAsStringAsync(cleanUri, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+
+  const resp = await fetch(API_AUDIO_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      audioBase64: base64,
+      prompt: prompt || 'Diagnose this sound.',
+      vehicle: vehicle || null,
+      mimeType: mimeType || 'audio/mp4',
+      filename: filename || 'audio.m4a',
+    }),
+  });
+
+  let data = null;
+  try {
+    data = await resp.json();
+  } catch {}
+
+  if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+  return data;
+}
+
+// ✅ IMAGE -> /image-diagnose
 async function sendImageToBackend({ base64, text, vehicle }) {
   const resp = await fetch(API_IMAGE_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      imageBase64: asDataUrlJpeg(base64), // ✅ route expects "imageBase64"
+      imageBase64: asDataUrlJpeg(stripDataUrl(base64)),
       text: (text || '').trim(),
       vehicle: vehicle || null,
-      // model is optional; backend defaults to gpt-4o-mini
     }),
   });
 
@@ -196,9 +249,12 @@ export default function App() {
 
   const [showSettings, setShowSettings] = useState(false);
 
-  // ✅ Attachments
+  // ✅ Attachments (only ONE allowed at a time)
   const [attachedImage, setAttachedImage] = useState(null); // { uri, base64 }
-  const [attachedAudio, setAttachedAudio] = useState(null); // { uri, durationMs }
+  const [attachedAudio, setAttachedAudio] = useState(null); // { uri, durationMs, mimeType, filename }
+
+  // ✅ lock attachments while a send is in-flight (prevents spam / double-send)
+  const [attachmentLocked, setAttachmentLocked] = useState(false);
 
   // ✅ audio modal
   const [showAudioRecorder, setShowAudioRecorder] = useState(false);
@@ -216,7 +272,7 @@ export default function App() {
 
   const rewardedRef = useRef(null);
 
-  // Robot anim (optional)
+  // Robot anim
   const robotTranslateY = useRef(new Animated.Value(0)).current;
   const robotScale = useRef(new Animated.Value(1)).current;
   useEffect(() => {
@@ -230,7 +286,7 @@ export default function App() {
       duration: 450,
       useNativeDriver: true,
     }).start();
-  }, [isChatting]);
+  }, [isChatting, robotTranslateY, robotScale]);
 
   // Init login
   useEffect(() => {
@@ -306,7 +362,15 @@ export default function App() {
 
   // ===================== Attachments =====================
 
+  const hasAnyAttachment = () => !!attachedImage || !!attachedAudio;
+
   const handleCameraPress = async () => {
+    if (loading || attachmentLocked) return;
+    if (hasAnyAttachment()) {
+      Alert.alert('One attachment at a time', 'Remove the current attachment before adding another.');
+      return;
+    }
+
     try {
       setIsChatting(true);
 
@@ -330,7 +394,6 @@ export default function App() {
         return;
       }
 
-      // ✅ Robust: base64 sometimes missing; fallback to FileSystem read
       let b64 = asset.base64;
       if (!b64) {
         try {
@@ -354,15 +417,29 @@ export default function App() {
   };
 
   const handleMicPress = () => {
+    if (loading || attachmentLocked) return;
+    if (hasAnyAttachment()) {
+      Alert.alert('One attachment at a time', 'Remove the current attachment before adding another.');
+      return;
+    }
     setIsChatting(true);
     setShowAudioRecorder(true);
   };
 
-  const clearAttachedImage = () => setAttachedImage(null);
-  const clearAttachedAudio = () => setAttachedAudio(null);
+  const clearAttachedImage = () => {
+    if (loading || attachmentLocked) return;
+    setAttachedImage(null);
+  };
+
+  const clearAttachedAudio = () => {
+    if (loading || attachmentLocked) return;
+    setAttachedAudio(null);
+  };
 
   // ===================== Sending =====================
   const handleSend = async (textOrPayload) => {
+    if (loading) return; // ✅ hard block spam
+
     const text = typeof textOrPayload === 'string' ? textOrPayload : textOrPayload?.text || '';
 
     const hasText = !!text.trim();
@@ -378,6 +455,7 @@ export default function App() {
       setActiveChatVehicle(null);
       setAttachedImage(null);
       setAttachedAudio(null);
+      setAttachmentLocked(false);
       return;
     }
 
@@ -392,10 +470,21 @@ export default function App() {
     setShowSavedChats(false);
     setLoading(true);
 
+    // ✅ lock attachment controls while in-flight
+    if (hasImg || hasAudio) setAttachmentLocked(true);
+
+    // ✅ snapshot attachments so we can restore on failure
+    const imgSnap = attachedImage;
+    const audioSnap = attachedAudio;
+
+    // ✅ self-erase the pill immediately so user can't re-send it while Torque is thinking
+    if (hasImg) setAttachedImage(null);
+    if (hasAudio) setAttachedAudio(null);
+
     // UI append
     setMessages((prev) => [...prev, { sender: 'user', text: userLine }]);
 
-    // ✅ Always keep text-only history clean (no base64, no audio)
+    // ✅ Always keep text-only history clean (no base64/audio)
     const newHistory = [...chatHistory, { role: 'user', content: userLine }];
     setChatHistory(newHistory);
 
@@ -408,16 +497,18 @@ export default function App() {
       // 1) AUDIO attached -> /audio-diagnose
       if (hasAudio) {
         const data = await sendAudioToBackend({
-          uri: attachedAudio.uri,
+          uri: audioSnap?.uri, // use snapshot (cleaned inside sendAudioToBackend)
           prompt: hasText ? text.trim() : 'Diagnose this sound.',
           vehicle: vehicleForChat,
+          mimeType: audioSnap?.mimeType,
+          filename: audioSnap?.filename,
         });
         replyText = data?.reply || '⚠️ No response from audio endpoint.';
       }
-      // 2) IMAGE attached -> /image-diagnose  ✅ FIX
+      // 2) IMAGE attached -> /image-diagnose
       else if (hasImg) {
         const data = await sendImageToBackend({
-          base64: attachedImage.base64,
+          base64: imgSnap?.base64,
           text: hasText ? text.trim() : '',
           vehicle: vehicleForChat,
         });
@@ -438,18 +529,22 @@ export default function App() {
       setChatHistory(updatedHistory);
 
       setMessages((prev) => [...prev, { sender: 'api', text: replyText }]);
-      setLoading(false);
 
       const id = chatID || Date.now().toString();
       setChatID(id);
       await saveChat(id, updatedHistory);
 
-      // ✅ clear attachments AFTER successful send
-      setAttachedImage(null);
-      setAttachedAudio(null);
+      // ✅ attachments already cleared; just unlock
+      setAttachmentLocked(false);
     } catch (e) {
-      setLoading(false);
+      // ✅ on failure: restore attachments so user can retry
+      if (hasImg && imgSnap) setAttachedImage(imgSnap);
+      if (hasAudio && audioSnap) setAttachedAudio(audioSnap);
+
       setMessages((prev) => [...prev, { sender: 'api', text: `⚠️ ${e?.message || 'Error sending message.'}` }]);
+      setAttachmentLocked(false);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -459,6 +554,7 @@ export default function App() {
   };
 
   const handleExitChat = () => {
+    if (loading) return; // optional: prevent exit mid-request
     Keyboard.dismiss();
     setIsChatting(false);
     setMessages([]);
@@ -468,6 +564,7 @@ export default function App() {
     setActiveChatVehicle(null);
     setAttachedImage(null);
     setAttachedAudio(null);
+    setAttachmentLocked(false);
   };
 
   const handleSelectVehicle = async (v) => {
@@ -599,18 +696,20 @@ export default function App() {
 
         {isChatting && (
           <View style={styles.chatTopBar}>
-            <TouchableOpacity style={styles.exitButton} onPress={handleExitChat}>
-              <Text style={styles.exitButtonText}>Exit Chat</Text>
+            <TouchableOpacity style={styles.exitButton} onPress={handleExitChat} disabled={loading}>
+              <Text style={[styles.exitButtonText, loading && { opacity: 0.6 }]}>Exit Chat</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={[styles.topBarBtn, showSavedChats && styles.topBarBtnActive]}
               onPress={() => {
+                if (loading) return;
                 Keyboard.dismiss();
                 setShowSavedChats((prev) => !prev);
               }}
+              disabled={loading}
             >
-              <Text style={styles.topBarBtnText}>Saved</Text>
+              <Text style={[styles.topBarBtnText, loading && { opacity: 0.6 }]}>Saved</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -623,6 +722,8 @@ export default function App() {
           <SavedChatsPanel
             onClose={() => setShowSavedChats(false)}
             onSelect={(chat) => {
+              if (loading) return;
+
               if (!chat) {
                 setChatID(null);
                 setChatHistory([]);
@@ -631,6 +732,7 @@ export default function App() {
                 setActiveChatVehicle(null);
                 setAttachedImage(null);
                 setAttachedAudio(null);
+                setAttachmentLocked(false);
                 return;
               }
 
@@ -653,7 +755,7 @@ export default function App() {
         )}
 
         <ChatBoxFixed
-          onSend={(txt) => handleSend(txt)}
+          onSend={handleSend}
           onFocus={handleChatFocus}
           onMicPress={handleMicPress}
           onCameraPress={handleCameraPress}
@@ -661,6 +763,7 @@ export default function App() {
           onClearImage={clearAttachedImage}
           attachedAudio={attachedAudio ? { uri: attachedAudio.uri, durationMs: attachedAudio.durationMs } : null}
           attachedImage={attachedImage ? { uri: attachedImage.uri } : null}
+          isSending={loading || attachmentLocked}
         />
       </KeyboardAvoidingView>
     );
@@ -716,9 +819,23 @@ export default function App() {
       <AudioRecorderModal
         visible={showAudioRecorder}
         onClose={() => setShowAudioRecorder(false)}
-        onDone={(uri) => {
+        onDone={(payload) => {
           setShowAudioRecorder(false);
-          setAttachedAudio({ uri, durationMs: null });
+
+          // ✅ payload can be string OR object; normalize either way
+          const cleanUri = normalizeFileUri(payload);
+          if (!cleanUri) {
+            Alert.alert('Audio error', 'Could not read the recorded audio file URI.');
+            return;
+          }
+
+          const meta = inferAudioMeta(cleanUri);
+          setAttachedAudio({
+            uri: cleanUri,
+            durationMs: payload?.durationMs ?? null,
+            mimeType: meta.mimeType,
+            filename: meta.filename,
+          });
         }}
       />
 

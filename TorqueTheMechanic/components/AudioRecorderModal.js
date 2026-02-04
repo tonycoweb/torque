@@ -1,11 +1,13 @@
 // components/AudioRecorderModal.js
+// ✅ Pill-style recorder that supports playback + attach checkmark.
+// ✅ Does NOT auto-send. It returns { uri, durationMs } to App via onDone().
+// ✅ Auto-closes itself after attaching (App hides it too).
 import React, { useEffect, useRef, useState } from 'react';
-import { Modal, View, Text, TouchableOpacity, StyleSheet, Platform, Alert, ActivityIndicator } from 'react-native';
+import { Modal, View, Text, TouchableOpacity, StyleSheet, Platform, Alert } from 'react-native';
 import { Audio } from 'expo-av';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 
 async function safeSetModeRecording(on) {
-  // Keep it minimal + compatible across expo-av versions
-  // (interruptionModeIOS is optional and is what's failing for you)
   try {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: !!on,
@@ -14,7 +16,6 @@ async function safeSetModeRecording(on) {
       shouldDuckAndroid: true,
     });
   } catch (e) {
-    // Fallback: try an even smaller set
     try {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: !!on,
@@ -26,18 +27,34 @@ async function safeSetModeRecording(on) {
   }
 }
 
-export default function AudioRecorderModal({ visible, onClose, onDone }) {
+export default function AudioRecorderModal({ visible, onClose, onDone, disabled = false }) {
   const recRef = useRef(null);
+  const soundRef = useRef(null);
 
   const [ready, setReady] = useState(false);
-  const [recording, setRecording] = useState(false);
-  const [uri, setUri] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [recording, setRecording] = useState(false);
 
-  // metering (0..1-ish in expo-av status.metering on iOS; android varies)
+  const [uri, setUri] = useState(null);
+  const [durationMs, setDurationMs] = useState(null);
+
   const [meter, setMeter] = useState(0);
 
-  const cleanup = async () => {
+  const [playing, setPlaying] = useState(false);
+  const [posMs, setPosMs] = useState(0);
+
+  const resetState = () => {
+    setReady(false);
+    setBusy(false);
+    setRecording(false);
+    setUri(null);
+    setDurationMs(null);
+    setMeter(0);
+    setPlaying(false);
+    setPosMs(0);
+  };
+
+  const cleanupRecording = async () => {
     try {
       if (recRef.current) {
         try {
@@ -47,17 +64,35 @@ export default function AudioRecorderModal({ visible, onClose, onDone }) {
         recRef.current = null;
       }
     } catch {}
-    try { await safeSetModeRecording(false); } catch {}
+  };
+
+  const cleanupSound = async () => {
+    try {
+      if (soundRef.current) {
+        try {
+          await soundRef.current.stopAsync();
+        } catch {}
+        try {
+          await soundRef.current.unloadAsync();
+        } catch {}
+        soundRef.current = null;
+      }
+    } catch {}
+    setPlaying(false);
+    setPosMs(0);
+  };
+
+  const cleanupAll = async () => {
+    await cleanupRecording();
+    await cleanupSound();
+    try {
+      await safeSetModeRecording(false);
+    } catch {}
   };
 
   useEffect(() => {
     if (!visible) {
-      cleanup().catch(() => {});
-      setReady(false);
-      setRecording(false);
-      setUri(null);
-      setBusy(false);
-      setMeter(0);
+      cleanupAll().finally(() => resetState());
       return;
     }
 
@@ -81,32 +116,31 @@ export default function AudioRecorderModal({ visible, onClose, onDone }) {
       }
     })();
 
-    return () => { cleanup().catch(() => {}); };
+    return () => {
+      cleanupAll().catch(() => {});
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
   const start = async () => {
-    if (!ready || busy || recording) return;
+    if (disabled || !ready || busy || recording) return;
 
     try {
       setBusy(true);
+      await cleanupSound();
       setUri(null);
+      setDurationMs(null);
       setMeter(0);
+      setPosMs(0);
 
       await safeSetModeRecording(true);
 
       const rec = new Audio.Recording();
-
-      // ✅ Most compatible path: built-in preset
       await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
 
-      // status updates (metering)
       rec.setProgressUpdateInterval(120);
       rec.setOnRecordingStatusUpdate((st) => {
-        // st.metering is usually negative dB on iOS when enabled by preset; normalize a bit
-        // If metering is undefined on your device/version, this just stays 0.
         if (typeof st?.metering === 'number') {
-          // st.metering is often -160..0 (dB). map to 0..1
           const db = Math.max(-60, Math.min(0, st.metering));
           const norm = (db + 60) / 60;
           setMeter(norm);
@@ -125,7 +159,7 @@ export default function AudioRecorderModal({ visible, onClose, onDone }) {
   };
 
   const stop = async () => {
-    if (!recRef.current || busy) return;
+    if (disabled || !recRef.current || busy) return;
 
     try {
       setBusy(true);
@@ -133,9 +167,16 @@ export default function AudioRecorderModal({ visible, onClose, onDone }) {
       await recRef.current.stopAndUnloadAsync();
       const u = recRef.current.getURI();
 
+      let dur = null;
+      try {
+        const st = await recRef.current.getStatusAsync();
+        if (typeof st?.durationMillis === 'number') dur = st.durationMillis;
+      } catch {}
+
       recRef.current = null;
       setRecording(false);
       setUri(u || null);
+      setDurationMs(dur);
 
       await safeSetModeRecording(false);
     } catch (e) {
@@ -146,52 +187,151 @@ export default function AudioRecorderModal({ visible, onClose, onDone }) {
     }
   };
 
-  const send = async () => {
-    if (!uri || busy) return;
+  const togglePlay = async () => {
+    if (disabled || busy || !uri) return;
+
     try {
       setBusy(true);
-      await onDone?.(uri);
-      onClose?.();
+
+      if (!soundRef.current) {
+        const { sound } = await Audio.Sound.createAsync(
+          { uri },
+          { shouldPlay: false, isLooping: false },
+          (st) => {
+            if (!st) return;
+            if (typeof st.positionMillis === 'number') setPosMs(st.positionMillis);
+
+            if (st.didJustFinish) {
+              setPlaying(false);
+              setPosMs(0);
+            }
+          }
+        );
+        soundRef.current = sound;
+      }
+
+      const st = await soundRef.current.getStatusAsync();
+      if (st?.isPlaying) {
+        await soundRef.current.pauseAsync();
+        setPlaying(false);
+      } else {
+        await soundRef.current.playAsync();
+        setPlaying(true);
+      }
+    } catch (e) {
+      console.log('playback error:', e);
+      Alert.alert('Playback failed', e?.message || 'Could not play audio.');
     } finally {
       setBusy(false);
     }
   };
 
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={styles.overlay}>
-        <View style={styles.card}>
-          <Text style={styles.title}>Record engine sound</Text>
-          <Text style={styles.sub}>Tip: 8–12 seconds, close to the source, minimal wind.</Text>
+  const attach = async () => {
+    if (disabled || busy || !uri || recording) return;
 
-          {/* simple “sound bar” preview (you can style into the cylinder later) */}
-          <View style={styles.meterTrack}>
-            <View style={[styles.meterFill, { width: `${Math.round(meter * 100)}%` }]} />
+    try {
+      setBusy(true);
+      await cleanupSound();
+
+      // ✅ pass payload to App; App will attach it to ChatBoxFixed
+      onDone?.({ uri, durationMs: durationMs || null });
+
+      // ✅ close + reset so user can’t attach multiple from this pill
+      onClose?.();
+      resetState();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const close = async () => {
+    if (busy) return;
+    try {
+      setBusy(true);
+      await cleanupAll();
+      onClose?.();
+      resetState();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!visible) return null;
+
+  const pct = Math.round((meter || 0) * 100);
+  const durSec = durationMs ? Math.max(1, Math.round(durationMs / 1000)) : null;
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={close}>
+      <View style={styles.overlay} pointerEvents="box-none">
+        {/* Bottom pill */}
+        <View style={[styles.pill, (disabled || busy) && styles.pillDisabled]}>
+          {/* left record/stop */}
+          <TouchableOpacity
+            style={[
+              styles.leftBtn,
+              recording ? styles.btnStop : styles.btnRec,
+              (!ready || disabled || busy) && styles.btnDisabled,
+            ]}
+            disabled={!ready || disabled || busy}
+            onPress={recording ? stop : start}
+            activeOpacity={0.85}
+          >
+            <Ionicons name={recording ? 'stop' : 'mic'} size={16} color="#fff" />
+            <Text style={styles.leftText}>{recording ? 'Stop' : 'Record'}</Text>
+          </TouchableOpacity>
+
+          {/* middle meter / playback */}
+          <View style={styles.mid}>
+            {recording ? (
+              <>
+                <View style={styles.meterTrack}>
+                  <View style={[styles.meterFill, { width: `${pct}%` }]} />
+                </View>
+                <Text style={styles.midText}>Recording…</Text>
+              </>
+            ) : uri ? (
+              <>
+                <TouchableOpacity
+                  style={[styles.playBtn, (disabled || busy) && styles.btnDisabled]}
+                  onPress={togglePlay}
+                  disabled={disabled || busy}
+                  activeOpacity={0.85}
+                >
+                  <Ionicons name={playing ? 'pause' : 'play'} size={16} color="#fff" />
+                </TouchableOpacity>
+                <Text style={styles.midText}>{durSec ? `${durSec}s ready` : 'Audio ready'}</Text>
+              </>
+            ) : (
+              <Text style={styles.midText}>Voice note</Text>
+            )}
           </View>
 
-          {busy && <View style={{ marginVertical: 10 }}><ActivityIndicator /></View>}
-
+          {/* attach */}
           <TouchableOpacity
-            style={[styles.btn, recording ? styles.btnStop : styles.btnRec, (!ready || busy) && styles.btnDisabled]}
-            disabled={!ready || busy}
-            onPress={recording ? stop : start}
+            style={[styles.iconCircle, (!uri || recording || disabled || busy) && styles.iconDisabled]}
+            disabled={!uri || recording || disabled || busy}
+            onPress={attach}
+            activeOpacity={0.85}
           >
-            <Text style={styles.btnText}>{recording ? 'Stop Recording' : 'Start Recording'}</Text>
+            <Ionicons name="checkmark" size={18} color="#fff" />
           </TouchableOpacity>
 
+          {/* close */}
           <TouchableOpacity
-            style={[styles.btn, styles.btnSend, (!uri || busy) && styles.btnDisabled]}
-            disabled={!uri || busy}
-            onPress={send}
+            style={[styles.iconCircle, styles.iconClose, (disabled || busy) && styles.iconDisabled]}
+            disabled={disabled || busy}
+            onPress={close}
+            activeOpacity={0.85}
           >
-            <Text style={styles.btnText}>Attach to message</Text>
+            <Ionicons name="close" size={18} color="#fff" />
           </TouchableOpacity>
+        </View>
 
-          <TouchableOpacity style={[styles.btn, styles.btnClose]} onPress={onClose} disabled={busy}>
-            <Text style={styles.btnText}>Close</Text>
-          </TouchableOpacity>
-
-          {uri ? <Text style={styles.small}>✅ Recording ready</Text> : null}
+        {/* small hint line */}
+        <View style={styles.hintRow}>
+          <MaterialCommunityIcons name="information-outline" size={14} color="#888" />
+          <Text style={styles.hintText}>Record 8–12s near the source • Play • ✓ attaches to chat</Text>
         </View>
       </View>
     </Modal>
@@ -199,28 +339,82 @@ export default function AudioRecorderModal({ visible, onClose, onDone }) {
 }
 
 const styles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center' },
-  card: { width: '88%', backgroundColor: '#222', borderRadius: 18, padding: 18 },
-  title: { color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 6 },
-  sub: { color: '#aaa', fontSize: 13, marginBottom: 12 },
+  overlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    paddingHorizontal: 16,
+    paddingBottom: Platform.OS === 'ios' ? 18 : 14,
+  },
+
+  pill: {
+    borderRadius: 999,
+    backgroundColor: '#222',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  pillDisabled: { opacity: 0.6 },
+
+  leftBtn: {
+    height: 34,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  btnRec: { backgroundColor: '#4CAF50' },
+  btnStop: { backgroundColor: '#FF6666' },
+  btnDisabled: { opacity: 0.6 },
+  leftText: { color: '#fff', fontWeight: '900', fontSize: 12 },
+
+  mid: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  midText: { color: '#ddd', fontSize: 12, fontWeight: '800' },
 
   meterTrack: {
+    flex: 1,
     height: 10,
     borderRadius: 999,
     backgroundColor: '#111',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
     overflow: 'hidden',
-    marginBottom: 8,
   },
   meterFill: { height: '100%', backgroundColor: '#4CAF50' },
 
-  btn: { paddingVertical: 12, borderRadius: 14, alignItems: 'center', marginTop: 10 },
-  btnRec: { backgroundColor: '#4CAF50' },
-  btnStop: { backgroundColor: '#FF6666' },
-  btnSend: { backgroundColor: '#3b82f6' },
-  btnClose: { backgroundColor: '#444' },
-  btnDisabled: { opacity: 0.5 },
-  btnText: { color: '#fff', fontWeight: '700' },
-  small: { marginTop: 10, color: '#aaa', fontSize: 12 },
+  playBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 999,
+    backgroundColor: '#2d2d2d',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+
+  iconCircle: {
+    width: 34,
+    height: 34,
+    borderRadius: 999,
+    backgroundColor: '#3b82f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconClose: { backgroundColor: '#444' },
+  iconDisabled: { opacity: 0.55 },
+
+  hintRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+    paddingLeft: 6,
+    paddingBottom: Platform.OS === 'ios' ? 6 : 0,
+  },
+  hintText: { color: '#888', fontSize: 11, fontWeight: '700' },
 });
