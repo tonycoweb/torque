@@ -1,11 +1,21 @@
 // App.js
 import React, { useState, useRef, useEffect } from 'react';
-import { MaterialCommunityIcons } from '@expo/vector-icons';
 import {
-  View, StyleSheet, Animated, TouchableOpacity, Text, KeyboardAvoidingView, Platform,
-  ActivityIndicator, Alert, Modal, Keyboard,
+  View,
+  StyleSheet,
+  TouchableOpacity,
+  Text,
+  KeyboardAvoidingView,
+  Platform,
+  ActivityIndicator,
+  Alert,
+  Modal,
+  Keyboard,
+  Animated,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+
 import HomeHeader from './components/HomeHeader';
 import ServiceBox from './components/ServiceBox';
 import RobotAssistant from './components/RobotAssistant';
@@ -14,16 +24,27 @@ import ChatBoxFixed from './components/ChatBoxFixed';
 import SavedChatsPanel from './components/SavedChatsPanel';
 import VehicleSelector from './components/VehicleSelector';
 import LoginScreen from './components/LoginScreen';
-import { saveChat } from './utils/storage';
-import { LogBox, LayoutAnimation, UIManager } from 'react-native';
-import { getAllVehicles, saveVehicle } from './utils/VehicleStorage';
 import SettingsModal from './components/SettingsModal';
-import mobileAds, { RewardedAd, RewardedAdEventType } from 'react-native-google-mobile-ads';
+
 import VinCamera from './components/VinCamera';
 import VinPreview from './components/VinPreview';
+
+import AudioRecorderModal from './components/AudioRecorderModal';
+
+import { saveChat } from './utils/storage';
+import { getAllVehicles, saveVehicle } from './utils/VehicleStorage';
+
+import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 
-const API_URL = 'http://192.168.1.246:3001/chat';
+import mobileAds, { RewardedAd, RewardedAdEventType } from 'react-native-google-mobile-ads';
+
+// ===================== BACKEND =====================
+const BACKEND_BASE = 'http://192.168.1.246:3001';
+const API_CHAT_URL = `${BACKEND_BASE}/chat`;
+const API_AUDIO_URL = `${BACKEND_BASE}/audio-diagnose`;
+const API_IMAGE_URL = `${BACKEND_BASE}/image-diagnose`; // ✅ NEW (matches index.js)
+const API_DECODE_VIN_URL = `${BACKEND_BASE}/decode-vin`;
 
 const adUnitId = __DEV__
   ? Platform.OS === 'ios'
@@ -31,103 +52,438 @@ const adUnitId = __DEV__
     : 'ca-app-pub-3940256099942544/5224354917'
   : 'your-real-admob-id-here';
 
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
-LayoutAnimation.configureNext = () => {};
-LogBox.ignoreLogs(['Excessive number of pending callbacks']);
-
-// ---- helper
+// ===================== HELPERS =====================
 const trimTurns = (history, maxTurns = 6) => {
-  const turns = [];
-  for (let i = history.length - 1; i >= 0 && turns.length < maxTurns * 2; i--) {
-    const msg = history[i];
-    if (msg.role === 'user' || msg.role === 'assistant') {
-      turns.unshift(msg);
-    }
+  const out = [];
+  for (let i = history.length - 1; i >= 0 && out.length < maxTurns * 2; i--) {
+    const m = history[i];
+    if (m.role === 'user' || m.role === 'assistant') out.unshift(m);
   }
-  return turns;
+  return out;
 };
 
-// ✅ Ensure every vehicle has a stable id
 const normalizeVehicle = (v = {}) => {
   const id =
     v.id?.toString?.() ||
     (v.vin ? String(v.vin) : undefined) ||
     [v.year, v.make, v.model].filter(Boolean).join('-') ||
-    undefined;
-  return id ? { ...v, id } : { ...v, id: Math.random().toString(36).slice(2) };
+    Math.random().toString(36).slice(2);
+  return { ...v, id };
 };
 
-async function chatWithBackend(tier, messages, vehicle) {
-  const resp = await fetch(API_URL, {
+const normalizeMsgContent = (content) => {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+
+  if (typeof content === 'object' && content.type === 'text' && typeof content.text === 'string') {
+    return content.text;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => {
+        if (typeof p === 'string') return p;
+        if (p?.type === 'text' && typeof p.text === 'string') return p.text;
+        if (p?.type === 'image_url') return '[image]';
+        if (p?.type === 'input_audio') return '[audio]';
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return String(content);
+  }
+};
+
+// ✅ Convert base64 -> data URL (what your /image-diagnose route expects)
+const asDataUrlJpeg = (b64) => {
+  if (!b64) return null;
+  const s = String(b64);
+  if (s.startsWith('data:image/')) return s;
+  return `data:image/jpeg;base64,${s}`;
+};
+
+// ===================== API CALLS =====================
+
+// ✅ TEXT-ONLY CHAT (do NOT send images here; /chat strips attachments in index.js)
+async function chatWithBackend({ messages, vehicle }) {
+  const resp = await fetch(API_CHAT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tier, messages, vehicle }),
+    body: JSON.stringify({
+      messages,
+      vehicle: vehicle || null,
+      // Optional (safe): you can add convoId/model later if you want
+      // convoId: 'default',
+      // model: 'gpt-4o'
+    }),
   });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return await resp.json();
+
+  let data = null;
+  try {
+    data = await resp.json();
+  } catch {}
+
+  if (!resp.ok) {
+    throw new Error(data?.error || `HTTP ${resp.status}`);
+  }
+  return data;
+}
+
+// ✅ AUDIO -> /audio-diagnose (your backend transcribes + diagnoses)
+async function sendAudioToBackend({ uri, prompt, vehicle }) {
+  const base64 = await FileSystem.readAsStringAsync(uri, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+
+  const resp = await fetch(API_AUDIO_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      audioBase64: base64,
+      prompt: prompt || 'Diagnose this sound.',
+      vehicle: vehicle || null,
+    }),
+  });
+
+  let data = null;
+  try {
+    data = await resp.json();
+  } catch {}
+
+  if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+  return data;
+}
+
+// ✅ IMAGE -> /image-diagnose (this is the missing link)
+async function sendImageToBackend({ base64, text, vehicle }) {
+  const resp = await fetch(API_IMAGE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      imageBase64: asDataUrlJpeg(base64), // ✅ route expects "imageBase64"
+      text: (text || '').trim(),
+      vehicle: vehicle || null,
+      // model is optional; backend defaults to gpt-4o-mini
+    }),
+  });
+
+  let data = null;
+  try {
+    data = await resp.json();
+  } catch {}
+
+  if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+  return data;
 }
 
 export default function App() {
   const [vehicle, setVehicle] = useState(null);
   const [garageName, setGarageName] = useState('');
-  const [messages, setMessages] = useState([]);
+
+  const [messages, setMessages] = useState([]); // UI
+  const [chatHistory, setChatHistory] = useState([]); // backend text-only
+
   const [isChatting, setIsChatting] = useState(false);
   const [showSavedChats, setShowSavedChats] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(null);
-  const [chatHistory, setChatHistory] = useState([]);
-  const [chatID, setChatID] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [chatID, setChatID] = useState(null);
+
   const [showSettings, setShowSettings] = useState(false);
 
-  // VIN camera flow
+  // ✅ Attachments
+  const [attachedImage, setAttachedImage] = useState(null); // { uri, base64 }
+  const [attachedAudio, setAttachedAudio] = useState(null); // { uri, durationMs }
+
+  // ✅ audio modal
+  const [showAudioRecorder, setShowAudioRecorder] = useState(false);
+
+  // VIN camera flow (kept as-is)
   const [showCamera, setShowCamera] = useState(false);
   const [vinPhoto, setVinPhoto] = useState(null);
   const [showDecodingModal, setShowDecodingModal] = useState(false);
 
-  // Which vehicle the model actually used
+  // Used vehicle returned by backend meta
   const [activeChatVehicle, setActiveChatVehicle] = useState(null);
+
+  // For ChatMessages auto-scroll on focus
+  const [focusTick, setFocusTick] = useState(0);
 
   const rewardedRef = useRef(null);
 
+  // Robot anim (optional)
+  const robotTranslateY = useRef(new Animated.Value(0)).current;
+  const robotScale = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    Animated.timing(robotTranslateY, {
+      toValue: isChatting ? -80 : 0,
+      duration: 450,
+      useNativeDriver: true,
+    }).start();
+    Animated.timing(robotScale, {
+      toValue: isChatting ? 0.6 : 1,
+      duration: 450,
+      useNativeDriver: true,
+    }).start();
+  }, [isChatting]);
+
+  // Init login
+  useEffect(() => {
+    (async () => {
+      const user = await AsyncStorage.getItem('user');
+      setIsLoggedIn(!!user);
+    })();
+  }, []);
+
+  // Load vehicles
+  useEffect(() => {
+    (async () => {
+      const saved = await getAllVehicles();
+      const list = (saved || []).map(normalizeVehicle);
+      if (list.length > 0) setVehicle(list[0]);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (vehicle) {
+      AsyncStorage.setItem('selectedVehicle', JSON.stringify(vehicle)).catch(() => {});
+      setActiveChatVehicle(null);
+    }
+  }, [vehicle]);
+
   // AdMob init
   useEffect(() => {
-    const initAdMob = async () => {
-      try { await mobileAds().initialize(); }
-      catch (error) { console.error('❌ AdMob initialization failed:', error); }
-    };
-    initAdMob();
+    (async () => {
+      try {
+        await mobileAds().initialize();
+      } catch (e) {
+        console.error('AdMob init failed:', e);
+      }
+    })();
   }, []);
 
   const showRewardedAd = async () => {
     return new Promise((resolve) => {
       const rewarded = RewardedAd.createForAdRequest(adUnitId, { requestNonPersonalizedAdsOnly: true });
-      const cleanup = () => { rewarded.removeAllListeners(); };
-      let timeoutId = setTimeout(() => { cleanup(); resolve(false); }, 10000);
+      const cleanup = () => rewarded.removeAllListeners();
+
+      const timeoutId = setTimeout(() => {
+        cleanup();
+        resolve(false);
+      }, 10000);
 
       rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
         clearTimeout(timeoutId);
-        try { rewarded.show(); } catch (error) { cleanup(); resolve(false); }
+        try {
+          rewarded.show();
+        } catch {
+          cleanup();
+          resolve(false);
+        }
       });
+
       rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => {
         clearTimeout(timeoutId);
         cleanup();
         resolve(true);
       });
 
-      try { rewarded.load(); rewardedRef.current = rewarded; }
-      catch (error) { clearTimeout(timeoutId); cleanup(); resolve(false); }
+      try {
+        rewarded.load();
+        rewardedRef.current = rewarded;
+      } catch {
+        clearTimeout(timeoutId);
+        cleanup();
+        resolve(false);
+      }
     });
   };
 
-  // VIN decode — show ad, then POST cropped base64 to backend
+  // ===================== Attachments =====================
+
+  const handleCameraPress = async () => {
+    try {
+      setIsChatting(true);
+
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm?.granted) {
+        Alert.alert('Camera permission needed', 'Enable camera access in Settings.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        quality: 0.7,
+        base64: true,
+        allowsEditing: false,
+      });
+
+      if (result.canceled) return;
+
+      const asset = result.assets?.[0];
+      if (!asset?.uri) {
+        Alert.alert('Photo error', 'Could not read photo URI. Try again.');
+        return;
+      }
+
+      // ✅ Robust: base64 sometimes missing; fallback to FileSystem read
+      let b64 = asset.base64;
+      if (!b64) {
+        try {
+          b64 = await FileSystem.readAsStringAsync(asset.uri, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+        } catch {
+          b64 = null;
+        }
+      }
+
+      if (!b64) {
+        Alert.alert('Photo error', 'Could not read photo data. Try again.');
+        return;
+      }
+
+      setAttachedImage({ uri: asset.uri, base64: b64 });
+    } catch (e) {
+      Alert.alert('Camera error', e?.message || 'Could not open camera.');
+    }
+  };
+
+  const handleMicPress = () => {
+    setIsChatting(true);
+    setShowAudioRecorder(true);
+  };
+
+  const clearAttachedImage = () => setAttachedImage(null);
+  const clearAttachedAudio = () => setAttachedAudio(null);
+
+  // ===================== Sending =====================
+  const handleSend = async (textOrPayload) => {
+    const text = typeof textOrPayload === 'string' ? textOrPayload : textOrPayload?.text || '';
+
+    const hasText = !!text.trim();
+    const hasImg = !!attachedImage?.base64;
+    const hasAudio = !!attachedAudio?.uri;
+
+    if (!hasText && !hasImg && !hasAudio) return;
+
+    if (/new issue|start over|reset/i.test(text)) {
+      setChatHistory([]);
+      setMessages([]);
+      setChatID(null);
+      setActiveChatVehicle(null);
+      setAttachedImage(null);
+      setAttachedAudio(null);
+      return;
+    }
+
+    // UI string for user's message
+    const userLineParts = [];
+    if (hasText) userLineParts.push(text.trim());
+    if (hasImg) userLineParts.push('📎 Photo attached');
+    if (hasAudio) userLineParts.push('🎙️ Audio attached');
+    const userLine = userLineParts.join('\n');
+
+    setIsChatting(true);
+    setShowSavedChats(false);
+    setLoading(true);
+
+    // UI append
+    setMessages((prev) => [...prev, { sender: 'user', text: userLine }]);
+
+    // ✅ Always keep text-only history clean (no base64, no audio)
+    const newHistory = [...chatHistory, { role: 'user', content: userLine }];
+    setChatHistory(newHistory);
+
+    const trimmedHistory = trimTurns(newHistory);
+    const vehicleForChat = activeChatVehicle?.source === 'overridden' ? activeChatVehicle : vehicle;
+
+    try {
+      let replyText = '';
+
+      // 1) AUDIO attached -> /audio-diagnose
+      if (hasAudio) {
+        const data = await sendAudioToBackend({
+          uri: attachedAudio.uri,
+          prompt: hasText ? text.trim() : 'Diagnose this sound.',
+          vehicle: vehicleForChat,
+        });
+        replyText = data?.reply || '⚠️ No response from audio endpoint.';
+      }
+      // 2) IMAGE attached -> /image-diagnose  ✅ FIX
+      else if (hasImg) {
+        const data = await sendImageToBackend({
+          base64: attachedImage.base64,
+          text: hasText ? text.trim() : '',
+          vehicle: vehicleForChat,
+        });
+        replyText = data?.reply || '⚠️ No response from image endpoint.';
+      }
+      // 3) TEXT only -> /chat
+      else {
+        const data = await chatWithBackend({
+          messages: trimmedHistory,
+          vehicle: vehicleForChat,
+        });
+
+        replyText = data?.reply || '';
+        if (data?.vehicle_used) setActiveChatVehicle(data.vehicle_used);
+      }
+
+      const updatedHistory = [...newHistory, { role: 'assistant', content: replyText }];
+      setChatHistory(updatedHistory);
+
+      setMessages((prev) => [...prev, { sender: 'api', text: replyText }]);
+      setLoading(false);
+
+      const id = chatID || Date.now().toString();
+      setChatID(id);
+      await saveChat(id, updatedHistory);
+
+      // ✅ clear attachments AFTER successful send
+      setAttachedImage(null);
+      setAttachedAudio(null);
+    } catch (e) {
+      setLoading(false);
+      setMessages((prev) => [...prev, { sender: 'api', text: `⚠️ ${e?.message || 'Error sending message.'}` }]);
+    }
+  };
+
+  const handleChatFocus = () => {
+    if (!isChatting) setIsChatting(true);
+    setFocusTick((x) => x + 1);
+  };
+
+  const handleExitChat = () => {
+    Keyboard.dismiss();
+    setIsChatting(false);
+    setMessages([]);
+    setChatHistory([]);
+    setChatID(null);
+    setShowSavedChats(false);
+    setActiveChatVehicle(null);
+    setAttachedImage(null);
+    setAttachedAudio(null);
+  };
+
+  const handleSelectVehicle = async (v) => {
+    const normalized = normalizeVehicle(v);
+    await saveVehicle(normalized);
+    setVehicle(normalized);
+    setActiveChatVehicle(null);
+  };
+
+  // ===================== VIN decode flow (kept) =====================
   const decodeVinWithAd = async (base64Image) => {
     return new Promise((resolve) => {
       const rewarded = RewardedAd.createForAdRequest(adUnitId, { requestNonPersonalizedAdsOnly: true });
       const cleanup = () => rewarded.removeAllListeners();
 
-      let timeoutId = setTimeout(() => {
+      const timeoutId = setTimeout(() => {
         Alert.alert('⚠️ Ad not ready', 'Try again in a few seconds.');
         cleanup();
         resolve();
@@ -135,18 +491,22 @@ export default function App() {
 
       rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
         clearTimeout(timeoutId);
-        try { rewarded.show(); } catch { cleanup(); resolve(); }
+        try {
+          rewarded.show();
+        } catch {
+          cleanup();
+          resolve();
+        }
       });
 
       rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, async () => {
         setShowDecodingModal(true);
         try {
-          const resp = await fetch('http://192.168.1.246:3001/decode-vin', {
+          const resp = await fetch(API_DECODE_VIN_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ base64Image }), // raw base64 preferred (smaller)
+            body: JSON.stringify({ base64Image }),
           });
-
           const data = await resp.json();
 
           if (!resp.ok) {
@@ -181,99 +541,16 @@ export default function App() {
         }
       });
 
-      try { rewarded.load(); rewardedRef.current = rewarded; }
-      catch (error) {
+      try {
+        rewarded.load();
+        rewardedRef.current = rewarded;
+      } catch (e) {
         clearTimeout(timeoutId);
         cleanup();
-        Alert.alert('❌ Ad error', error?.message || 'Unknown error');
+        Alert.alert('❌ Ad error', e?.message || 'Unknown error');
         resolve();
       }
     });
-  };
-
-  // login + vehicle bootstrap
-  useEffect(() => { (async () => {
-    const user = await AsyncStorage.getItem('user');
-    setIsLoggedIn(!!user);
-  })(); }, []);
-
-  useEffect(() => { (async () => {
-    const saved = await getAllVehicles();
-    const normalizedList = (saved || []).map(normalizeVehicle);
-    if (normalizedList.length > 0) setVehicle(normalizeVehicle(normalizedList[0]));
-  })(); }, []);
-
-  useEffect(() => {
-    if (vehicle) {
-      AsyncStorage.setItem('selectedVehicle', JSON.stringify(vehicle)).catch(() => {});
-      setActiveChatVehicle(null);
-    }
-  }, [vehicle]);
-
-  const robotTranslateY = useRef(new Animated.Value(0)).current;
-  const robotScale = useRef(new Animated.Value(1)).current;
-  useEffect(() => {
-    Animated.timing(robotTranslateY, { toValue: isChatting ? -80 : 0, duration: 500, useNativeDriver: true }).start();
-    Animated.timing(robotScale, { toValue: isChatting ? 0.6 : 1, duration: 500, useNativeDriver: true }).start();
-  }, [isChatting]);
-
-  // ---- SEND message
-  const handleSend = async (text) => {
-    if (!text.trim()) return;
-    if (/new issue|start over|reset/i.test(text)) {
-      setChatHistory([]); setMessages([]); setChatID(null); setActiveChatVehicle(null);
-      return;
-    }
-
-    const newHistory = [...chatHistory, { role: 'user', content: text }];
-    setChatHistory(newHistory);
-    setMessages((prev) => [...prev, { sender: 'user', text }]);
-    setLoading(true);
-
-    const trimmedHistory = trimTurns(newHistory);
-    const vehicleForChat = activeChatVehicle?.source === 'overridden' ? activeChatVehicle : vehicle;
-
-    let replyPayload;
-    try {
-      replyPayload = await chatWithBackend('free', trimmedHistory, vehicleForChat);
-    } catch {
-      setLoading(false);
-      setMessages((prev) => [...prev, { sender: 'api', text: '⚠️ There was an error processing your request.' }]);
-      return;
-    }
-
-    const reply = replyPayload.reply || '';
-    const used = replyPayload.vehicle_used || null;
-    if (used) setActiveChatVehicle(used);
-
-    const updatedHistory = [...newHistory, { role: 'assistant', content: reply }];
-    setChatHistory(updatedHistory);
-    setMessages((prev) => [...prev, { sender: 'api', text: reply }]);
-    setLoading(false);
-
-    const id = chatID || Date.now().toString();
-    setChatID(id);
-    await saveChat(id, updatedHistory);
-  };
-
-  const handleExitChat = () => {
-    Keyboard.dismiss();
-    setIsChatting(false);
-    setMessages([]);
-    setChatHistory([]);
-    setChatID(null);
-    setShowSavedChats(false);
-    setActiveChatVehicle(null);
-  };
-
-  const handleChatFocus = () => { if (!isChatting) setIsChatting(true); };
-
-  // ✅ onSelectVehicle normalization
-  const handleSelectVehicle = async (v) => {
-    const normalized = normalizeVehicle(v);
-    await saveVehicle(normalized);
-    setVehicle(normalized);
-    setActiveChatVehicle(null);
   };
 
   const renderContent = () => {
@@ -289,7 +566,11 @@ export default function App() {
 
     return (
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
-        <HomeHeader garageName={garageName} setGarageName={setGarageName} onSettingsPress={() => setShowSettings(true)} />
+        <HomeHeader
+          garageName={garageName}
+          setGarageName={setGarageName}
+          onSettingsPress={() => setShowSettings(true)}
+        />
         <SettingsModal visible={showSettings} onClose={() => setShowSettings(false)} />
 
         {!isChatting && (
@@ -299,7 +580,7 @@ export default function App() {
               onSelectVehicle={handleSelectVehicle}
               onShowRewardedAd={showRewardedAd}
               gateCameraWithAd={false}
-              triggerVinCamera={() => setShowCamera(true)}  // ✅ open camera
+              triggerVinCamera={() => setShowCamera(true)}
             />
             <ServiceBox selectedVehicle={vehicle} />
           </>
@@ -309,7 +590,7 @@ export default function App() {
           <Animated.View
             style={[
               styles.robotWrapper,
-              { marginTop: isChatting ? 60 : 20, transform: [{ translateY: robotTranslateY }, { scale: robotScale }] },
+              { marginTop: 20, transform: [{ translateY: robotTranslateY }, { scale: robotScale }] },
             ]}
           >
             <RobotAssistant isChatting={isChatting} />
@@ -317,13 +598,25 @@ export default function App() {
         )}
 
         {isChatting && (
-          <TouchableOpacity style={styles.exitButton} onPress={handleExitChat}>
-            <Text style={styles.exitButtonText}>Exit Chat</Text>
-          </TouchableOpacity>
+          <View style={styles.chatTopBar}>
+            <TouchableOpacity style={styles.exitButton} onPress={handleExitChat}>
+              <Text style={styles.exitButtonText}>Exit Chat</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.topBarBtn, showSavedChats && styles.topBarBtnActive]}
+              onPress={() => {
+                Keyboard.dismiss();
+                setShowSavedChats((prev) => !prev);
+              }}
+            >
+              <Text style={styles.topBarBtnText}>Saved</Text>
+            </TouchableOpacity>
+          </View>
         )}
 
         <View style={styles.chatMessagesArea}>
-          <ChatMessages messages={messages} loading={loading} />
+          <ChatMessages messages={messages} loading={loading} focusTick={focusTick} bottomInset={92} />
         </View>
 
         {isChatting && showSavedChats && (
@@ -331,49 +624,65 @@ export default function App() {
             onClose={() => setShowSavedChats(false)}
             onSelect={(chat) => {
               if (!chat) {
-                setChatID(null); setChatHistory([]); setMessages([]); setShowSavedChats(false); setActiveChatVehicle(null);
+                setChatID(null);
+                setChatHistory([]);
+                setMessages([]);
+                setShowSavedChats(false);
+                setActiveChatVehicle(null);
+                setAttachedImage(null);
+                setAttachedAudio(null);
                 return;
               }
+
               setChatID(chat.id);
-              setChatHistory(chat.messages);
-              setMessages(chat.messages.map((m) => ({ sender: m.role === 'user' ? 'user' : 'api', text: m.content })));
+              setChatHistory(chat.messages || []);
+
+              setMessages(
+                (chat.messages || []).map((m) => ({
+                  sender: m.role === 'user' ? 'user' : 'api',
+                  text: normalizeMsgContent(m.content),
+                }))
+              );
+
               setShowSavedChats(false);
               setActiveChatVehicle(null);
+              setIsChatting(true);
+              setFocusTick((x) => x + 1);
             }}
           />
         )}
 
-        {isChatting && (
-          <TouchableOpacity
-            style={styles.savedChatsButton}
-            onPress={() => { Keyboard.dismiss(); setShowSavedChats((prev) => !prev); }}
-          >
-            <Text style={styles.savedChatsIcon}>📝</Text>
-          </TouchableOpacity>
-        )}
-
         <ChatBoxFixed
-          onSend={handleSend}
-          onAttachImage={(uri) => setMessages((prev) => [...prev, { sender: 'user', text: `📷 ${uri}` }])}
-          onAttachDocument={(file) => setMessages((prev) => [...prev, { sender: 'user', text: `📄 ${file.name}` }])}
+          onSend={(txt) => handleSend(txt)}
           onFocus={handleChatFocus}
+          onMicPress={handleMicPress}
+          onCameraPress={handleCameraPress}
+          onClearAudio={clearAttachedAudio}
+          onClearImage={clearAttachedImage}
+          attachedAudio={attachedAudio ? { uri: attachedAudio.uri, durationMs: attachedAudio.durationMs } : null}
+          attachedImage={attachedImage ? { uri: attachedImage.uri } : null}
         />
       </KeyboardAvoidingView>
     );
   };
 
-  // Mount camera + preview flow here
   return (
     <>
       {showCamera ? (
         <VinCamera
-          onCapture={(photo) => { setShowCamera(false); setVinPhoto(photo); }}
+          onCapture={(photo) => {
+            setShowCamera(false);
+            setVinPhoto(photo);
+          }}
           onCancel={() => setShowCamera(false)}
         />
       ) : vinPhoto ? (
         <VinPreview
           photo={vinPhoto}
-          onRetake={() => { setVinPhoto(null); setShowCamera(true); }}
+          onRetake={() => {
+            setVinPhoto(null);
+            setShowCamera(true);
+          }}
           onConfirm={async (b64FromPreview) => {
             try {
               let payload = b64FromPreview;
@@ -403,12 +712,22 @@ export default function App() {
         renderContent()
       )}
 
+      {/* ✅ Audio recorder modal -> attaches audio pill (does NOT auto-send) */}
+      <AudioRecorderModal
+        visible={showAudioRecorder}
+        onClose={() => setShowAudioRecorder(false)}
+        onDone={(uri) => {
+          setShowAudioRecorder(false);
+          setAttachedAudio({ uri, durationMs: null });
+        }}
+      />
+
       {showDecodingModal && (
         <Modal transparent animationType="fade" visible>
-          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center' }}>
-            <View style={{ backgroundColor: '#222', padding: 30, borderRadius: 20, alignItems: 'center' }}>
+          <View style={styles.decodeOverlay}>
+            <View style={styles.decodeCard}>
               <MaterialCommunityIcons name="cog" size={40} color="#4CAF50" style={{ marginBottom: 10 }} />
-              <Text style={{ color: '#fff', fontSize: 18, marginBottom: 5 }}>Torque is decoding...</Text>
+              <Text style={styles.decodeTitle}>Torque is decoding...</Text>
               <ActivityIndicator color="#4CAF50" size="large" />
             </View>
           </View>
@@ -421,13 +740,49 @@ export default function App() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#121212', paddingVertical: 50, paddingHorizontal: 20 },
   loading: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+
   chatMessagesArea: { flex: 1, marginBottom: 10 },
   robotWrapper: { alignItems: 'center' },
-  exitButton: { marginBottom: 8, backgroundColor: '#444', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 12, alignSelf: 'center' },
-  exitButtonText: { color: '#fff', fontSize: 14 },
-  savedChatsButton: {
-    position: 'absolute', right: 24, bottom: Platform.OS === 'ios' ? 140 : 120,
-    backgroundColor: '#333', padding: 12, borderRadius: 30, zIndex: 99, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 4, elevation: 6,
+
+  chatTopBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    gap: 10,
   },
-  savedChatsIcon: { fontSize: 20, color: '#fff' },
+  exitButton: {
+    flex: 1,
+    backgroundColor: '#444',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 14,
+    alignItems: 'center',
+  },
+  exitButtonText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+
+  topBarBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 14,
+    backgroundColor: '#333',
+    borderWidth: 1,
+    borderColor: '#444',
+  },
+  topBarBtnActive: { backgroundColor: '#2f6fed', borderColor: '#2f6fed' },
+  topBarBtnText: { color: '#fff', fontSize: 13, fontWeight: '800' },
+
+  decodeOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  decodeCard: {
+    backgroundColor: '#222',
+    padding: 30,
+    borderRadius: 20,
+    alignItems: 'center',
+  },
+  decodeTitle: { color: '#fff', fontSize: 18, marginBottom: 5 },
 });

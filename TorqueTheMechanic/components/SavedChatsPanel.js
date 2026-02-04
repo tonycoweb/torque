@@ -1,173 +1,170 @@
 // components/SavedChatsPanel.js
-import React, { useEffect, useState } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  FlatList,
-  Alert,
-  Platform,
-  LayoutAnimation,
-} from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert } from 'react-native';
 import { getAllChats, deleteChat, clearAllChats } from '../utils/storage';
 
-export default function SavedChatsPanel({ onSelect, onClose }) {
+function normalizeContent(content) {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+
+  if (typeof content === 'object' && content.type === 'text' && typeof content.text === 'string') {
+    return content.text;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => {
+        if (typeof p === 'string') return p;
+        if (p?.type === 'text' && typeof p.text === 'string') return p.text;
+        if (p?.type === 'image_url') return '[image]';
+        if (p?.type === 'input_audio') return '[audio]';
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  try { return JSON.stringify(content); } catch { return String(content); }
+}
+
+export default function SavedChatsPanel(
+  { onSelect, onClose, chats: chatsProp } = {} // ✅ CRITICAL: default {} prevents destructure crash
+) {
   const [chats, setChats] = useState([]);
 
-  useEffect(() => {
-    loadChats();
-  }, []);
+  const usingExternalChats = Array.isArray(chatsProp);
 
   const loadChats = async () => {
-    const saved = await getAllChats();
-    const array = Object.entries(saved).map(([id, messages]) => {
-      const date = new Date(Number(id));
-      const userMsg = messages.find((m) => m.role === 'user');
-      return {
-        id,
-        title: userMsg?.content?.slice(0, 60) || 'Untitled Chat',
-        date: date.toLocaleString(),
-        messages,
-      };
-    });
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setChats(array.reverse());
+    try {
+      const all = await getAllChats();
+      setChats(Array.isArray(all) ? all : []);
+    } catch (e) {
+      console.error('Load chats error:', e);
+      setChats([]);
+    }
   };
 
-  const handleDelete = (id) => {
-    Alert.alert('Delete Chat', 'Are you sure you want to delete this chat?', [
+  // ✅ If parent passes chats, use them. Otherwise, load from storage.
+  useEffect(() => {
+    if (usingExternalChats) setChats(chatsProp);
+    else loadChats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [usingExternalChats, chatsProp?.length]);
+
+  const handleDelete = async (id) => {
+    try {
+      await deleteChat(id);
+      if (usingExternalChats) {
+        // parent-owned list; just tell parent to refresh by closing/reopening
+        // (or pass a refresh prop if you want)
+      } else {
+        await loadChats();
+      }
+    } catch {
+      Alert.alert('Error', 'Could not delete chat.');
+    }
+  };
+
+  const handleClearAll = async () => {
+    Alert.alert('Clear all chats?', 'This cannot be undone.', [
       { text: 'Cancel', style: 'cancel' },
       {
-        text: 'Delete',
-        onPress: async () => {
-          await deleteChat(id);
-          loadChats();
-        },
+        text: 'Clear',
         style: 'destructive',
-      },
+        onPress: async () => {
+          try {
+            await clearAllChats();
+            setChats([]);
+          } catch {
+            Alert.alert('Error', 'Could not clear chats.');
+          }
+        }
+      }
     ]);
   };
 
-  const handleClearAll = () => {
-    Alert.alert('Delete All Chats', 'This will remove every saved chat. Are you sure?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete All',
-        onPress: async () => {
-          await clearAllChats();
-          loadChats();
-        },
-        style: 'destructive',
-      },
-    ]);
+  const previewFor = (chat) => {
+    const msgs = Array.isArray(chat?.messages) ? chat.messages : [];
+    const last = msgs[msgs.length - 1];
+    if (!last) return 'No messages';
+    const txt = normalizeContent(last.content || last.text || '');
+    return txt.length > 70 ? txt.slice(0, 70) + '…' : txt;
   };
+
+  const sortedChats = useMemo(() => {
+    const arr = Array.isArray(chats) ? [...chats] : [];
+    // If your objects have updatedAt, sort by it; otherwise keep order.
+    arr.sort((a, b) => (b?.updatedAt || 0) - (a?.updatedAt || 0));
+    return arr;
+  }, [chats]);
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>💾 Saved Chats</Text>
-
-      <FlatList
-        data={chats}
-        keyExtractor={(item) => item.id}
-        ListEmptyComponent={
-          <Text style={styles.empty}>No saved chats yet. Start a new one! ✨</Text>
-        }
-        renderItem={({ item }) => (
-          <View style={styles.chatRow}>
-          <TouchableOpacity
-            style={styles.chatButton}
-            onPress={() => onSelect(item)}
-          >
-            <Text style={styles.chatText}>{item.title}</Text>
-            <Text style={styles.chatDate}>{item.date}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => handleDelete(item.id)} style={styles.deleteIcon}>
-            <Text style={{ color: '#f66', fontSize: 18 }}>🗑️</Text>
-          </TouchableOpacity>
-        </View>
-        
-        )}
-      />
-
-      <View style={styles.footerButtons}>
-        <TouchableOpacity onPress={handleClearAll} style={styles.footerBtn}>
-          <Text style={styles.footerText}>🗑️ Clear All</Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => onSelect(null)} style={styles.footerBtn}>
-          <Text style={styles.footerText}>✨ New Chat</Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={onClose} style={styles.footerBtn}>
-          <Text style={styles.footerText}>❌ Close</Text>
+    <View style={styles.panel}>
+      <View style={styles.header}>
+        <Text style={styles.title}>Saved Chats</Text>
+        <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
+          <Text style={styles.closeText}>✕</Text>
         </TouchableOpacity>
       </View>
+
+      <View style={styles.actionsRow}>
+        <TouchableOpacity onPress={() => onSelect?.(null)} style={[styles.actionBtn, styles.newBtn]}>
+          <Text style={styles.actionText}>New</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={handleClearAll} style={[styles.actionBtn, styles.clearBtn]}>
+          <Text style={styles.actionText}>Clear All</Text>
+        </TouchableOpacity>
+      </View>
+
+      <ScrollView style={{ marginTop: 10 }}>
+        {sortedChats.map((c) => (
+          <View key={c.id} style={styles.chatRow}>
+            <TouchableOpacity style={{ flex: 1 }} onPress={() => onSelect?.(c)}>
+              <Text style={styles.chatTitle}>{c.title || `Chat ${c.id}`}</Text>
+              <Text style={styles.preview}>{c.preview || previewFor(c)}</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={() => handleDelete(c.id)} style={styles.deleteBtn}>
+              <Text style={styles.deleteText}>🗑️</Text>
+            </TouchableOpacity>
+          </View>
+        ))}
+
+        {(!sortedChats || sortedChats.length === 0) && (
+          <Text style={styles.empty}>No saved chats yet.</Text>
+        )}
+      </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  panel: {
     position: 'absolute',
-    bottom: Platform.OS === 'ios' ? 160 : 140,
-    left: 20,
-    right: 20,
-    backgroundColor: '#222',
-    padding: 20,
-    borderRadius: 20,
-    maxHeight: 420,
-    zIndex: 999,
-    elevation: 10,
+    right: 14,
+    bottom: 180,
+    width: '92%',
+    maxHeight: '55%',
+    backgroundColor: '#1c1c1c',
+    borderRadius: 18,
+    padding: 14,
+    zIndex: 200,
+    borderWidth: 1,
+    borderColor: '#333',
   },
-  title: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 10,
-  },
-  chatButton: {
-    paddingVertical: 10,
-    borderBottomColor: '#444',
-    borderBottomWidth: 1,
-  },
-  chatText: {
-    color: '#ccc',
-    fontSize: 16,
-  },
-  chatDate: {
-    color: '#888',
-    fontSize: 12,
-  },
-  empty: {
-    color: '#aaa',
-    textAlign: 'center',
-    marginVertical: 20,
-  },
-  footerButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginTop: 16,
-  },
-  footerBtn: {
-    backgroundColor: '#444',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-  },
-  footerText: {
-    color: '#fff',
-    fontSize: 14,
-  },
-  chatRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderBottomColor: '#444',
-    borderBottomWidth: 1,
-    paddingVertical: 12,
-  },
-  deleteIcon: {
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-  },
-  
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  title: { color: '#fff', fontSize: 18, fontWeight: '700' },
+  closeBtn: { padding: 8, borderRadius: 12, backgroundColor: '#333' },
+  closeText: { color: '#fff', fontSize: 14 },
+  actionsRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
+  actionBtn: { flex: 1, paddingVertical: 10, borderRadius: 14, alignItems: 'center' },
+  newBtn: { backgroundColor: '#2f6fed' },
+  clearBtn: { backgroundColor: '#444' },
+  actionText: { color: '#fff', fontWeight: '700' },
+  chatRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#2b2b2b' },
+  chatTitle: { color: '#fff', fontWeight: '700' },
+  preview: { color: '#aaa', marginTop: 4 },
+  deleteBtn: { padding: 10, marginLeft: 10, backgroundColor: '#333', borderRadius: 12 },
+  deleteText: { fontSize: 16 },
+  empty: { color: '#888', textAlign: 'center', paddingVertical: 18 },
 });

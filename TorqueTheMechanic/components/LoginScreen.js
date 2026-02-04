@@ -29,7 +29,7 @@ export default function LoginScreen({ onLogin }) {
   const torqueSlideIn = useRef(new Animated.Value(-200)).current;
   const bubblePulse = useRef(new Animated.Value(1)).current;
 
-  const AUTO_ADVANCE_MS = 5000;
+  const AUTO_ADVANCE_MS = 2333;
 
   const phrases = [
     "👋 Hey, I’m Torque — your pocket mechanic. \n >>>",

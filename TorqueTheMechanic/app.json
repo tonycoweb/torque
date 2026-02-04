@@ -19,7 +19,7 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow $(PRODUCT_NAME) to access your microphone for recording car sounds."
+          "microphonePermission": "Allow Torque The Mechanic to access your microphone for recording car sounds."
         }
       ]
     ],

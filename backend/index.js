@@ -25,6 +25,10 @@ const ENRICH_INTERVALS = String(process.env.ENRICH_INTERVALS || 'true') === 'tru
 
 // Track usage
 const tracker = { totals:{}, byRoute:{}, byTier:{}, recent:[], savedJSON:[] };
+const FormData = require('form-data');
+
+
+
 
 function priceFor(model){ return MODEL_PRICING[model] || { in:0, out:0 }; }
 function costFor(model, usage = {}) {
@@ -199,18 +203,36 @@ function tryAutoFixVin(vin) {
   return { vin, fixed: false };
 }
 
+function stripNonTextContent(messages = []) {
+  return (messages || []).map(m => {
+    // If content is array (vision/audio structured), replace with short placeholder text
+    if (Array.isArray(m?.content)) {
+      return { ...m, content: '[attachment omitted]' };
+    }
+    // If content is enormous (accidental base64), truncate hard
+    if (typeof m?.content === 'string' && m.content.length > 8000) {
+      return { ...m, content: m.content.slice(0, 8000) + '…[truncated]' };
+    }
+    return m;
+  });
+}
+
+
 // Persona
 const getTorquePrompt = () => `
 You are Torque — the in-app mechanic for TorqueTheMechanic. You are an automotive expert.
 Speak like a helpful, confident technician. Never mention OpenAI or internal model names.
 If asked “what are you,” answer: “I’m Torque, the mechanic assistant in this app. I diagnose issues, look up specs, and explain repairs with simple steps.”
 
-When diagnosing, include a short section:
-- Likely issues (most → least), bullet list.
+When diagnosing except for image-diagnose then include part numbers if found, otherwise include a short section:
+- Always try to get as much information as possible about the symptoms, conditions, and history to return the best possible diagnosis.
+- attempt to also include the rare scenerios (1-5% likelihood) that could cause similar symptoms and look into other cases or causes that can perhaps be related to the issue.
+- Likely issues (most → least) add percentage of likelyhood for each of different things it could be when compared to each other account for the rare issues too for the diagnostics topics, bullet list.
+- attempt to also include the rare scenerios (1-5% likelihood) that could cause similar symptoms and look into other cases or causes that can perhaps be related to the issue.
 - Quick checks (bullets, 1–5 items).
 - If a spec is requested, give a safe range or note variations by engine/trim if uncertain.
 
-Keep replies compact and practical. Use markdown bullets, not long paragraphs.
+Keep replies compact and practical. Use markdown bullets, not long paragraphs. When asked for part numbers also return likelihood of the statement you returned is to be true realistically too like if you know for sure these are the right part numbers returned you can return something like 99.99% include legal protection in responses etc.
 `.trim();
 
 function summarizeVehicle(v={}){ if(!v||typeof v!=='object') return ''; const parts=[]; if(v.year) parts.push(String(v.year)); if(v.make) parts.push(String(v.make)); if(v.model) parts.push(String(v.model));
@@ -236,6 +258,28 @@ const HISTORY_WINDOW_TURNS = 3;
 const SUMMARY_EVERY_N_USER = 2;
 const SUMMARY_MAX_TOKENS = 100;
 const memoryStore = new Map();
+
+function asDataUrlImage(b64) {
+  if (!b64) return null;
+  const s = String(b64);
+  if (s.startsWith('data:image/')) return s;
+  return `data:image/jpeg;base64,${s}`;
+}
+
+function getTorqueVisionPrompt() {
+  return `
+You are Torque — an automotive mechanic. The user attached a photo related to a vehicle problem.
+You MUST:
+- Only discuss automotive topics.
+- Use the VEHICLE CONTEXT provided.
+- Describe what you can visually infer (but label uncertain items as uncertain).
+- Give: Likely causes (most→least) with rough % relative likelihoods, Quick checks (1–5), and 3 follow-up questions.
+- Be compact and practical (bullets, no fluff).
+- If the photo isn't useful, say what’s missing and how to retake it (angle, lighting, distance).
+Never mention OpenAI or internal model names.
+`.trim();
+}
+
 
 function estimateTokenCount(messages){
   const joined=messages.map(m => {
@@ -714,6 +758,51 @@ function enforceCardTruthiness(facts, fixedCompact) {
   }
 }
 
+async function openAIAudioTranscribe({ route, model = 'gpt-4o-mini-transcribe', buffer, filename = 'audio.m4a', mimeType = 'audio/mp4', prompt = '' }) {
+  const t0 = Date.now();
+
+  const form = new FormData();
+  form.append('file', buffer, { filename, contentType: mimeType });
+  form.append('model', model);
+  form.append('temperature', '0');
+  if (prompt) form.append('prompt', prompt);
+
+  try {
+    const resp = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        ...form.getHeaders(),
+      },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+
+    const ms = Date.now() - t0;
+
+    // Note: transcriptions endpoint doesn't return token usage like chat does.
+    tracker.recent.push({
+      ts: new Date().toISOString(),
+      route,
+      tier: 'audio',
+      model,
+      usage: null,
+      cost: null,
+      ms,
+      meta: { note: 'audio transcription' },
+    });
+    if (tracker.recent.length > 50) tracker.recent.shift();
+
+    console.log(`📊 [${route}] ${model} (audio) | ⏱️ ${ms}ms | ✅ transcribed`);
+
+    return resp.data; // { text: "..." } typically
+  } catch (err) {
+    const ms = Date.now() - t0;
+    console.error(`❌ OpenAI error on ${route} after ${ms}ms:`, err.response?.data || err.message);
+    throw err;
+  }
+}
+
+
 // ======================= Routes =======================
 app.get('/pricing', (req, res) => {
   res.json({ per_1M_tokens: MODEL_PRICING, free_mode: OPENAI_FREE_MODE, enrich_intervals: ENRICH_INTERVALS });
@@ -745,7 +834,9 @@ app.post('/chat', async (req, res) => {
   const baseSystem = { role: 'system', content: getTorquePrompt() };
   const vehicleSystem = { role: 'system', content: vehicleSystemMessage(vehicle) };
   const hasPersona = messages.some(m => m.role === 'system' && /TorqueTheMechanic/i.test(m.content));
-  const injected = hasPersona ? messages : [baseSystem, vehicleSystem, ...messages];
+  const safeMessages = stripNonTextContent(messages);
+  const injected = hasPersona ? safeMessages : [baseSystem, vehicleSystem, ...safeMessages];
+
 
   const mem = memoryStore.get(convoId) || { summary: '', userTurns: 0 };
   const userTurnsThisReq = messages.filter(m => m.role === 'user').length;
@@ -790,6 +881,153 @@ app.post('/chat', async (req, res) => {
   } catch (error) {
     console.error('OpenAI Error:', error.response?.data || error.message);
     res.status(500).json({ error: 'Something went wrong with OpenAI' });
+  }
+});
+
+// ---- IMAGE DIAGNOSE (VISION) ----
+// Body: { imageBase64: "<base64 or dataurl>", text?: string, vehicle?: object, model?: string }
+app.post('/image-diagnose', async (req, res) => {
+  try {
+    const {
+      imageBase64,
+      text = '',
+      vehicle = null,
+      model: requestedModel,
+    } = req.body || {};
+
+    if (!imageBase64) return res.status(400).json({ error: 'Missing imageBase64.' });
+
+    // ✅ Optimize for "what part is this / what's leaking / what am I looking at"
+    // keep it smaller than VIN OCR. Color usually matters here, so no grayscale by default.
+    const optimized = await optimizeImageBase64(imageBase64, {
+      maxWidth: 900,
+      quality: 45,
+      toGrayscale: false,
+      normalize: true,
+    });
+
+    const model = requestedModel || 'gpt-4o-mini'; // cheap vision by default
+
+    const vSummary = summarizeVehicle(vehicle) || 'unknown';
+
+    const payload = {
+      model,
+      messages: [
+        { role: 'system', content: getTorqueVisionPrompt() },
+        { role: 'system', content: vehicleSystemMessage(vehicle) },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text:
+`VEHICLE: ${vSummary}
+
+USER NOTE:
+${(text || '').trim() || '(no text provided)'}
+
+Task: analyze the attached photo for whatever the user asks for as long as its car related, if the user sends the
+image with no context, try to identify what part it is and make sure to search online for images to verify with
+high confidence you correctly identified the part. return found part numbers for it too`,
+            },
+            { type: 'image_url', image_url: { url: optimized, detail: 'low' } },
+          ],
+        },
+      ],
+      temperature: 0.3,
+      max_tokens: 450,
+    };
+
+    const response = await openAIChat({
+      route: '/image-diagnose',
+      model,
+      tier: 'token',
+      payload,
+      meta: { note: `rid=${req._rid}, vision=diag` },
+    });
+
+    let reply = response.data?.choices?.[0]?.message?.content?.trim() || '';
+    reply = sanitizeAssistantText(reply);
+
+    // strip your [[META: ...]] if it ever appears (not required here, but safe)
+    reply = reply.replace(/\n?\s*\[\[META:[\s\S]*\]\]\s*$/, '').trim();
+
+    return res.json({ reply, usage: response.data?.usage || {} });
+  } catch (e) {
+    console.error('Image diagnose error:', e.response?.data || e.message);
+    return res.status(500).json({ error: 'Failed to process image.' });
+  }
+});
+
+
+// ---- AUDIO DIAGNOSE ----
+// Body: { audioBase64: "<base64>", prompt?: string, vehicle?: object }
+app.post('/audio-diagnose', async (req, res) => {
+  try {
+    const { audioBase64, prompt = 'Diagnose this sound.', vehicle = null } = req.body || {};
+    if (!audioBase64) return res.status(400).json({ error: 'Missing audioBase64.' });
+
+    // Convert base64 -> Buffer
+    const audioBuffer = Buffer.from(audioBase64, 'base64');
+
+    // 1) Transcribe (cheap + reliable)
+    const form = new FormData();
+    form.append('file', audioBuffer, { filename: 'audio.m4a', contentType: 'audio/mp4' });
+    // whisper-1 is the standard transcription model
+    form.append('model', 'whisper-1');
+
+    const t0 = Date.now();
+    const tr = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        ...form.getHeaders(),
+      },
+    });
+    const ms = Date.now() - t0;
+
+    const transcript = tr.data?.text?.trim() || '';
+    if (!transcript) return res.status(422).json({ error: 'Could not transcribe audio.' });
+
+    // 2) Ask Torque using transcript
+    const packedMessages = [
+      { role: 'system', content: getTorquePrompt() },
+      { role: 'system', content: vehicleSystemMessage(vehicle) },
+      {
+        role: 'user',
+        content:
+`User recorded audio from a vehicle.
+TRANSCRIPT (from audio): ${transcript}
+
+User prompt: ${prompt}
+
+Task:
+- Give likely causes (most → least) with rough likelihoods.
+- Quick checks (1–5).
+- Ask 3 key follow-up questions.
+- Keep it compact and practical.`
+      }
+    ];
+
+    const payload = {
+      model: 'gpt-4o-mini',
+      messages: packedMessages,
+      temperature: 0.3,
+      max_tokens: 450,
+    };
+
+    const response = await openAIChat({
+      route: '/audio-diagnose',
+      model: 'gpt-4o-mini',
+      tier: 'token',
+      payload,
+      meta: { note: `rid=${req._rid}, transcript_ms=${ms}` },
+    });
+
+    const reply = response.data?.choices?.[0]?.message?.content?.trim() || '';
+    return res.json({ transcript, reply, usage: response.data?.usage || {} });
+  } catch (e) {
+    console.error('Audio diagnose error:', e.response?.data || e.message);
+    return res.status(500).json({ error: 'Failed to process audio.' });
   }
 });
 

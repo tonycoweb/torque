@@ -1,155 +1,170 @@
-// ChatBoxFixed.js
-import React, { useState, useRef, useEffect } from 'react';
+// components/ChatBoxFixed.js
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
+  Text,
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  KeyboardAvoidingView,
   Platform,
-  Keyboard,
 } from 'react-native';
-import { Ionicons, MaterialIcons, Entypo } from '@expo/vector-icons';
-import * as ImagePicker from 'expo-image-picker';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 
 export default function ChatBoxFixed({
   onSend,
-  onAttachImage,
-  onAttachDocument,
   onFocus,
-  onOpenSavedNotes,
-  onMeasuredHeight,
+
+  // NEW
+  onMicPress,
+  onCameraPress,
+  onClearAudio,
+  onClearImage,
+  attachedAudio, // { uri, durationMs } | null
+  attachedImage, // { uri } | null
 }) {
   const [inputText, setInputText] = useState('');
-  const [selfHeight, setSelfHeight] = useState(0);
   const inputRef = useRef(null);
 
-  useEffect(() => {
-    if (selfHeight && onMeasuredHeight) onMeasuredHeight(selfHeight);
-  }, [selfHeight, onMeasuredHeight]);
+  useEffect(() => {}, []);
 
-  const handleLayout = (e) => {
-    const h = e.nativeEvent.layout.height;
-    if (Math.abs(h - selfHeight) > 1) setSelfHeight(h);
-  };
-
-  const handleSend = () => {
-    const text = inputText.trim();
-    if (!text) return;
-    onSend && onSend(text);
-    setInputText('');
-    inputRef.current?.blur();
-    Keyboard.dismiss();
-  };
-
-  const handlePickImage = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.8,
-    });
-    if (!result.canceled) onAttachImage && onAttachImage(result.assets?.[0]?.uri);
-  };
-
-  const handleAttachDocument = () =>
-    onAttachDocument && onAttachDocument({ name: 'sample_document.pdf' });
-
-  const handleMicrophone = () => {
-    // hook up voice-to-text here
-  };
+  const canSend = inputText.trim().length > 0 || !!attachedAudio || !!attachedImage;
 
   return (
-    <KeyboardAvoidingView
-      onLayout={handleLayout}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      // Set this to your fixed header height if you have one; 0 is safest otherwise.
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
-      style={styles.container}
-    >
-      <View style={styles.toolbar}>
-        <TouchableOpacity onPress={handleMicrophone} style={styles.toolBtn} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
-          <Ionicons name="mic-outline" size={21} color="#aaa" />
+    <View style={styles.wrapper}>
+      {/* --- Attachment preview area --- */}
+      {(attachedAudio || attachedImage) ? (
+        <View style={styles.attachRow}>
+          {attachedAudio ? (
+            <View style={styles.pill}>
+              <MaterialCommunityIcons name="waveform" size={16} color="#fff" />
+              <Text style={styles.pillText}>
+                Audio attached{attachedAudio?.durationMs ? ` • ${Math.round(attachedAudio.durationMs / 1000)}s` : ''}
+              </Text>
+              <TouchableOpacity onPress={onClearAudio} style={styles.pillX}>
+                <Ionicons name="close" size={16} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          ) : null}
+
+          {attachedImage ? (
+            <View style={[styles.pill, { backgroundColor: '#2a2a2a' }]}>
+              <Ionicons name="camera" size={16} color="#fff" />
+              <Text style={styles.pillText}>Photo attached</Text>
+              <TouchableOpacity onPress={onClearImage} style={styles.pillX}>
+                <Ionicons name="close" size={16} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+
+      {/* --- Input row --- */}
+      <View style={styles.row}>
+        <TouchableOpacity style={styles.iconBtn} onPress={onCameraPress}>
+          <Ionicons name="camera" size={20} color="#fff" />
         </TouchableOpacity>
 
-        <TouchableOpacity onPress={handleAttachDocument} style={styles.toolBtn} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
-          <Entypo name="attachment" size={21} color="#aaa" />
+        <TouchableOpacity style={styles.iconBtn} onPress={onMicPress}>
+          <Ionicons name="mic" size={20} color="#fff" />
         </TouchableOpacity>
 
-        <TouchableOpacity onPress={handlePickImage} style={styles.toolBtn} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
-          <Ionicons name="image-outline" size={21} color="#aaa" />
-        </TouchableOpacity>
+        <View style={styles.inputWrap}>
+          <TextInput
+            ref={inputRef}
+            style={styles.input}
+            placeholder=""
+            placeholderTextColor="#888"
+            value={inputText}
+            onChangeText={setInputText}
+            onFocus={onFocus}
+            multiline
+          />
+        </View>
 
-        <View style={{ flex: 1 }} />
+        <TouchableOpacity
+          style={[styles.sendBtn, !canSend && styles.sendDisabled]}
+          disabled={!canSend}
+          onPress={() => {
+            onSend?.(inputText);
+            setInputText('');
+          }}
+        >
+          <Ionicons name="send" size={18} color="#fff" />
+        </TouchableOpacity>
       </View>
-
-      <View style={styles.inputWrap}>
-        <TextInput
-          ref={inputRef}
-          placeholder="Message Torque…"
-          placeholderTextColor="#aaa"
-          multiline
-          value={inputText}
-          onChangeText={setInputText}
-          style={styles.textInput}
-          underlineColorAndroid="transparent"
-          onFocus={onFocus}
-          blurOnSubmit={false}
-          returnKeyType="send"
-          onSubmitEditing={handleSend}
-        />
-        <TouchableOpacity style={styles.sendFab} onPress={handleSend} activeOpacity={0.9}>
-          <MaterialIcons name="send" size={20} color="#fff" />
-        </TouchableOpacity>
-      </View>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    backgroundColor: '#121212',
-    paddingHorizontal: 10,
-    paddingTop: 16,
-    paddingBottom: 16, // no platform branch needed
-    borderTopWidth: 1,
-    borderTopColor: '#2b2b2b',
-    // Avoid extra spacing that would double up with list padding
-    marginBottom: 0,
+  wrapper: {
+    paddingBottom: Platform.OS === 'ios' ? 18 : 12,
   },
-  toolbar: {
+
+  attachRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 10,
+    flexWrap: 'wrap',
+  },
+  pill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingBottom: 6,
+    gap: 8,
+    backgroundColor: '#333',
+    borderRadius: 999,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
   },
-  toolBtn: {
-    padding: 6,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderRadius: 10,
-  },
-  notesBtn: { backgroundColor: 'rgba(76,175,80,0.15)' },
-  inputWrap: {
-    position: 'relative',
-    minHeight: 46,
-    maxHeight: 150,
-    backgroundColor: '#1f1f1f',
-    borderRadius: 18,
-    paddingRight: 44,
-    paddingLeft: 12,
-    paddingTop: 8,
-    paddingBottom: 8,
-    marginBottom: 33,
-  },
-  textInput: { color: '#fff', fontSize: 16, textAlignVertical: 'top', marginBottom: 33 },
-  sendFab: {
-    position: 'absolute',
-    right: 6,
-    bottom: 6,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: '#4CAF50',
+  pillText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+  pillX: {
+    marginLeft: 6,
+    width: 22,
+    height: 22,
+    borderRadius: 999,
     alignItems: 'center',
     justifyContent: 'center',
-    elevation: 3,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+
+  row: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 10,
+  },
+  iconBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    backgroundColor: '#2d2d2d',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  inputWrap: {
+    flex: 1,
+    backgroundColor: '#1f1f1f',
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  input: {
+    color: '#fff',
+    fontSize: 14,
+    maxHeight: 110,
+  },
+  sendBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    backgroundColor: '#3b82f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sendDisabled: {
+    opacity: 0.45,
   },
 });

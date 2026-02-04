@@ -12,6 +12,7 @@ import * as MediaLibrary from 'expo-media-library';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { showRewardedAd, preloadRewardedAd } from '../components/RewardedAdManager';
+import { exportServicesToPdf } from '../utils/servicePdfExporter';
 
 // Tiny helper to animate "..." without extra libs
 function AnimatedEllipsis({ style }) {
@@ -45,6 +46,9 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
   // overlays
   const [overlay, setOverlay] = useState(null); // 'prompt' | 'thinking' | 'edit' | 'image' | 'custom' | 'editMonths' | null
   const [isGenerating, setIsGenerating] = useState(false);
+
+  // export state
+  const [isExporting, setIsExporting] = useState(false);
 
   // prompt overlay
   const [promptMileage, setPromptMileage] = useState('');
@@ -426,6 +430,29 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
     setHasGeneratedServices(true);
   };
 
+  // ---------- export flow ----------
+  const handleExportServices = async () => {
+    if (isExporting) return;
+    if (!services || services.length === 0) {
+      Alert.alert('No Services', 'There are no services to export yet.');
+      return;
+    }
+
+    try {
+      setIsExporting(true);
+      await exportServicesToPdf({
+        services,
+        vehicleLabel,
+      });
+    } catch (err) {
+      console.warn('Export error:', err);
+      Alert.alert('Export Failed', String(err?.message || err));
+    } finally {
+      // ✅ always reset, even if user cancels share sheet
+      setIsExporting(false);
+    }
+  };
+
   // ---------- mark complete / unmark ----------
   const handleMarkCompleted = (id) => {
     const svc = services.find((s) => s.id === id);
@@ -458,7 +485,9 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
           const cam = await requestCameraPermission();
           if (!cam.granted) return Alert.alert('Camera permission required');
           const result = await ImagePicker.launchCameraAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
-          if (!result.canceled && result.assets?.[0]?.uri) addProof(serviceId, result.assets[0].uri);
+          if (!result.canceled && result.assets?.[0]?.uri) {
+            await addProof(serviceId, result.assets[0].uri);
+          }
         },
       },
       {
@@ -467,18 +496,36 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
           const lib = await requestMediaPermission();
           if (!lib.granted) return Alert.alert('Photo library permission required');
           const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
-          if (!result.canceled && result.assets?.[0]?.uri) addProof(serviceId, result.assets[0].uri);
+          if (!result.canceled && result.assets?.[0]?.uri) {
+            await addProof(serviceId, result.assets[0].uri);
+          }
         },
       },
       { text: 'Cancel', style: 'cancel' },
     ]);
   };
 
-  const addProof = (serviceId, uri) => {
-    setServices((prev) => {
-      const updated = prev.map((s) => (s.id === serviceId ? { ...s, proofUris: [...s.proofUris, uri] } : s));
-      saveServicesToStorage(updated); return updated;
-    });
+  // ✅ New: copy proof into documentDirectory so it’s readable later for PDFs
+  const addProof = async (serviceId, uri) => {
+    try {
+      const filename = uri.split('/').pop() || `proof-${Date.now()}.jpg`;
+      const destPath = FileSystem.documentDirectory + `proofs-${selectedVehicle?.id || 'generic'}-${filename}`;
+
+      await FileSystem.copyAsync({ from: uri, to: destPath });
+
+      setServices((prev) => {
+        const updated = prev.map((s) =>
+          s.id === serviceId
+            ? { ...s, proofUris: [...(s.proofUris || []), destPath] }
+            : s
+        );
+        saveServicesToStorage(updated);
+        return updated;
+      });
+    } catch (err) {
+      console.warn('Failed to cache proof image:', err);
+      Alert.alert('Image Error', 'Could not save this proof image for export.');
+    }
   };
 
   const deleteImage = (serviceId, index) => {
@@ -771,7 +818,6 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
         animationType="slide"
         onRequestClose={() => { if (!isGenerating) closeAll(); }}  // block closing while generating
         presentationStyle="fullScreen"
-        // Avoid translucent status bar to prevent notch overlay without SafeArea
         statusBarTranslucent={false}
       >
         <KeyboardAvoidingView
@@ -844,6 +890,41 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 )}
               </View>
 
+              {/* TOP ACTION ROW: Add Custom + Export */}
+              {hasGeneratedServices && (
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    gap: 10,
+                    paddingHorizontal: 16,
+                    marginBottom: 8,
+                  }}
+                >
+                  <TouchableOpacity
+                    style={[styles.ctaBtnSecondary, { flex: 1 }]}
+                    onPress={openCustomOverlay}
+                    activeOpacity={0.95}
+                    disabled={isExporting}
+                  >
+                    <Text style={styles.ctaBtnText}>+ Add Custom Service</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.ctaBtnPrimary,
+                      { flex: 1, opacity: isExporting ? 0.7 : 1 },
+                    ]}
+                    onPress={handleExportServices}
+                    activeOpacity={0.95}
+                    disabled={isExporting}
+                  >
+                    <Text style={styles.ctaBtnText}>
+                      {isExporting ? 'Exporting…' : 'Export Service PDF'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
               {/* LIST */}
               <ScrollView
                 ref={scrollViewRef}
@@ -854,6 +935,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
               >
                 {hasGeneratedServices && (
                   <View style={{ paddingHorizontal: 16, marginBottom: 8 }}>
+                    {/* Keeping bottom Add Custom as a secondary access point */}
                     <TouchableOpacity style={styles.ctaBtnSecondary} onPress={openCustomOverlay} activeOpacity={0.95}>
                       <Text style={styles.ctaBtnText}>+ Add Custom Service</Text>
                     </TouchableOpacity>
@@ -1656,7 +1738,7 @@ const styles = StyleSheet.create({
   },
   inlineEditWrap: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 6, marginTop: 6 },
 
-  // Small inline buttons (added)
+  // Small inline buttons
   smallBtn: { paddingVertical: 8, paddingHorizontal: 10, borderRadius: 10 },
   smallBtnText: { color: '#fff', fontSize: 12, fontWeight: '800' },
 
@@ -1904,12 +1986,31 @@ const styles = StyleSheet.create({
   },
 
   // Image viewer
-  viewerShell: { width: '95%', height: '82%', backgroundColor: '#080808', borderRadius: 14, overflow: 'hidden', borderColor: '#222', borderWidth: 1 },
+  viewerShell: {
+    width: '100%',
+    height: '60%',
+    backgroundColor: '#000',
+    borderRadius: 16,
+    borderColor: '#222',
+    borderWidth: 1,
+
+  },
   viewerTopBar: { height: 46, backgroundColor: 'rgba(0,0,0,0.55)', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 12, borderBottomColor: '#111', borderBottomWidth: 1 },
   viewerTopBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 4, backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 8 },
   viewerTopBarText: { color: '#fff', fontSize: 14 },
-  viewerImageWrap: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
-  viewerImage: { width: '100%', height: '100%' },
+   viewerImageWrap: {
+    flex: 1,
+    backgroundColor: '#000',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 0,
+    paddingBottom: 0,
+  },
+  viewerImage: {
+    width: '100%',
+    height: '100%',
+  },
+
   chevron: { position: 'absolute', top: '45%', backgroundColor: 'rgba(0,0,0,0.45)', width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
   pager: { position: 'absolute', bottom: 10, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.45)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12 },
   pagerText: { color: '#fff', fontSize: 12 },
