@@ -1,4 +1,4 @@
-// ChatMessages.js
+// components/ChatMessages.js
 import React, { useRef, useEffect, useMemo } from 'react';
 import {
   ScrollView,
@@ -15,9 +15,7 @@ import Markdown from 'react-native-markdown-display';
 import Icon from 'react-native-vector-icons/FontAwesome';
 import ZoomableSvg from './SvgWrapper';
 
-// ---- helpers to parse reply content ----
 function extractBlocks(text = '', tag) {
-  // Finds ```<tag>\n...\n```
   const blocks = [];
   const regex = new RegExp('```' + tag + '\\s*([\\s\\S]*?)```', 'g');
   let m;
@@ -28,15 +26,14 @@ function extractBlocks(text = '', tag) {
 }
 
 function splitIntoSegments(text = '') {
-  // Support: diagram-json (debug as code), svg (render)
   const dj = extractBlocks(text, 'diagram-json');
   const sv = extractBlocks(text, 'svg');
 
   if (dj.length === 0 && sv.length === 0) return [{ type: 'md', content: text }];
 
   const all = [
-    ...dj.map(b => ({ ...b, type: 'diagram-json' })),
-    ...sv.map(b => ({ ...b, type: 'svg' })),
+    ...dj.map((b) => ({ ...b, type: 'diagram-json' })),
+    ...sv.map((b) => ({ ...b, type: 'svg' })),
   ].sort((a, b) => a.start - b.start);
 
   const parts = [];
@@ -46,10 +43,8 @@ function splitIntoSegments(text = '') {
     if (before.trim()) parts.push({ type: 'md', content: before });
 
     if (b.type === 'diagram-json') {
-      // Show the JSON as fenced code for now (keeps things generic)
       parts.push({ type: 'md', content: '```json\n' + b.raw + '\n```' });
     } else if (b.type === 'svg') {
-      // small safety limit (front-end guard; your backend already sanitizes)
       const safe = b.raw.length <= 20000 ? b.raw : b.raw.slice(0, 20000);
       parts.push({ type: 'svg', content: safe });
     }
@@ -60,17 +55,15 @@ function splitIntoSegments(text = '') {
   return parts;
 }
 
-// Infer a good render height from the SVG viewBox to preserve aspect ratio
 function inferSvgHeight(xml, defaultHeight = 240) {
   try {
     const m = xml.match(/viewBox\s*=\s*["']\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*["']/i);
     if (!m) return defaultHeight;
-    const w = parseFloat(m[3]), h = parseFloat(m[4]);
+    const w = parseFloat(m[3]);
+    const h = parseFloat(m[4]);
     if (w > 0 && h > 0) {
-      // Aim for ~100% width; pick height that keeps ratio but clamp
       const ratio = h / w;
-      const est = Math.max(160, Math.min(480, Math.round(360 * ratio))); // clamp between 160–480
-      return est;
+      return Math.max(160, Math.min(480, Math.round(360 * ratio)));
     }
   } catch {}
   return defaultHeight;
@@ -79,14 +72,15 @@ function inferSvgHeight(xml, defaultHeight = 240) {
 export default function ChatMessages({
   messages,
   loading,
-  onExitChat,
   focusTick = 0,
   bottomInset = 84,
+  threadKey = 'default', // ✅ NEW
 }) {
   const scrollViewRef = useRef(null);
   const prevMessageCount = useRef(0);
   const atBottomRef = useRef(true);
   const lastFocusTickRef = useRef(0);
+  const lastThreadKeyRef = useRef(threadKey);
 
   const scrollToEnd = (animated = true) => {
     requestAnimationFrame(() => scrollViewRef.current?.scrollToEnd({ animated }));
@@ -116,6 +110,21 @@ export default function ChatMessages({
     return () => clearTimeout(t);
   }, [focusTick]);
 
+  // ✅ On thread change (loading saved chat), always snap to bottom
+  useEffect(() => {
+    if (!scrollViewRef.current) return;
+    if (lastThreadKeyRef.current !== threadKey) {
+      lastThreadKeyRef.current = threadKey;
+      atBottomRef.current = true;
+      const t1 = setTimeout(() => scrollToEnd(false), 10);
+      const t2 = setTimeout(() => scrollToEnd(true), Platform.OS === 'ios' ? 220 : 120);
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+      };
+    }
+  }, [threadKey]);
+
   useEffect(() => {
     const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const changeEvt = Platform.OS === 'ios' ? 'keyboardWillChangeFrame' : null;
@@ -131,7 +140,9 @@ export default function ChatMessages({
     };
 
     const subShow = Keyboard.addListener(showEvt, handleKeyboardAdjust);
-    const subChange = changeEvt ? Keyboard.addListener(changeEvt, handleKeyboardAdjust) : { remove: () => {} };
+    const subChange = changeEvt
+      ? Keyboard.addListener(changeEvt, handleKeyboardAdjust)
+      : { remove: () => {} };
 
     return () => {
       subShow.remove();
@@ -196,7 +207,9 @@ function AssistantReply({ text }) {
             <ZoomableSvg xml={seg.content} height={inferSvgHeight(seg.content, 240)} />
           </View>
         ) : (
-          <Markdown key={`m-${i}`} style={markdownStyle}>{seg.content}</Markdown>
+          <Markdown key={`m-${i}`} style={markdownStyle}>
+            {seg.content}
+          </Markdown>
         )
       )}
     </Animated.View>
@@ -207,7 +220,12 @@ function AnimatedGear() {
   const spinValue = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.loop(
-      Animated.timing(spinValue, { toValue: 1, duration: 1500, easing: Easing.linear, useNativeDriver: true })
+      Animated.timing(spinValue, {
+        toValue: 1,
+        duration: 1500,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      })
     ).start();
   }, []);
   const spin = spinValue.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
@@ -222,6 +240,7 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#121212' },
   scroller: { flex: 1 },
   messagesContainer: { paddingHorizontal: 12, paddingTop: 8 },
+
   userBubble: {
     alignSelf: 'flex-end',
     backgroundColor: '#4CAF50',
@@ -231,13 +250,17 @@ const styles = StyleSheet.create({
     maxWidth: '90%',
   },
   userText: { color: '#fff', fontSize: 16, lineHeight: 22 },
+
   assistantContainer: {
     alignSelf: 'stretch',
     backgroundColor: '#1c1c1c',
     padding: 14,
     marginBottom: 12,
-    borderRadius: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
   },
+
   loadingContainer: { flexDirection: 'row', alignItems: 'center', padding: 10, gap: 8 },
   loadingText: { color: '#aaa', fontStyle: 'italic', marginLeft: 8 },
 });
@@ -247,5 +270,10 @@ const markdownStyle = {
   heading1: { fontSize: 22, fontWeight: 'bold', marginBottom: 8 },
   heading2: { fontSize: 18, fontWeight: 'bold', marginBottom: 6 },
   list_item: { marginBottom: 6 },
-  code_block: { backgroundColor: '#333', padding: 8, borderRadius: 6, fontFamily: 'Courier' },
+  code_block: {
+    backgroundColor: '#333',
+    padding: 8,
+    borderRadius: 10,
+    fontFamily: 'Courier',
+  },
 };

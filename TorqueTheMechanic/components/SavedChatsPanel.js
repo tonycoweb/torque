@@ -1,6 +1,16 @@
 // components/SavedChatsPanel.js
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert } from 'react-native';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Alert,
+  Modal,
+  Pressable,
+} from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { getAllChats, deleteChat, clearAllChats } from '../utils/storage';
 
 function normalizeContent(content) {
@@ -24,42 +34,108 @@ function normalizeContent(content) {
       .join('\n');
   }
 
-  try { return JSON.stringify(content); } catch { return String(content); }
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return String(content);
+  }
 }
 
-export default function SavedChatsPanel(
-  { onSelect, onClose, chats: chatsProp } = {} // ✅ CRITICAL: default {} prevents destructure crash
-) {
-  const [chats, setChats] = useState([]);
+function buildPreview(messages = []) {
+  const last = messages[messages.length - 1];
+  if (!last) return 'No messages';
+  const txt = normalizeContent(last.content || last.text || '');
+  const clean = String(txt).replace(/\s+/g, ' ').trim();
+  return clean.length > 92 ? clean.slice(0, 92) + '…' : clean;
+}
 
-  const usingExternalChats = Array.isArray(chatsProp);
+function buildTitle(messages = []) {
+  const firstUser = messages.find((m) => m?.role === 'user');
+  const txt = normalizeContent(firstUser?.content || firstUser?.text || '');
+  const clean = String(txt).replace(/\s+/g, ' ').trim();
+  if (!clean) return 'Chat';
+  return clean.length > 28 ? clean.slice(0, 28) + '…' : clean;
+}
+
+// ✅ Convert storage object -> array of chat objects
+function toChatArray(allChatsObj) {
+  const obj = allChatsObj && typeof allChatsObj === 'object' ? allChatsObj : {};
+  const out = [];
+
+  for (const id of Object.keys(obj)) {
+    const val = obj[id];
+
+    // Old format: chats[id] = messagesArray
+    if (Array.isArray(val)) {
+      const messages = val;
+      out.push({
+        id,
+        messages,
+        title: buildTitle(messages),
+        preview: buildPreview(messages),
+        updatedAt: Number(id) || 0, // best-effort for old format (often Date.now() ids)
+      });
+      continue;
+    }
+
+    // New-ish format: chats[id] = { messages, title, preview, updatedAt }
+    if (val && typeof val === 'object') {
+      const messages = Array.isArray(val.messages) ? val.messages : [];
+      out.push({
+        id,
+        messages,
+        title: val.title || buildTitle(messages),
+        preview: val.preview || buildPreview(messages),
+        updatedAt: val.updatedAt || Number(id) || 0,
+      });
+      continue;
+    }
+
+    out.push({
+      id,
+      messages: [],
+      title: 'Chat',
+      preview: 'No messages',
+      updatedAt: Number(id) || 0,
+    });
+  }
+
+  return out;
+}
+
+export default function SavedChatsPanel({
+  visible = false,
+  onSelect,
+  onClose,
+} = {}) {
+  const [chats, setChats] = useState([]);
 
   const loadChats = async () => {
     try {
-      const all = await getAllChats();
-      setChats(Array.isArray(all) ? all : []);
+      const all = await getAllChats(); // returns object per your utils/storage.js
+      const arr = toChatArray(all);
+      setChats(arr);
     } catch (e) {
       console.error('Load chats error:', e);
       setChats([]);
     }
   };
 
-  // ✅ If parent passes chats, use them. Otherwise, load from storage.
+  // ✅ Reload on open so it always shows newest
   useEffect(() => {
-    if (usingExternalChats) setChats(chatsProp);
-    else loadChats();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [usingExternalChats, chatsProp?.length]);
+    if (visible) loadChats();
+  }, [visible]);
+
+  const sortedChats = useMemo(() => {
+    const arr = Array.isArray(chats) ? [...chats] : [];
+    arr.sort((a, b) => (b?.updatedAt || 0) - (a?.updatedAt || 0));
+    return arr;
+  }, [chats]);
 
   const handleDelete = async (id) => {
     try {
       await deleteChat(id);
-      if (usingExternalChats) {
-        // parent-owned list; just tell parent to refresh by closing/reopening
-        // (or pass a refresh prop if you want)
-      } else {
-        await loadChats();
-      }
+      await loadChats();
     } catch {
       Alert.alert('Error', 'Could not delete chat.');
     }
@@ -78,93 +154,246 @@ export default function SavedChatsPanel(
           } catch {
             Alert.alert('Error', 'Could not clear chats.');
           }
-        }
-      }
+        },
+      },
     ]);
   };
 
-  const previewFor = (chat) => {
-    const msgs = Array.isArray(chat?.messages) ? chat.messages : [];
-    const last = msgs[msgs.length - 1];
-    if (!last) return 'No messages';
-    const txt = normalizeContent(last.content || last.text || '');
-    return txt.length > 70 ? txt.slice(0, 70) + '…' : txt;
+  const fmt = (ts) => {
+    if (!ts) return '';
+    try {
+      const d = new Date(ts);
+      return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return '';
+    }
   };
 
-  const sortedChats = useMemo(() => {
-    const arr = Array.isArray(chats) ? [...chats] : [];
-    // If your objects have updatedAt, sort by it; otherwise keep order.
-    arr.sort((a, b) => (b?.updatedAt || 0) - (a?.updatedAt || 0));
-    return arr;
-  }, [chats]);
-
   return (
-    <View style={styles.panel}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Saved Chats</Text>
-        <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
-          <Text style={styles.closeText}>✕</Text>
-        </TouchableOpacity>
-      </View>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={styles.backdrop} onPress={onClose} />
 
-      <View style={styles.actionsRow}>
-        <TouchableOpacity onPress={() => onSelect?.(null)} style={[styles.actionBtn, styles.newBtn]}>
-          <Text style={styles.actionText}>New</Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={handleClearAll} style={[styles.actionBtn, styles.clearBtn]}>
-          <Text style={styles.actionText}>Clear All</Text>
-        </TouchableOpacity>
-      </View>
+      <View style={styles.sheet}>
+        <View style={styles.handle} />
 
-      <ScrollView style={{ marginTop: 10 }}>
-        {sortedChats.map((c) => (
-          <View key={c.id} style={styles.chatRow}>
-            <TouchableOpacity style={{ flex: 1 }} onPress={() => onSelect?.(c)}>
-              <Text style={styles.chatTitle}>{c.title || `Chat ${c.id}`}</Text>
-              <Text style={styles.preview}>{c.preview || previewFor(c)}</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity onPress={() => handleDelete(c.id)} style={styles.deleteBtn}>
-              <Text style={styles.deleteText}>🗑️</Text>
-            </TouchableOpacity>
+        <View style={styles.header}>
+          <View style={styles.headerLeft}>
+            <View style={styles.iconBubble}>
+              <Ionicons name="bookmark-outline" size={18} color="#fff" />
+            </View>
+            <Text style={styles.title}>Saved Chats</Text>
           </View>
-        ))}
 
-        {(!sortedChats || sortedChats.length === 0) && (
-          <Text style={styles.empty}>No saved chats yet.</Text>
-        )}
-      </ScrollView>
-    </View>
+          <TouchableOpacity onPress={onClose} style={styles.closeBtn} hitSlop={10}>
+            <Ionicons name="close" size={18} color="#fff" />
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.actionsRow}>
+          <TouchableOpacity
+            onPress={() => onSelect?.(null)}
+            style={[styles.actionBtn, styles.newBtn]}
+            activeOpacity={0.9}
+          >
+            <Ionicons name="add" size={16} color="#fff" />
+            <Text style={styles.actionText}>New</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={handleClearAll}
+            style={[styles.actionBtn, styles.clearBtn]}
+            activeOpacity={0.9}
+          >
+            <Ionicons name="trash-outline" size={16} color="#fff" />
+            <Text style={styles.actionText}>Clear</Text>
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView style={styles.list} contentContainerStyle={{ paddingBottom: 22 }}>
+          {sortedChats.map((c) => (
+            <TouchableOpacity
+              key={c.id}
+              style={styles.card}
+              onPress={() => onSelect?.(c)}
+              activeOpacity={0.9}
+            >
+              <View style={styles.cardTop}>
+                <Text style={styles.chatTitle} numberOfLines={1}>
+                  {c.title || `Chat ${c.id}`}
+                </Text>
+                <Text style={styles.time} numberOfLines={1}>
+                  {fmt(c.updatedAt)}
+                </Text>
+              </View>
+
+              <Text style={styles.preview} numberOfLines={2}>
+                {c.preview || buildPreview(c.messages)}
+              </Text>
+
+              <View style={styles.cardActions}>
+                <View style={styles.pill}>
+                  <Ionicons name="chatbubble-ellipses-outline" size={14} color="#cfcfcf" />
+                  <Text style={styles.pillText}>
+                    {Array.isArray(c.messages) ? c.messages.length : 0} msgs
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  onPress={() => handleDelete(c.id)}
+                  style={styles.deleteBtn}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                >
+                  <Ionicons name="trash" size={16} color="#ffb4b4" />
+                </TouchableOpacity>
+              </View>
+            </TouchableOpacity>
+          ))}
+
+          {sortedChats.length === 0 && (
+            <View style={styles.emptyWrap}>
+              <Ionicons name="bookmark-outline" size={26} color="#777" />
+              <Text style={styles.emptyTitle}>No saved chats yet</Text>
+              <Text style={styles.emptySub}>Start a conversation — it’ll show up here automatically.</Text>
+            </View>
+          )}
+        </ScrollView>
+      </View>
+    </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  panel: {
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)' },
+
+  sheet: {
     position: 'absolute',
-    right: 14,
-    bottom: 180,
-    width: '92%',
-    maxHeight: '55%',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    maxHeight: '78%',
+    backgroundColor: '#141414',
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    borderWidth: 1,
+    borderColor: '#262626',
+    paddingHorizontal: 14,
+    paddingTop: 10,
+  },
+
+  handle: {
+    alignSelf: 'center',
+    width: 52,
+    height: 5,
+    borderRadius: 99,
+    backgroundColor: '#2a2a2a',
+    marginBottom: 10,
+  },
+
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 10,
+  },
+
+  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+
+  iconBubble: {
+    width: 30,
+    height: 30,
+    borderRadius: 12,
+    backgroundColor: '#2f6fed',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  title: { color: '#fff', fontSize: 18, fontWeight: '800' },
+
+  closeBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 14,
+    backgroundColor: '#222',
+    borderWidth: 1,
+    borderColor: '#2b2b2b',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  actionsRow: { flexDirection: 'row', gap: 10, marginBottom: 12 },
+
+  actionBtn: {
+    flex: 1,
+    height: 44,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    borderWidth: 1,
+  },
+
+  newBtn: { backgroundColor: '#2f6fed', borderColor: '#2f6fed' },
+  clearBtn: { backgroundColor: '#222', borderColor: '#2b2b2b' },
+
+  actionText: { color: '#fff', fontWeight: '800' },
+
+  list: { paddingBottom: 12 },
+
+  card: {
     backgroundColor: '#1c1c1c',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
     borderRadius: 18,
     padding: 14,
-    zIndex: 200,
-    borderWidth: 1,
-    borderColor: '#333',
+    marginBottom: 10,
   },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  title: { color: '#fff', fontSize: 18, fontWeight: '700' },
-  closeBtn: { padding: 8, borderRadius: 12, backgroundColor: '#333' },
-  closeText: { color: '#fff', fontSize: 14 },
-  actionsRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
-  actionBtn: { flex: 1, paddingVertical: 10, borderRadius: 14, alignItems: 'center' },
-  newBtn: { backgroundColor: '#2f6fed' },
-  clearBtn: { backgroundColor: '#444' },
-  actionText: { color: '#fff', fontWeight: '700' },
-  chatRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#2b2b2b' },
-  chatTitle: { color: '#fff', fontWeight: '700' },
-  preview: { color: '#aaa', marginTop: 4 },
-  deleteBtn: { padding: 10, marginLeft: 10, backgroundColor: '#333', borderRadius: 12 },
-  deleteText: { fontSize: 16 },
-  empty: { color: '#888', textAlign: 'center', paddingVertical: 18 },
+
+  cardTop: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+
+  chatTitle: { color: '#fff', fontWeight: '800', fontSize: 15, flex: 1 },
+  time: { color: '#8a8a8a', fontSize: 12 },
+
+  preview: { color: '#bdbdbd', marginTop: 8, lineHeight: 18 },
+
+  cardActions: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#171717',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+
+  pillText: { color: '#cfcfcf', fontSize: 12, fontWeight: '700' },
+
+  deleteBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 14,
+    backgroundColor: '#222',
+    borderWidth: 1,
+    borderColor: '#2b2b2b',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  emptyWrap: { alignItems: 'center', paddingVertical: 26, gap: 8 },
+  emptyTitle: { color: '#ddd', fontSize: 15, fontWeight: '800' },
+  emptySub: { color: '#888', textAlign: 'center', paddingHorizontal: 24, lineHeight: 18 },
 });

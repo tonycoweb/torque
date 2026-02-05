@@ -28,10 +28,9 @@ import SettingsModal from './components/SettingsModal';
 
 import VinCamera from './components/VinCamera';
 import VinPreview from './components/VinPreview';
-
 import AudioRecorderModal from './components/AudioRecorderModal';
 
-import { saveChat } from './utils/storage';
+import { saveChat, getAllChats, getChat } from './utils/storage';
 import { getAllVehicles, saveVehicle } from './utils/VehicleStorage';
 
 import * as ImagePicker from 'expo-image-picker';
@@ -53,6 +52,8 @@ const adUnitId = __DEV__
   : 'your-real-admob-id-here';
 
 // ===================== HELPERS =====================
+const LAST_CHAT_ID_KEY = 'last_chat_id';
+
 const trimTurns = (history, maxTurns = 6) => {
   const out = [];
   for (let i = history.length - 1; i >= 0 && out.length < maxTurns * 2; i--) {
@@ -107,7 +108,6 @@ const stripDataUrl = (b64OrDataUrl) => {
   return s;
 };
 
-// ✅ Convert base64 -> data URL (what your /image-diagnose route expects)
 const asDataUrlJpeg = (b64) => {
   if (!b64) return null;
   const s = String(b64);
@@ -131,13 +131,6 @@ const inferAudioMeta = (uri = '') => {
   return map[ext] || { mimeType: 'audio/mp4', filename: 'audio.m4a' };
 };
 
-/**
- * ✅ FIX: normalize audio/file URIs coming from native code.
- * Handles:
- * - object payloads like { uri: "file://..." }
- * - Swift Optional(file:///...) strings
- * - quoted URIs
- */
 const normalizeFileUri = (input) => {
   let uri =
     typeof input === 'string'
@@ -153,21 +146,15 @@ const normalizeFileUri = (input) => {
   }
 
   uri = uri.replace(/^"+|"+$/g, '');
-
   return uri;
 };
 
 // ===================== API CALLS =====================
-
-// ✅ TEXT-ONLY CHAT (do NOT send images here)
 async function chatWithBackend({ messages, vehicle }) {
   const resp = await fetch(API_CHAT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      messages,
-      vehicle: vehicle || null,
-    }),
+    body: JSON.stringify({ messages, vehicle: vehicle || null }),
   });
 
   let data = null;
@@ -179,12 +166,10 @@ async function chatWithBackend({ messages, vehicle }) {
   return data;
 }
 
-// ✅ AUDIO -> /audio-diagnose
 async function sendAudioToBackend({ uri, prompt, vehicle, mimeType, filename }) {
   const cleanUri = normalizeFileUri(uri);
   if (!cleanUri) throw new Error('Audio URI is missing/invalid (could not normalize).');
 
-  // ✅ Verify exists early so we don't get the "cannot be cast to URL" / Optional(...) crash
   const info = await FileSystem.getInfoAsync(cleanUri);
   if (!info?.exists) throw new Error(`Audio file not found: ${cleanUri}`);
 
@@ -213,7 +198,6 @@ async function sendAudioToBackend({ uri, prompt, vehicle, mimeType, filename }) 
   return data;
 }
 
-// ✅ IMAGE -> /image-diagnose
 async function sendImageToBackend({ base64, text, vehicle }) {
   const resp = await fetch(API_IMAGE_URL, {
     method: 'POST',
@@ -239,7 +223,7 @@ export default function App() {
   const [garageName, setGarageName] = useState('');
 
   const [messages, setMessages] = useState([]); // UI
-  const [chatHistory, setChatHistory] = useState([]); // backend text-only
+  const [chatHistory, setChatHistory] = useState([]); // backend history
 
   const [isChatting, setIsChatting] = useState(false);
   const [showSavedChats, setShowSavedChats] = useState(false);
@@ -249,26 +233,24 @@ export default function App() {
 
   const [showSettings, setShowSettings] = useState(false);
 
-  // ✅ Attachments (only ONE allowed at a time)
+  // Attachments
   const [attachedImage, setAttachedImage] = useState(null); // { uri, base64 }
   const [attachedAudio, setAttachedAudio] = useState(null); // { uri, durationMs, mimeType, filename }
-
-  // ✅ lock attachments while a send is in-flight (prevents spam / double-send)
   const [attachmentLocked, setAttachmentLocked] = useState(false);
 
-  // ✅ audio modal
   const [showAudioRecorder, setShowAudioRecorder] = useState(false);
 
-  // VIN camera flow (kept as-is)
+  // VIN camera flow
   const [showCamera, setShowCamera] = useState(false);
   const [vinPhoto, setVinPhoto] = useState(null);
   const [showDecodingModal, setShowDecodingModal] = useState(false);
 
-  // Used vehicle returned by backend meta
   const [activeChatVehicle, setActiveChatVehicle] = useState(null);
 
-  // For ChatMessages auto-scroll on focus
   const [focusTick, setFocusTick] = useState(0);
+
+  // forces ChatMessages snap-to-bottom when thread changes
+  const [threadKey, setThreadKey] = useState('new');
 
   const rewardedRef = useRef(null);
 
@@ -360,8 +342,56 @@ export default function App() {
     });
   };
 
-  // ===================== Attachments =====================
+  // ===================== LAST CHAT AUTO-LOAD =====================
+  const loadLastChatIfNeeded = async () => {
+    try {
+      // If we already have a thread loaded, do nothing
+      if ((chatID && chatHistory?.length) || (messages && messages.length)) return;
 
+      // Prefer explicit last id
+      const lastId = await AsyncStorage.getItem(LAST_CHAT_ID_KEY);
+
+      let idToLoad = lastId;
+
+      // If no lastId, pick latest numeric key from storage
+      if (!idToLoad) {
+        const all = await getAllChats();
+        const ids = Object.keys(all || {});
+        const numeric = ids
+          .map((x) => ({ id: x, n: Number(x) }))
+          .filter((o) => Number.isFinite(o.n))
+          .sort((a, b) => b.n - a.n);
+
+        if (numeric.length) idToLoad = numeric[0].id;
+      }
+
+      if (!idToLoad) return;
+
+      const loaded = await getChat(idToLoad);
+      if (!Array.isArray(loaded) || loaded.length === 0) return;
+
+      setChatID(idToLoad);
+      setThreadKey(idToLoad);
+      setChatHistory(loaded);
+      setMessages(
+        loaded.map((m) => ({
+          sender: m.role === 'user' ? 'user' : 'api',
+          text: normalizeMsgContent(m.content),
+        }))
+      );
+      setFocusTick((x) => x + 1);
+    } catch (e) {
+      console.warn('loadLastChatIfNeeded failed:', e?.message || e);
+    }
+  };
+
+  // When entering chat mode, auto-load the last conversation
+  useEffect(() => {
+    if (isChatting) loadLastChatIfNeeded();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isChatting]);
+
+  // ===================== Attachments =====================
   const hasAnyAttachment = () => !!attachedImage || !!attachedAudio;
 
   const handleCameraPress = async () => {
@@ -438,7 +468,7 @@ export default function App() {
 
   // ===================== Sending =====================
   const handleSend = async (textOrPayload) => {
-    if (loading) return; // ✅ hard block spam
+    if (loading) return;
 
     const text = typeof textOrPayload === 'string' ? textOrPayload : textOrPayload?.text || '';
 
@@ -452,14 +482,15 @@ export default function App() {
       setChatHistory([]);
       setMessages([]);
       setChatID(null);
+      setThreadKey('new');
       setActiveChatVehicle(null);
       setAttachedImage(null);
       setAttachedAudio(null);
       setAttachmentLocked(false);
+      AsyncStorage.removeItem(LAST_CHAT_ID_KEY).catch(() => {});
       return;
     }
 
-    // UI string for user's message
     const userLineParts = [];
     if (hasText) userLineParts.push(text.trim());
     if (hasImg) userLineParts.push('📎 Photo attached');
@@ -470,21 +501,16 @@ export default function App() {
     setShowSavedChats(false);
     setLoading(true);
 
-    // ✅ lock attachment controls while in-flight
     if (hasImg || hasAudio) setAttachmentLocked(true);
 
-    // ✅ snapshot attachments so we can restore on failure
     const imgSnap = attachedImage;
     const audioSnap = attachedAudio;
 
-    // ✅ self-erase the pill immediately so user can't re-send it while Torque is thinking
     if (hasImg) setAttachedImage(null);
     if (hasAudio) setAttachedAudio(null);
 
-    // UI append
     setMessages((prev) => [...prev, { sender: 'user', text: userLine }]);
 
-    // ✅ Always keep text-only history clean (no base64/audio)
     const newHistory = [...chatHistory, { role: 'user', content: userLine }];
     setChatHistory(newHistory);
 
@@ -494,50 +520,46 @@ export default function App() {
     try {
       let replyText = '';
 
-      // 1) AUDIO attached -> /audio-diagnose
       if (hasAudio) {
         const data = await sendAudioToBackend({
-          uri: audioSnap?.uri, // use snapshot (cleaned inside sendAudioToBackend)
+          uri: audioSnap?.uri,
           prompt: hasText ? text.trim() : 'Diagnose this sound.',
           vehicle: vehicleForChat,
           mimeType: audioSnap?.mimeType,
           filename: audioSnap?.filename,
         });
         replyText = data?.reply || '⚠️ No response from audio endpoint.';
-      }
-      // 2) IMAGE attached -> /image-diagnose
-      else if (hasImg) {
+      } else if (hasImg) {
         const data = await sendImageToBackend({
           base64: imgSnap?.base64,
           text: hasText ? text.trim() : '',
           vehicle: vehicleForChat,
         });
         replyText = data?.reply || '⚠️ No response from image endpoint.';
-      }
-      // 3) TEXT only -> /chat
-      else {
+      } else {
         const data = await chatWithBackend({
           messages: trimmedHistory,
           vehicle: vehicleForChat,
         });
-
         replyText = data?.reply || '';
         if (data?.vehicle_used) setActiveChatVehicle(data.vehicle_used);
       }
 
       const updatedHistory = [...newHistory, { role: 'assistant', content: replyText }];
       setChatHistory(updatedHistory);
-
       setMessages((prev) => [...prev, { sender: 'api', text: replyText }]);
 
       const id = chatID || Date.now().toString();
       setChatID(id);
+      setThreadKey(id);
+
       await saveChat(id, updatedHistory);
 
-      // ✅ attachments already cleared; just unlock
+      // ✅ remember last chat so next enter loads it automatically
+     await AsyncStorage.setItem('last_chat_id', id);
+
       setAttachmentLocked(false);
     } catch (e) {
-      // ✅ on failure: restore attachments so user can retry
       if (hasImg && imgSnap) setAttachedImage(imgSnap);
       if (hasAudio && audioSnap) setAttachedAudio(audioSnap);
 
@@ -553,19 +575,76 @@ export default function App() {
     setFocusTick((x) => x + 1);
   };
 
-  const handleExitChat = () => {
-    if (loading) return; // optional: prevent exit mid-request
-    Keyboard.dismiss();
-    setIsChatting(false);
-    setMessages([]);
-    setChatHistory([]);
-    setChatID(null);
-    setShowSavedChats(false);
-    setActiveChatVehicle(null);
-    setAttachedImage(null);
-    setAttachedAudio(null);
-    setAttachmentLocked(false);
-  };
+  const restoreLastChatIfAny = async () => {
+  try {
+    // If we already have messages, don’t overwrite.
+    if (messages?.length) return;
+
+    // 1) Prefer explicit last chat id
+    let lastId = await AsyncStorage.getItem('last_chat_id');
+
+    // 2) If missing, infer “latest” from saved_chats keys (your saveChat uses Date.now().toString())
+    if (!lastId) {
+      const raw = await AsyncStorage.getItem('saved_chats');
+      const obj = raw ? JSON.parse(raw) : {};
+      const ids = Object.keys(obj || {});
+      if (ids.length) {
+        ids.sort((a, b) => Number(b) - Number(a)); // latest timestamp id first
+        lastId = ids[0];
+      }
+    }
+
+    if (!lastId) return;
+
+    // Load the chat messages for that id
+    const raw = await AsyncStorage.getItem('saved_chats');
+    const chatsObj = raw ? JSON.parse(raw) : {};
+    const lastMessages = chatsObj?.[lastId];
+
+    if (!Array.isArray(lastMessages) || lastMessages.length === 0) return;
+
+    setChatID(lastId);
+    setChatHistory(lastMessages);
+
+    setMessages(
+      lastMessages.map((m) => ({
+        sender: m.role === 'user' ? 'user' : 'api',
+        text: normalizeMsgContent(m.content),
+      }))
+    );
+
+    setFocusTick((x) => x + 1);
+  } catch (e) {
+    console.log('restoreLastChatIfAny error:', e);
+  }
+};
+
+useEffect(() => {
+  if (isChatting) {
+    restoreLastChatIfAny();
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [isChatting]);
+
+
+  // ✅ FIX: Exit chat should NOT wipe messages/history.
+  // You want to come back and see the last chat immediately.
+const handleExitChat = () => {
+  if (loading) return;
+  Keyboard.dismiss();
+  setIsChatting(false);
+  setShowSavedChats(false);
+
+  // ✅ Clear on-screen chat so home is clean
+  setMessages([]);
+
+  // ✅ Keep chatHistory + chatID so we can restore quickly later
+  setActiveChatVehicle(null);
+  setAttachedImage(null);
+  setAttachedAudio(null);
+  setAttachmentLocked(false);
+};
+
 
   const handleSelectVehicle = async (v) => {
     const normalized = normalizeVehicle(v);
@@ -715,50 +794,67 @@ export default function App() {
         )}
 
         <View style={styles.chatMessagesArea}>
-          <ChatMessages messages={messages} loading={loading} focusTick={focusTick} bottomInset={92} />
+          <ChatMessages
+            messages={messages}
+            loading={loading}
+            focusTick={focusTick}
+            bottomInset={92}
+            threadKey={threadKey}
+          />
         </View>
 
-        {isChatting && showSavedChats && (
-          <SavedChatsPanel
-            onClose={() => setShowSavedChats(false)}
-            onSelect={(chat) => {
-              if (loading) return;
+        <SavedChatsPanel
+          visible={isChatting && showSavedChats}
+          onClose={() => setShowSavedChats(false)}
+          onSelect={async (chat) => {
+            if (loading) return;
 
-              if (!chat) {
-                setChatID(null);
-                setChatHistory([]);
-                setMessages([]);
-                setShowSavedChats(false);
-                setActiveChatVehicle(null);
-                setAttachedImage(null);
-                setAttachedAudio(null);
-                setAttachmentLocked(false);
-                return;
-              }
-
-              setChatID(chat.id);
-              setChatHistory(chat.messages || []);
-
-              setMessages(
-                (chat.messages || []).map((m) => ({
-                  sender: m.role === 'user' ? 'user' : 'api',
-                  text: normalizeMsgContent(m.content),
-                }))
-              );
-
+            if (!chat) {
+              setChatID(null);
+              setThreadKey('new');
+              setChatHistory([]);
+              setMessages([]);
               setShowSavedChats(false);
               setActiveChatVehicle(null);
-              setIsChatting(true);
+              setAttachedImage(null);
+              setAttachedAudio(null);
+              setAttachmentLocked(false);
+              await AsyncStorage.removeItem(LAST_CHAT_ID_KEY);
               setFocusTick((x) => x + 1);
-            }}
-          />
-        )}
+              return;
+            }
+
+            const id = chat.id || Date.now().toString();
+            const history = Array.isArray(chat.messages) ? chat.messages : [];
+
+            setChatID(id);
+            setThreadKey(id);
+            setChatHistory(history);
+
+            setMessages(
+              history.map((m) => ({
+                sender: m.role === 'user' ? 'user' : 'api',
+                text: normalizeMsgContent(m.content),
+              }))
+            );
+
+            await AsyncStorage.setItem(LAST_CHAT_ID_KEY, id);
+
+            setShowSavedChats(false);
+            setActiveChatVehicle(null);
+            setIsChatting(true);
+            setFocusTick((x) => x + 1);
+          }}
+        />
 
         <ChatBoxFixed
           onSend={handleSend}
           onFocus={handleChatFocus}
+          // ✅ pass both prop names in case ChatBoxFixed uses older naming
           onMicPress={handleMicPress}
+          onMic={handleMicPress}
           onCameraPress={handleCameraPress}
+          onCamera={handleCameraPress}
           onClearAudio={clearAttachedAudio}
           onClearImage={clearAttachedImage}
           attachedAudio={attachedAudio ? { uri: attachedAudio.uri, durationMs: attachedAudio.durationMs } : null}
@@ -815,14 +911,12 @@ export default function App() {
         renderContent()
       )}
 
-      {/* ✅ Audio recorder modal -> attaches audio pill (does NOT auto-send) */}
       <AudioRecorderModal
         visible={showAudioRecorder}
         onClose={() => setShowAudioRecorder(false)}
         onDone={(payload) => {
           setShowAudioRecorder(false);
 
-          // ✅ payload can be string OR object; normalize either way
           const cleanUri = normalizeFileUri(payload);
           if (!cleanUri) {
             Alert.alert('Audio error', 'Could not read the recorded audio file URI.');
@@ -836,6 +930,9 @@ export default function App() {
             mimeType: meta.mimeType,
             filename: meta.filename,
           });
+
+          // ✅ make sure the chat UI snaps down to show the pill
+          setFocusTick((x) => x + 1);
         }}
       />
 
@@ -864,9 +961,11 @@ const styles = StyleSheet.create({
   chatTopBar: {
     flexDirection: 'row',
     alignItems: 'center',
+    alignSelf: 'center',
     justifyContent: 'space-between',
     marginBottom: 8,
     gap: 10,
+    width: '50%',
   },
   exitButton: {
     flex: 1,
@@ -887,7 +986,7 @@ const styles = StyleSheet.create({
     borderColor: '#444',
   },
   topBarBtnActive: { backgroundColor: '#2f6fed', borderColor: '#2f6fed' },
-  topBarBtnText: { color: '#fff', fontSize: 13, fontWeight: '800' },
+  topBarBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
 
   decodeOverlay: {
     flex: 1,
