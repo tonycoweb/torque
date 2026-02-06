@@ -243,7 +243,7 @@ const styles = StyleSheet.create({
 
   userBubble: {
     alignSelf: 'flex-end',
-    backgroundColor: '#4CAF50',
+    backgroundColor: '#3a76f0',
     borderRadius: 16,
     padding: 12,
     marginBottom: 12,

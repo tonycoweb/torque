@@ -302,7 +302,6 @@ const styles = StyleSheet.create({
     width: 30,
     height: 30,
     borderRadius: 12,
-    backgroundColor: '#2f6fed',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -333,7 +332,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
 
-  newBtn: { backgroundColor: '#2f6fed', borderColor: '#2f6fed' },
+  newBtn: { backgroundColor: '#4CAF50', borderColor: '#4CAF50' },
   clearBtn: { backgroundColor: '#222', borderColor: '#2b2b2b' },
 
   actionText: { color: '#fff', fontWeight: '800' },

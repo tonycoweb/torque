@@ -1,11 +1,15 @@
 // components/AudioRecorderModal.js
 // ✅ Pill-style recorder that supports playback + attach checkmark.
 // ✅ Does NOT auto-send. It returns { uri, durationMs } to App via onDone().
-// ✅ Auto-closes itself after attaching (App hides it too).
-import React, { useEffect, useRef, useState } from 'react';
+// ✅ Adds: 3s countdown before record + 10s max cap + waveform visual.
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, View, Text, TouchableOpacity, StyleSheet, Platform, Alert } from 'react-native';
 import { Audio } from 'expo-av';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+
+const MAX_RECORD_MS = 10_000;     // ✅ safeguard cap
+const COUNTDOWN_SEC = 3;          // ✅ pre-roll safety countdown
+const WAVE_BARS = 18;             // waveform bar count
 
 async function safeSetModeRecording(on) {
   try {
@@ -27,31 +31,65 @@ async function safeSetModeRecording(on) {
   }
 }
 
+// small helper
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
 export default function AudioRecorderModal({ visible, onClose, onDone, disabled = false }) {
   const recRef = useRef(null);
   const soundRef = useRef(null);
+
+  const countdownTimerRef = useRef(null);
+  const hardStopTimerRef = useRef(null);
 
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
 
+  const [countdown, setCountdown] = useState(0);      // 3..2..1
+  const countingDown = countdown > 0;
+
   const [uri, setUri] = useState(null);
   const [durationMs, setDurationMs] = useState(null);
 
-  const [meter, setMeter] = useState(0);
+  const [meter, setMeter] = useState(0);              // 0..1
+  const meterSmoothRef = useRef(0);
 
   const [playing, setPlaying] = useState(false);
   const [posMs, setPosMs] = useState(0);
+
+  const [recordedMs, setRecordedMs] = useState(0);    // live while recording
+  const recordedMsRef = useRef(0);
+
+  // “waveform” state – array of heights (0..1)
+  const [wave, setWave] = useState(Array.from({ length: WAVE_BARS }, () => 0.1));
+  const waveRef = useRef(wave);
 
   const resetState = () => {
     setReady(false);
     setBusy(false);
     setRecording(false);
+    setCountdown(0);
     setUri(null);
     setDurationMs(null);
     setMeter(0);
     setPlaying(false);
     setPosMs(0);
+    setRecordedMs(0);
+    recordedMsRef.current = 0;
+    const init = Array.from({ length: WAVE_BARS }, () => 0.12);
+    waveRef.current = init;
+    setWave(init);
+  };
+
+  const clearTimers = () => {
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+    if (hardStopTimerRef.current) {
+      clearTimeout(hardStopTimerRef.current);
+      hardStopTimerRef.current = null;
+    }
   };
 
   const cleanupRecording = async () => {
@@ -83,6 +121,7 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
   };
 
   const cleanupAll = async () => {
+    clearTimers();
     await cleanupRecording();
     await cleanupSound();
     try {
@@ -122,47 +161,139 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
-  const start = async () => {
-    if (disabled || !ready || busy || recording) return;
+  // -------- waveform animator (driven by metering) --------
+  const pushWave = (normMeter) => {
+    // smooth meter a bit so wave looks stable
+    meterSmoothRef.current = meterSmoothRef.current * 0.75 + normMeter * 0.25;
+    const base = meterSmoothRef.current;
+
+    // create “wave” bars around base + jitter
+    const prev = waveRef.current || [];
+    const next = [];
+    for (let i = 0; i < WAVE_BARS; i++) {
+      const jitter = (Math.random() - 0.5) * 0.22;
+      const drift = (i % 2 === 0 ? 0.04 : -0.04);
+      const target = clamp(base + jitter + drift, 0.08, 1);
+
+      // ease to target
+      const last = prev[i] ?? 0.1;
+      const eased = last * 0.65 + target * 0.35;
+      next.push(eased);
+    }
+
+    waveRef.current = next;
+    setWave(next);
+  };
+
+  // -------- countdown -> start --------
+  const beginCountdownThenStart = async () => {
+    if (disabled || !ready || busy || recording || countingDown) return;
 
     try {
-      setBusy(true);
+      // clear any previous clip
       await cleanupSound();
       setUri(null);
       setDurationMs(null);
       setMeter(0);
       setPosMs(0);
+      setRecordedMs(0);
+      recordedMsRef.current = 0;
+
+      // start countdown
+      setCountdown(COUNTDOWN_SEC);
+      clearTimers();
+
+      countdownTimerRef.current = setInterval(async () => {
+        setCountdown((c) => {
+          const next = c - 1;
+          if (next <= 0) {
+            // stop interval and actually start recording
+            if (countdownTimerRef.current) {
+              clearInterval(countdownTimerRef.current);
+              countdownTimerRef.current = null;
+            }
+            // fire and forget
+            startRecording().catch(() => {});
+            return 0;
+          }
+          return next;
+        });
+      }, 1000);
+    } catch (e) {
+      console.log('countdown error:', e);
+      Alert.alert('Recording failed', e?.message || 'Could not start countdown.');
+      setCountdown(0);
+      clearTimers();
+    }
+  };
+
+  const cancelCountdown = () => {
+    if (!countingDown) return;
+    setCountdown(0);
+    clearTimers();
+  };
+
+  // -------- start recording (internal) --------
+  const startRecording = async () => {
+    if (disabled || !ready || busy || recording) return;
+
+    try {
+      setBusy(true);
 
       await safeSetModeRecording(true);
 
       const rec = new Audio.Recording();
-      await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
 
-      rec.setProgressUpdateInterval(120);
+      // Enable metering where supported
+      const options = Audio.RecordingOptionsPresets.HIGH_QUALITY;
+      await rec.prepareToRecordAsync(options);
+
+      rec.setProgressUpdateInterval(90);
       rec.setOnRecordingStatusUpdate((st) => {
+        if (!st) return;
+
+        if (typeof st.durationMillis === 'number') {
+          recordedMsRef.current = st.durationMillis;
+          setRecordedMs(st.durationMillis);
+        }
+
         if (typeof st?.metering === 'number') {
-          const db = Math.max(-60, Math.min(0, st.metering));
-          const norm = (db + 60) / 60;
+          const db = clamp(st.metering, -60, 0);
+          const norm = (db + 60) / 60; // 0..1
           setMeter(norm);
+          pushWave(norm);
+        } else {
+          // fallback: still animate wave a bit so it doesn’t look dead on Android configs
+          pushWave(0.18 + Math.random() * 0.06);
         }
       });
 
       await rec.startAsync();
       recRef.current = rec;
       setRecording(true);
+
+      // ✅ hard stop safety at 10 seconds
+      clearTimers();
+      hardStopTimerRef.current = setTimeout(() => {
+        stop().catch(() => {});
+      }, MAX_RECORD_MS + 80);
     } catch (e) {
       console.log('startRecording error:', e);
       Alert.alert('Recording failed', e?.message || 'Could not start recording.');
+      setRecording(false);
+      clearTimers();
     } finally {
       setBusy(false);
     }
   };
 
+  // -------- stop recording --------
   const stop = async () => {
     if (disabled || !recRef.current || busy) return;
 
     try {
       setBusy(true);
+      clearTimers();
 
       await recRef.current.stopAndUnloadAsync();
       const u = recRef.current.getURI();
@@ -176,7 +307,7 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
       recRef.current = null;
       setRecording(false);
       setUri(u || null);
-      setDurationMs(dur);
+      setDurationMs(dur ?? recordedMsRef.current ?? null);
 
       await safeSetModeRecording(false);
     } catch (e) {
@@ -227,16 +358,14 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
   };
 
   const attach = async () => {
-    if (disabled || busy || !uri || recording) return;
+    if (disabled || busy || !uri || recording || countingDown) return;
 
     try {
       setBusy(true);
       await cleanupSound();
 
-      // ✅ pass payload to App; App will attach it to ChatBoxFixed
       onDone?.({ uri, durationMs: durationMs || null });
 
-      // ✅ close + reset so user can’t attach multiple from this pill
       onClose?.();
       resetState();
     } finally {
@@ -258,8 +387,14 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
 
   if (!visible) return null;
 
-  const pct = Math.round((meter || 0) * 100);
   const durSec = durationMs ? Math.max(1, Math.round(durationMs / 1000)) : null;
+
+  // live “remaining” while recording
+  const remainingSec = recording ? Math.max(0, Math.ceil((MAX_RECORD_MS - recordedMs) / 1000)) : null;
+
+  const canRecord = ready && !disabled && !busy && !recording && !countingDown;
+  const canStop = !disabled && !busy && recording;
+  const canAttach = !!uri && !recording && !countingDown && !disabled && !busy;
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={close}>
@@ -270,25 +405,36 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
           <TouchableOpacity
             style={[
               styles.leftBtn,
-              recording ? styles.btnStop : styles.btnRec,
+              countingDown ? styles.btnCountdown : recording ? styles.btnStop : styles.btnRec,
               (!ready || disabled || busy) && styles.btnDisabled,
             ]}
             disabled={!ready || disabled || busy}
-            onPress={recording ? stop : start}
+            onPress={recording ? stop : countingDown ? cancelCountdown : beginCountdownThenStart}
             activeOpacity={0.85}
           >
-            <Ionicons name={recording ? 'stop' : 'mic'} size={16} color="#fff" />
-            <Text style={styles.leftText}>{recording ? 'Stop' : 'Record'}</Text>
+            <Ionicons
+              name={recording ? 'stop' : countingDown ? 'close' : 'mic'}
+              size={16}
+              color="#fff"
+            />
+            <Text style={styles.leftText}>
+              {recording ? 'Stop' : countingDown ? 'Cancel' : 'Record'}
+            </Text>
           </TouchableOpacity>
 
-          {/* middle meter / playback */}
+          {/* middle waveform / playback */}
           <View style={styles.mid}>
-            {recording ? (
+            {countingDown ? (
+              <View style={styles.countdownWrap}>
+                <Text style={styles.countdownText}>{countdown}</Text>
+                <Text style={styles.midText}>Starting…</Text>
+              </View>
+            ) : recording ? (
               <>
-                <View style={styles.meterTrack}>
-                  <View style={[styles.meterFill, { width: `${pct}%` }]} />
-                </View>
-                <Text style={styles.midText}>Recording…</Text>
+                <Waveform bars={wave} />
+                <Text style={styles.midText}>
+                  Recording… {remainingSec != null ? `${remainingSec}s left` : ''}
+                </Text>
               </>
             ) : uri ? (
               <>
@@ -300,17 +446,22 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
                 >
                   <Ionicons name={playing ? 'pause' : 'play'} size={16} color="#fff" />
                 </TouchableOpacity>
-                <Text style={styles.midText}>{durSec ? `${durSec}s ready` : 'Audio ready'}</Text>
+                <Text style={styles.midText}>
+                  {durSec ? `${durSec}s ready` : 'Play recording'}
+                </Text>
               </>
             ) : (
-              <Text style={styles.midText}>Voice note</Text>
+              <>
+                <Waveform bars={wave} idle />
+                <Text style={styles.midText}>Automotive sound diagnosis</Text>
+              </>
             )}
           </View>
 
           {/* attach */}
           <TouchableOpacity
-            style={[styles.iconCircle, (!uri || recording || disabled || busy) && styles.iconDisabled]}
-            disabled={!uri || recording || disabled || busy}
+            style={[styles.iconCircle, !canAttach && styles.iconDisabled]}
+            disabled={!canAttach}
             onPress={attach}
             activeOpacity={0.85}
           >
@@ -331,10 +482,38 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
         {/* small hint line */}
         <View style={styles.hintRow}>
           <MaterialCommunityIcons name="information-outline" size={14} color="#888" />
-          <Text style={styles.hintText}>Record 8–12s near the source • Play • ✓ attaches to chat</Text>
+          <Text style={styles.hintText}>
+            Max 10s • Record your vehicle's sound for Torque to attempt to help diagnose• ✓ attaches to chat • (x) try again
+          </Text>
         </View>
       </View>
     </Modal>
+  );
+}
+
+// ---------- Waveform component ----------
+function Waveform({ bars = [], idle = false }) {
+  const normalized = useMemo(() => {
+    const base = idle ? 0.16 : 0;
+    return (bars || []).map((h) => clamp((h ?? 0.1) + base, 0.08, 1));
+  }, [bars, idle]);
+
+  return (
+    <View style={styles.waveWrap}>
+      {normalized.map((h, i) => {
+        const height = 6 + Math.round(h * 22);
+        return (
+          <View
+            key={i}
+            style={[
+              styles.waveBar,
+              { height, opacity: idle ? 0.55 : 1 },
+              i % 3 === 0 ? styles.waveBarStrong : null,
+            ]}
+          />
+        );
+      })}
+    </View>
   );
 }
 
@@ -343,7 +522,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'flex-end',
     paddingHorizontal: 16,
-    paddingBottom: Platform.OS === 'ios' ? 18 : 14,
+    paddingBottom: Platform.OS === 'ios' ? 80 : 20,
   },
 
   pill: {
@@ -355,7 +534,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 7,
   },
   pillDisabled: { opacity: 0.6 },
 
@@ -369,22 +548,44 @@ const styles = StyleSheet.create({
   },
   btnRec: { backgroundColor: '#4CAF50' },
   btnStop: { backgroundColor: '#FF6666' },
+  btnCountdown: { backgroundColor: '#3b82f6' }, // countdown state
   btnDisabled: { opacity: 0.6 },
   leftText: { color: '#fff', fontWeight: '900', fontSize: 12 },
 
-  mid: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  mid: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 6 },
   midText: { color: '#ddd', fontSize: 12, fontWeight: '800' },
 
-  meterTrack: {
-    flex: 1,
-    height: 10,
+  countdownWrap: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  countdownText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '900',
+    width: 22,
+    textAlign: 'center',
+  },
+
+  // Waveform
+  waveWrap: {
+    width: '100%',
+    height: 30,
     borderRadius: 999,
     backgroundColor: '#111',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
     overflow: 'hidden',
   },
-  meterFill: { height: '100%', backgroundColor: '#4CAF50' },
+  waveBar: {
+    width: 4,
+    borderRadius: 999,
+    backgroundColor: '#3b82f6', // match your blue theme
+  },
+  waveBarStrong: {
+    opacity: 0.92,
+  },
 
   playBtn: {
     width: 34,
@@ -416,5 +617,5 @@ const styles = StyleSheet.create({
     paddingLeft: 6,
     paddingBottom: Platform.OS === 'ios' ? 6 : 0,
   },
-  hintText: { color: '#888', fontSize: 11, fontWeight: '700' },
+  hintText: { color: '#888', fontSize: 11, fontWeight: '700', textAlign: 'center'},
 });

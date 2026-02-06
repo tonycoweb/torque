@@ -254,9 +254,10 @@ export default function App() {
 
   const rewardedRef = useRef(null);
 
-  // Robot anim
+  // ===================== Robot anim =====================
   const robotTranslateY = useRef(new Animated.Value(0)).current;
   const robotScale = useRef(new Animated.Value(1)).current;
+
   useEffect(() => {
     Animated.timing(robotTranslateY, {
       toValue: isChatting ? -80 : 0,
@@ -270,7 +271,7 @@ export default function App() {
     }).start();
   }, [isChatting, robotTranslateY, robotScale]);
 
-  // Init login
+  // ===================== Init login =====================
   useEffect(() => {
     (async () => {
       const user = await AsyncStorage.getItem('user');
@@ -278,7 +279,7 @@ export default function App() {
     })();
   }, []);
 
-  // Load vehicles
+  // ===================== Load vehicles =====================
   useEffect(() => {
     (async () => {
       const saved = await getAllVehicles();
@@ -294,7 +295,7 @@ export default function App() {
     }
   }, [vehicle]);
 
-  // AdMob init
+  // ===================== AdMob init =====================
   useEffect(() => {
     (async () => {
       try {
@@ -385,7 +386,6 @@ export default function App() {
     }
   };
 
-  // When entering chat mode, auto-load the last conversation
   useEffect(() => {
     if (isChatting) loadLastChatIfNeeded();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -393,6 +393,13 @@ export default function App() {
 
   // ===================== Attachments =====================
   const hasAnyAttachment = () => !!attachedImage || !!attachedAudio;
+
+  // ✅ Explicit “open chat” action (ONLY called from chat box user actions)
+  const openChat = () => {
+    if (!isChatting) setIsChatting(true);
+    setShowSavedChats(false);
+    setFocusTick((x) => x + 1);
+  };
 
   const handleCameraPress = async () => {
     if (loading || attachmentLocked) return;
@@ -402,7 +409,8 @@ export default function App() {
     }
 
     try {
-      setIsChatting(true);
+      // ✅ camera means user wants to chat (attachment flows through chat)
+      openChat();
 
       const perm = await ImagePicker.requestCameraPermissionsAsync();
       if (!perm?.granted) {
@@ -452,7 +460,9 @@ export default function App() {
       Alert.alert('One attachment at a time', 'Remove the current attachment before adding another.');
       return;
     }
-    setIsChatting(true);
+
+    // ✅ mic means user wants to chat (audio flows through chat)
+    openChat();
     setShowAudioRecorder(true);
   };
 
@@ -469,6 +479,9 @@ export default function App() {
   // ===================== Sending =====================
   const handleSend = async (textOrPayload) => {
     if (loading) return;
+
+    // ✅ sending is always an explicit chat action
+    openChat();
 
     const text = typeof textOrPayload === 'string' ? textOrPayload : textOrPayload?.text || '';
 
@@ -497,7 +510,6 @@ export default function App() {
     if (hasAudio) userLineParts.push('🎙️ Audio attached');
     const userLine = userLineParts.join('\n');
 
-    setIsChatting(true);
     setShowSavedChats(false);
     setLoading(true);
 
@@ -556,7 +568,7 @@ export default function App() {
       await saveChat(id, updatedHistory);
 
       // ✅ remember last chat so next enter loads it automatically
-     await AsyncStorage.setItem('last_chat_id', id);
+      await AsyncStorage.setItem(LAST_CHAT_ID_KEY, id);
 
       setAttachmentLocked(false);
     } catch (e) {
@@ -570,81 +582,73 @@ export default function App() {
     }
   };
 
+  // ✅ KEY FIX:
+  // ChatBoxFixed currently calls onFocus from keyboardDidShow + TextInput onFocus.
+  // So we MUST NOT open chat here — only bump focusTick.
   const handleChatFocus = () => {
-    if (!isChatting) setIsChatting(true);
     setFocusTick((x) => x + 1);
   };
 
   const restoreLastChatIfAny = async () => {
-  try {
-    // If we already have messages, don’t overwrite.
-    if (messages?.length) return;
+    try {
+      if (messages?.length) return;
 
-    // 1) Prefer explicit last chat id
-    let lastId = await AsyncStorage.getItem('last_chat_id');
+      let lastId = await AsyncStorage.getItem(LAST_CHAT_ID_KEY);
 
-    // 2) If missing, infer “latest” from saved_chats keys (your saveChat uses Date.now().toString())
-    if (!lastId) {
-      const raw = await AsyncStorage.getItem('saved_chats');
-      const obj = raw ? JSON.parse(raw) : {};
-      const ids = Object.keys(obj || {});
-      if (ids.length) {
-        ids.sort((a, b) => Number(b) - Number(a)); // latest timestamp id first
-        lastId = ids[0];
+      if (!lastId) {
+        const raw = await AsyncStorage.getItem('saved_chats');
+        const obj = raw ? JSON.parse(raw) : {};
+        const ids = Object.keys(obj || {});
+        if (ids.length) {
+          ids.sort((a, b) => Number(b) - Number(a));
+          lastId = ids[0];
+        }
       }
+
+      if (!lastId) return;
+
+      const raw = await AsyncStorage.getItem('saved_chats');
+      const chatsObj = raw ? JSON.parse(raw) : {};
+      const lastMessages = chatsObj?.[lastId];
+
+      if (!Array.isArray(lastMessages) || lastMessages.length === 0) return;
+
+      setChatID(lastId);
+      setThreadKey(lastId);
+      setChatHistory(lastMessages);
+
+      setMessages(
+        lastMessages.map((m) => ({
+          sender: m.role === 'user' ? 'user' : 'api',
+          text: normalizeMsgContent(m.content),
+        }))
+      );
+
+      setFocusTick((x) => x + 1);
+    } catch (e) {
+      console.log('restoreLastChatIfAny error:', e);
     }
+  };
 
-    if (!lastId) return;
+  useEffect(() => {
+    if (isChatting) restoreLastChatIfAny();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isChatting]);
 
-    // Load the chat messages for that id
-    const raw = await AsyncStorage.getItem('saved_chats');
-    const chatsObj = raw ? JSON.parse(raw) : {};
-    const lastMessages = chatsObj?.[lastId];
+  const handleExitChat = () => {
+    if (loading) return;
+    Keyboard.dismiss();
+    setIsChatting(false);
+    setShowSavedChats(false);
 
-    if (!Array.isArray(lastMessages) || lastMessages.length === 0) return;
+    // ✅ Hide messages visually, but keep history so it restores instantly
+    setMessages([]);
 
-    setChatID(lastId);
-    setChatHistory(lastMessages);
-
-    setMessages(
-      lastMessages.map((m) => ({
-        sender: m.role === 'user' ? 'user' : 'api',
-        text: normalizeMsgContent(m.content),
-      }))
-    );
-
-    setFocusTick((x) => x + 1);
-  } catch (e) {
-    console.log('restoreLastChatIfAny error:', e);
-  }
-};
-
-useEffect(() => {
-  if (isChatting) {
-    restoreLastChatIfAny();
-  }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [isChatting]);
-
-
-  // ✅ FIX: Exit chat should NOT wipe messages/history.
-  // You want to come back and see the last chat immediately.
-const handleExitChat = () => {
-  if (loading) return;
-  Keyboard.dismiss();
-  setIsChatting(false);
-  setShowSavedChats(false);
-
-  // ✅ Clear on-screen chat so home is clean
-  setMessages([]);
-
-  // ✅ Keep chatHistory + chatID so we can restore quickly later
-  setActiveChatVehicle(null);
-  setAttachedImage(null);
-  setAttachedAudio(null);
-  setAttachmentLocked(false);
-};
-
+    setActiveChatVehicle(null);
+    setAttachedImage(null);
+    setAttachedAudio(null);
+    setAttachmentLocked(false);
+  };
 
   const handleSelectVehicle = async (v) => {
     const normalized = normalizeVehicle(v);
@@ -742,125 +746,143 @@ const handleExitChat = () => {
 
     return (
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
-        <HomeHeader
-          garageName={garageName}
-          setGarageName={setGarageName}
-          onSettingsPress={() => setShowSettings(true)}
-        />
-        <SettingsModal visible={showSettings} onClose={() => setShowSettings(false)} />
+        <View style={styles.pageContent}>
+          <HomeHeader
+            garageName={garageName}
+            setGarageName={setGarageName}
+            onSettingsPress={() => setShowSettings(true)}
+          />
+          <SettingsModal visible={showSettings} onClose={() => setShowSettings(false)} />
 
-        {!isChatting && (
-          <>
-            <VehicleSelector
-              selectedVehicle={vehicle}
-              onSelectVehicle={handleSelectVehicle}
-              onShowRewardedAd={showRewardedAd}
-              gateCameraWithAd={false}
-              triggerVinCamera={() => setShowCamera(true)}
-            />
-            <ServiceBox selectedVehicle={vehicle} />
-          </>
-        )}
+          {!isChatting && (
+            <>
+              <VehicleSelector
+                selectedVehicle={vehicle}
+                onSelectVehicle={handleSelectVehicle}
+                onShowRewardedAd={showRewardedAd}
+                gateCameraWithAd={false}
+                triggerVinCamera={() => setShowCamera(true)}
+              />
+              <ServiceBox selectedVehicle={vehicle} />
+            </>
+          )}
 
-        {!isChatting && (
-          <Animated.View
-            style={[
-              styles.robotWrapper,
-              { marginTop: 20, transform: [{ translateY: robotTranslateY }, { scale: robotScale }] },
-            ]}
-          >
-            <RobotAssistant isChatting={isChatting} />
-          </Animated.View>
-        )}
-
-        {isChatting && (
-          <View style={styles.chatTopBar}>
-            <TouchableOpacity style={styles.exitButton} onPress={handleExitChat} disabled={loading}>
-              <Text style={[styles.exitButtonText, loading && { opacity: 0.6 }]}>Exit Chat</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.topBarBtn, showSavedChats && styles.topBarBtnActive]}
-              onPress={() => {
-                if (loading) return;
-                Keyboard.dismiss();
-                setShowSavedChats((prev) => !prev);
-              }}
-              disabled={loading}
+          {!isChatting && (
+            <Animated.View
+              style={[
+                styles.robotWrapper,
+                { marginTop: 20, transform: [{ translateY: robotTranslateY }, { scale: robotScale }] },
+              ]}
             >
-              <Text style={[styles.topBarBtnText, loading && { opacity: 0.6 }]}>Saved</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+              <RobotAssistant isChatting={isChatting} />
+            </Animated.View>
+          )}
 
-        <View style={styles.chatMessagesArea}>
-          <ChatMessages
-            messages={messages}
-            loading={loading}
-            focusTick={focusTick}
-            bottomInset={92}
-            threadKey={threadKey}
+          {isChatting && (
+            <View style={styles.chatTopBar}>
+              <TouchableOpacity style={styles.exitButton} onPress={handleExitChat} disabled={loading}>
+                <Text style={[styles.exitButtonText, loading && { opacity: 0.6 }]}>Exit Chat</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.topBarBtn, showSavedChats && styles.topBarBtnActive]}
+                onPress={() => {
+                  if (loading) return;
+                  Keyboard.dismiss();
+                  setShowSavedChats((prev) => !prev);
+                }}
+                disabled={loading}
+              >
+                <Text style={[styles.topBarBtnText, loading && { opacity: 0.6 }]}>  Saved   </Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* ✅ Chat messages only when chatting */}
+          {isChatting && (
+            <View style={styles.chatMessagesArea}>
+              <ChatMessages
+                messages={messages}
+                loading={loading}
+                focusTick={focusTick}
+                bottomInset={120} // dock height-ish
+                threadKey={threadKey}
+              />
+            </View>
+          )}
+
+          <SavedChatsPanel
+            visible={isChatting && showSavedChats}
+            onClose={() => setShowSavedChats(false)}
+            onSelect={async (chat) => {
+              if (loading) return;
+
+              if (!chat) {
+                setChatID(null);
+                setThreadKey('new');
+                setChatHistory([]);
+                setMessages([]);
+                setShowSavedChats(false);
+                setActiveChatVehicle(null);
+                setAttachedImage(null);
+                setAttachedAudio(null);
+                setAttachmentLocked(false);
+                await AsyncStorage.removeItem(LAST_CHAT_ID_KEY);
+                setFocusTick((x) => x + 1);
+                return;
+              }
+
+              const id = chat.id || Date.now().toString();
+              const history = Array.isArray(chat.messages) ? chat.messages : [];
+
+              setChatID(id);
+              setThreadKey(id);
+              setChatHistory(history);
+
+              setMessages(
+                history.map((m) => ({
+                  sender: m.role === 'user' ? 'user' : 'api',
+                  text: normalizeMsgContent(m.content),
+                }))
+              );
+
+              await AsyncStorage.setItem(LAST_CHAT_ID_KEY, id);
+
+              setShowSavedChats(false);
+              setActiveChatVehicle(null);
+              setIsChatting(true);
+              setFocusTick((x) => x + 1);
+            }}
           />
         </View>
 
-        <SavedChatsPanel
-          visible={isChatting && showSavedChats}
-          onClose={() => setShowSavedChats(false)}
-          onSelect={async (chat) => {
-            if (loading) return;
+        {/* ✅ FIXED BOTTOM DOCK (always visible) */}
+        <View style={styles.chatDock}>
+          <ChatBoxFixed
+            onSend={handleSend}
+            // ✅ do NOT open chat on focus; ChatBoxFixed triggers onFocus on keyboardDidShow too
+            onFocus={handleChatFocus}
+            onMicPress={handleMicPress}
+            onCameraPress={handleCameraPress}
+            onClearAudio={clearAttachedAudio}
+            onClearImage={clearAttachedImage}
+            attachedAudio={attachedAudio ? { uri: attachedAudio.uri, durationMs: attachedAudio.durationMs } : null}
+            attachedImage={attachedImage ? { uri: attachedImage.uri } : null}
+            isSending={loading || attachmentLocked}
+          />
 
-            if (!chat) {
-              setChatID(null);
-              setThreadKey('new');
-              setChatHistory([]);
-              setMessages([]);
-              setShowSavedChats(false);
-              setActiveChatVehicle(null);
-              setAttachedImage(null);
-              setAttachedAudio(null);
-              setAttachmentLocked(false);
-              await AsyncStorage.removeItem(LAST_CHAT_ID_KEY);
-              setFocusTick((x) => x + 1);
-              return;
-            }
-
-            const id = chat.id || Date.now().toString();
-            const history = Array.isArray(chat.messages) ? chat.messages : [];
-
-            setChatID(id);
-            setThreadKey(id);
-            setChatHistory(history);
-
-            setMessages(
-              history.map((m) => ({
-                sender: m.role === 'user' ? 'user' : 'api',
-                text: normalizeMsgContent(m.content),
-              }))
-            );
-
-            await AsyncStorage.setItem(LAST_CHAT_ID_KEY, id);
-
-            setShowSavedChats(false);
-            setActiveChatVehicle(null);
-            setIsChatting(true);
-            setFocusTick((x) => x + 1);
-          }}
-        />
-
-        <ChatBoxFixed
-          onSend={handleSend}
-          onFocus={handleChatFocus}
-          // ✅ pass both prop names in case ChatBoxFixed uses older naming
-          onMicPress={handleMicPress}
-          onMic={handleMicPress}
-          onCameraPress={handleCameraPress}
-          onCamera={handleCameraPress}
-          onClearAudio={clearAttachedAudio}
-          onClearImage={clearAttachedImage}
-          attachedAudio={attachedAudio ? { uri: attachedAudio.uri, durationMs: attachedAudio.durationMs } : null}
-          attachedImage={attachedImage ? { uri: attachedImage.uri } : null}
-          isSending={loading || attachmentLocked}
-        />
+          {/* ✅ Optional: make “tap anywhere on dock” open chat WITHOUT relying on focus */}
+          {!isChatting && (
+            <TouchableOpacity
+              style={styles.dockTapCatcher}
+              onPress={() => {
+                // only open chat when user taps dock intentionally
+                openChat();
+              }}
+              activeOpacity={1}
+            />
+          )}
+        </View>
       </KeyboardAvoidingView>
     );
   };
@@ -931,7 +953,6 @@ const handleExitChat = () => {
             filename: meta.filename,
           });
 
-          // ✅ make sure the chat UI snaps down to show the pill
           setFocusTick((x) => x + 1);
         }}
       />
@@ -952,10 +973,20 @@ const handleExitChat = () => {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#121212', paddingVertical: 50, paddingHorizontal: 20 },
+  // ✅ critical: remove padding from container so dock doesn't get pushed around
+  container: { flex: 1, backgroundColor: '#121212' },
   loading: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
-  chatMessagesArea: { flex: 1, marginBottom: 10 },
+  // ✅ move padding to content instead
+  pageContent: {
+    flex: 1,
+    paddingTop: 50,
+    paddingHorizontal: 20,
+    // ✅ prevents ServiceBox inputs from being hidden under dock
+    paddingBottom: 33,
+  },
+
+  chatMessagesArea: { flex: 1, },
   robotWrapper: { alignItems: 'center' },
 
   chatTopBar: {
@@ -965,7 +996,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 8,
     gap: 10,
-    width: '50%',
+    width: '52%',
   },
   exitButton: {
     flex: 1,
@@ -981,7 +1012,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 14,
-    backgroundColor: '#333',
+    backgroundColor: '#444',
     borderWidth: 1,
     borderColor: '#444',
   },
@@ -1001,4 +1032,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   decodeTitle: { color: '#fff', fontSize: 18, marginBottom: 5 },
+
+  // ✅ truly fixed dock
+  chatDock: {
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: Platform.OS === 'ios' ? 18 : 12,
+    backgroundColor: 'rgba(18,18,18,0.92)',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.08)',
+  },
+
+  // Optional: invisible layer that lets the whole dock area open chat intentionally
+  dockTapCatcher: {
+    ...StyleSheet.absoluteFillObject,
+  },
 });
