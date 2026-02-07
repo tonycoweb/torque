@@ -867,7 +867,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                     </TouchableOpacity>
                   </View>
                   <Text style={styles.mileageBarHint}>
-                    {vehicleMiles ? `Using ${formatThousands(vehicleMiles)} mi for urgency.` : 'Set mileage to enable urgency colors.'}
+                    {vehicleMiles ? `Using ${formatThousands(vehicleMiles)} mi for updating.` : 'Set mileage to enable urgency colors.'}
                   </Text>
                 </View>
               )}
@@ -906,7 +906,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                     activeOpacity={0.95}
                     disabled={isExporting}
                   >
-                    <Text style={styles.ctaBtnText}>+ Add Custom Service</Text>
+                    <Text style={styles.ctaBtnText}>+ Custom Service</Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
@@ -933,14 +933,6 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                 windowSize={5}
                 keyboardShouldPersistTaps="handled"
               >
-                {hasGeneratedServices && (
-                  <View style={{ paddingHorizontal: 16, marginBottom: 8 }}>
-                    {/* Keeping bottom Add Custom as a secondary access point */}
-                    <TouchableOpacity style={styles.ctaBtnSecondary} onPress={openCustomOverlay} activeOpacity={0.95}>
-                      <Text style={styles.ctaBtnText}>+ Add Custom Service</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
 
                 {listToRender.map((service) => {
                   const isEditing = editingHeaderId === service.id;
@@ -1077,7 +1069,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                           ? remaining <= 0
                             ? `0% health • ${formatThousands(String(Math.abs(remaining)))} mi overdue${timeRemainingText ? ` • ${timeRemainingText}` : ''}`
                             : `${Math.max(1, Math.round(progress * 100))}% health • ${formatThousands(String(remaining))} mi left${timeRemainingText ? ` • ${timeRemainingText}` : ''}`
-                          : `Tracking starts after first completion${timeRemainingText ? ` • ${timeRemainingText}` : ''}`
+                          : `Updating starts after first completion${timeRemainingText ? ` • ${timeRemainingText}` : ''}`
                         }
                       </Text>
 
@@ -1171,16 +1163,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
                   );
                 })}
 
-                <View style={{ paddingHorizontal: 16, marginTop: 8, marginBottom: 120 }}>
-                  <TouchableOpacity style={styles.ctaBtnSecondary} onPress={openCustomOverlay} activeOpacity={0.95}>
-                    <Text style={styles.ctaBtnText}>+ Add Custom Service</Text>
-                  </TouchableOpacity>
-                </View>
               </ScrollView>
-
-              <TouchableOpacity style={styles.addFab} onPress={openCustomOverlay} activeOpacity={0.9}>
-                <MaterialIcons name="add" size={26} color="#fff" />
-              </TouchableOpacity>
 
               {/* ===================== OVERLAYS ===================== */}
 
@@ -1587,7 +1570,7 @@ const styles = StyleSheet.create({
   mileage: { color: '#fff', fontSize: 19, fontWeight: '700', marginVertical: 6, textAlign: 'center' },
 
   modalWrapper: { flex: 1, backgroundColor: '#121212' },
-  scrollContent: { flexGrow: 1, paddingBottom: 160 },
+  scrollContent: { flexGrow: 1, paddingBottom: 300, paddingTop: 10},
   modalBox: { backgroundColor: '#121212', borderRadius: 24, marginHorizontal: 16, elevation: 10, paddingBottom: 20 },
 
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, marginBottom: 8, width: '100%' },
@@ -1620,7 +1603,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 5,
   },
-  ctaBtnText: { color: '#0b1220', fontSize: 17, fontWeight: '900' },
+  ctaBtnText: { color: '#0b1220', fontSize: 14, fontWeight: '900' },
   ctaHint: { color: '#9aa5b1', fontSize: 12, marginTop: 8, marginLeft: 4 },
 
   // Mileage card
@@ -1778,7 +1761,7 @@ const styles = StyleSheet.create({
     height: '100%',
     borderRadius: 999,
   },
-  progressHint: { color: '#ddd', marginTop: 8, fontSize: 13, fontWeight: '700' },
+  progressHint: { color: '#ddd', marginTop: 8, fontSize: 13, fontWeight: '700', alignSelf: 'center' },
 
   // Details panel
   detailsPanel: {
@@ -1804,7 +1787,7 @@ const styles = StyleSheet.create({
   thumbnail: { width: '100%', height: '100%', borderRadius: 8 },
 
   // Actions
-  buttonRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 16 },
+  buttonRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 16, alignItems: 'center' },
   actionBtn: {
     flexDirection: 'row',
     alignItems: 'center',

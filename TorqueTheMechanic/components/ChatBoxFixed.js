@@ -25,12 +25,7 @@ export default function ChatBoxFixed({
   const [inputText, setInputText] = useState('');
   const inputRef = useRef(null);
 
-  useEffect(() => {
-    const sub = Keyboard.addListener('keyboardDidShow', () => {
-      if (onFocus) onFocus();
-    });
-    return () => sub?.remove?.();
-  }, [onFocus]);
+ 
 
   const hasImage = !!attachedImage?.uri;
   const hasAudio = !!attachedAudio?.uri;

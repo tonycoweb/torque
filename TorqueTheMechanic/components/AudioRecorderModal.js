@@ -481,9 +481,8 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
 
         {/* small hint line */}
         <View style={styles.hintRow}>
-          <MaterialCommunityIcons name="information-outline" size={14} color="#888" />
           <Text style={styles.hintText}>
-            Max 10s • Record your vehicle's sound for Torque to attempt to help diagnose• ✓ attaches to chat • (x) try again
+
           </Text>
         </View>
       </View>

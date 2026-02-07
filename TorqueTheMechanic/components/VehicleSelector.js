@@ -89,8 +89,8 @@ export default function VehicleSelector({
 
   useEffect(() => {
     const isOpen = modalVisible || showVinModal || editMode;
-    modalOpacity.value = withTiming(isOpen ? 1 : 0, { duration: 250 });
-    modalTranslateY.value = withSpring(isOpen ? 0 : 100, { damping: 18, stiffness: 120 });
+    modalOpacity.value = withTiming(isOpen ? 1 : 0, { duration: 220 });
+    modalTranslateY.value = withSpring(isOpen ? 0 : 100, { damping: 18, stiffness: 130 });
   }, [modalVisible, showVinModal, editMode]);
 
   useEffect(() => {
@@ -129,7 +129,7 @@ export default function VehicleSelector({
       const timeoutId = setTimeout(() => resolveOnce(false), 20000); // hard stop in 20s
 
       rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
-        try { rewarded.show(); } catch { /* show may throw if already closed */ }
+        try { rewarded.show(); } catch {}
       });
       rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => {
         clearTimeout(timeoutId);
@@ -137,7 +137,6 @@ export default function VehicleSelector({
       });
       rewarded.addAdEventListener(RewardedAdEventType.CLOSED, () => {
         clearTimeout(timeoutId);
-        // If CLOSED happens without EARNED_REWARD first, consider not rewarded.
         resolveOnce(false);
       });
       rewarded.addAdEventListener(RewardedAdEventType.ERROR, () => {
@@ -149,7 +148,6 @@ export default function VehicleSelector({
     });
 
   const showRewarded = async () => {
-    // Wrap the external handler with our guard, and show overlay to unify UX
     setOverlay('thinking');
     setAdLoading(true);
     try {
@@ -171,14 +169,12 @@ export default function VehicleSelector({
     if (gateCameraWithAd) {
       const rewarded = await showRewarded();
       if (!rewarded) {
-        if (isMountedRef.current) {
-          Alert.alert('Ad Required', 'Please watch the full ad to use the VIN camera.');
-        }
+        if (isMountedRef.current) Alert.alert('Ad Required', 'Please watch the full ad to use the VIN camera.');
         return;
       }
     }
     setShowVinModal(false);
-    triggerVinCamera?.(); // ✅ open VinCamera (App mounts it)
+    triggerVinCamera?.();
   };
 
   // ---------- Typed VIN flow ----------
@@ -189,16 +185,12 @@ export default function VehicleSelector({
       return;
     }
 
-    // Show ad first
     const rewarded = await showRewarded();
     if (!rewarded) {
-      if (isMountedRef.current) {
-        Alert.alert('Ad Required', 'Please watch the full ad to unlock VIN decoding.');
-      }
+      if (isMountedRef.current) Alert.alert('Ad Required', 'Please watch the full ad to unlock VIN decoding.');
       return;
     }
 
-    // Decode VIN (with unified overlay while working)
     if (isMountedRef.current) {
       setDecoding(true);
       setOverlay('thinking');
@@ -230,13 +222,11 @@ export default function VehicleSelector({
       setShowVinModal(false);
       setTypedVin('');
     } catch (e) {
-      if (isMountedRef.current) {
-        Alert.alert('❌ VIN Decode Failed', e?.message || 'Please check the VIN and try again.');
-      }
+      if (isMountedRef.current) Alert.alert('❌ VIN Decode Failed', e?.message || 'Please check the VIN and try again.');
     } finally {
       if (isMountedRef.current) {
         setDecoding(false);
-        setOverlay(null); // always clear thinking overlay
+        setOverlay(null);
       }
     }
   };
@@ -274,7 +264,7 @@ export default function VehicleSelector({
         transmission: vehicle.transmission || 'Automatic',
       });
       setEditMode(true);
-    }, 300);
+    }, 250);
   };
 
   const handleSaveEdit = async () => {
@@ -290,11 +280,11 @@ export default function VehicleSelector({
 
     await saveVehicle(updatedVehicle);
     if (!isMountedRef.current) return;
+
     const updatedList = vehicles.map(v => (v.vin === updatedVehicle.vin ? updatedVehicle : v));
     setVehicles(updatedList);
-    if (selectedVehicle?.vin === updatedVehicle.vin) {
-      onSelectVehicle(updatedVehicle);
-    }
+    if (selectedVehicle?.vin === updatedVehicle.vin) onSelectVehicle(updatedVehicle);
+
     setEditMode(false);
     setEditableVehicle(null);
   };
@@ -312,13 +302,18 @@ export default function VehicleSelector({
       <TouchableOpacity
         style={styles.vehicleCard}
         onPress={() => { onSelectVehicle(withId); setModalVisible(false); }}
-        activeOpacity={0.9}
+        activeOpacity={0.92}
       >
         <View style={styles.vehicleHeaderRow}>
           <Text style={styles.vehicleTitle} numberOfLines={1}>
             {withId.year} {withId.make} {withId.model}
           </Text>
-          {!!withId.vin && <Text style={styles.vinBadge}>{withId.vin.slice(0, 8)}…</Text>}
+
+          {!!withId.vin && (
+            <View style={styles.vinPill}>
+              <Text style={styles.vinPillText}>{withId.vin.slice(0, 8)}…</Text>
+            </View>
+          )}
         </View>
 
         <Text style={styles.vehicleDetails} numberOfLines={2}>
@@ -328,11 +323,20 @@ export default function VehicleSelector({
         <View style={styles.rowDivider} />
 
         <View style={styles.inlineBtns}>
-          <TouchableOpacity onPress={() => handleEdit(withId)} style={[styles.rowBtn, styles.rowBtnNeutral]} activeOpacity={0.9}>
-            <Text style={styles.rowBtnText}>✏️ Edit</Text>
+          <TouchableOpacity
+            onPress={() => handleEdit(withId)}
+            style={[styles.rowBtn, styles.rowBtnNeutral]}
+            activeOpacity={0.9}
+          >
+            <Text style={styles.rowBtnText}>Edit</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => handleDelete(withId.vin)} style={[styles.rowBtn, styles.rowBtnDanger]} activeOpacity={0.9}>
-            <Text style={styles.rowBtnText}>🗑️ Delete</Text>
+
+          <TouchableOpacity
+            onPress={() => handleDelete(withId.vin)}
+            style={[styles.rowBtn, styles.rowBtnDanger]}
+            activeOpacity={0.9}
+          >
+            <Text style={[styles.rowBtnText, styles.rowBtnTextDanger]}>Delete</Text>
           </TouchableOpacity>
         </View>
       </TouchableOpacity>
@@ -361,16 +365,20 @@ export default function VehicleSelector({
       <Modal visible={modalVisible} animationType="slide" onRequestClose={() => setModalVisible(false)}>
         <Animated.View style={[styles.EditModalContainer, animatedModalStyle]}>
           <SafeAreaView style={styles.modalContainer}>
-            <TouchableOpacity style={styles.closeIconMod} onPress={() => setModalVisible(false)}>
-              <Text style={styles.closeIconTextMod}>✖</Text>
-            </TouchableOpacity>
-            <Text style={styles.modalTitle}>Your Garage</Text>
+            <View style={styles.modalHeaderRow}>
+              <View style={{ width: 44 }} />
+              <Text style={styles.modalTitle}>Your Garage</Text>
+              <TouchableOpacity style={styles.closePill} onPress={() => setModalVisible(false)} activeOpacity={0.9}>
+                <Text style={styles.closePillText}>✕</Text>
+              </TouchableOpacity>
+            </View>
 
             <FlatList
               data={vehicles}
               keyExtractor={(item) => ensureId(item).id}
               renderItem={({ item }) => <VehicleRow item={item} />}
-              contentContainerStyle={{ paddingBottom: 40 }}
+              contentContainerStyle={styles.garageListContent}
+              showsVerticalScrollIndicator={false}
             />
 
             <TouchableOpacity style={styles.addNewButton} onPress={handleAddNew} activeOpacity={0.95}>
@@ -475,60 +483,89 @@ export default function VehicleSelector({
       {editMode && editableVehicle && (
         <Modal visible={editMode} animationType="slide" onRequestClose={() => setEditMode(false)}>
           <Animated.View style={[styles.EditModalContainer, animatedModalStyle]}>
-            <TouchableOpacity onPress={() => setEditMode(false)} style={styles.closeIconMod}>
-              <Text style={styles.closeIconTextMod}>✖</Text>
-            </TouchableOpacity>
-            <View style={styles.modalContainer}>
-              <Text style={styles.modalTitle}>Edit Vehicle</Text>
-              {[
-                { key: 'year', label: 'Year' },
-                { key: 'make', label: 'Make' },
-                { key: 'model', label: 'Model' },
-                { key: 'engine', label: 'Engine' },
-                { key: 'transmission', label: 'Transmission' },
-                { key: 'mpgCity', label: 'MPG (City)' },
-                { key: 'mpgHighway', label: 'MPG (Highway)' },
-                { key: 'hp', label: 'Horsepower (HP)' },
-                { key: 'gvw', label: 'GVW (Gross Vehicle Weight)' },
-              ].map(({ key, label }) => (
-                <View key={key} style={{ marginBottom: 12 }}>
-                  <Text style={styles.inputLabel}>{label}</Text>
-                  {key === 'transmission' ? (
-                    <View style={styles.transmissionSelector}>
-                      <TouchableOpacity
-                        style={[styles.transmissionButton, editableVehicle.transmission === 'Automatic' && styles.transmissionButtonSelected]}
-                        onPress={() => setEditableVehicle({ ...editableVehicle, transmission: 'Automatic' })}
-                        activeOpacity={0.9}
-                      >
-                        <Text style={[styles.transmissionButtonText, editableVehicle.transmission === 'Automatic' && styles.transmissionButtonTextSelected]}>
-                          Automatic
-                        </Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.transmissionButton, editableVehicle.transmission === 'Manual' && styles.transmissionButtonSelected]}
-                        onPress={() => setEditableVehicle({ ...editableVehicle, transmission: 'Manual' })}
-                        activeOpacity={0.9}
-                      >
-                        <Text style={[styles.transmissionButtonText, editableVehicle.transmission === 'Manual' && styles.transmissionButtonTextSelected]}>
-                          Manual
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                  ) : (
-                    <TextInput
-                      style={styles.input}
-                      placeholder={label}
-                      placeholderTextColor="#777"
-                      value={editableVehicle[key]?.toString() || ''}
-                      onChangeText={(text) => setEditableVehicle({ ...editableVehicle, [key]: text })}
-                    />
-                  )}
-                </View>
-              ))}
-              <TouchableOpacity onPress={handleSaveEdit} style={styles.addNewButton} activeOpacity={0.95}>
-                <Text style={styles.addNewText}>💾 Save Changes</Text>
-              </TouchableOpacity>
-            </View>
+            <SafeAreaView style={styles.modalContainer}>
+              <View style={styles.modalHeaderRow}>
+                <View style={{ width: 44 }} />
+                <Text style={styles.modalTitle}>Edit Vehicle</Text>
+                <TouchableOpacity style={styles.closePill} onPress={() => setEditMode(false)} activeOpacity={0.9}>
+                  <Text style={styles.closePillText}>✕</Text>
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView
+                contentContainerStyle={{ paddingBottom: 24, paddingHorizontal: 2 }}
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+              >
+                {[
+                  { key: 'year', label: 'Year' },
+                  { key: 'make', label: 'Make' },
+                  { key: 'model', label: 'Model' },
+                  { key: 'engine', label: 'Engine' },
+                  { key: 'transmission', label: 'Transmission' },
+                  { key: 'mpgCity', label: 'MPG (City)' },
+                  { key: 'mpgHighway', label: 'MPG (Highway)' },
+                  { key: 'hp', label: 'Horsepower (HP)' },
+                  { key: 'gvw', label: 'GVW (Gross Vehicle Weight)' },
+                ].map(({ key, label }) => (
+                  <View key={key} style={styles.editField}>
+                    <Text style={styles.inputLabel}>{label}</Text>
+
+                    {key === 'transmission' ? (
+                      <View style={styles.transmissionSelector}>
+                        <TouchableOpacity
+                          style={[
+                            styles.transmissionButton,
+                            editableVehicle.transmission === 'Automatic' && styles.transmissionButtonSelected,
+                          ]}
+                          onPress={() => setEditableVehicle({ ...editableVehicle, transmission: 'Automatic' })}
+                          activeOpacity={0.9}
+                        >
+                          <Text
+                            style={[
+                              styles.transmissionButtonText,
+                              editableVehicle.transmission === 'Automatic' && styles.transmissionButtonTextSelected,
+                            ]}
+                          >
+                            Automatic
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[
+                            styles.transmissionButton,
+                            editableVehicle.transmission === 'Manual' && styles.transmissionButtonSelected,
+                          ]}
+                          onPress={() => setEditableVehicle({ ...editableVehicle, transmission: 'Manual' })}
+                          activeOpacity={0.9}
+                        >
+                          <Text
+                            style={[
+                              styles.transmissionButtonText,
+                              editableVehicle.transmission === 'Manual' && styles.transmissionButtonTextSelected,
+                            ]}
+                          >
+                            Manual
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : (
+                      <TextInput
+                        style={styles.input}
+                        placeholder={label}
+                        placeholderTextColor="#777"
+                        value={editableVehicle[key]?.toString() || ''}
+                        onChangeText={(text) => setEditableVehicle({ ...editableVehicle, [key]: text })}
+                      />
+                    )}
+                  </View>
+                ))}
+
+                <TouchableOpacity onPress={handleSaveEdit} style={styles.saveButton} activeOpacity={0.95}>
+                  <Text style={styles.saveButtonText}>Save Changes</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </SafeAreaView>
           </Animated.View>
         </Modal>
       )}
@@ -539,67 +576,171 @@ export default function VehicleSelector({
 // ---------- STYLES ----------
 const BLUE = '#3b82f6';
 const GREEN = '#22c55e';
+const RED = '#FF6666';
 
 const styles = StyleSheet.create({
   container: { width: '100%', paddingVertical: 20, alignSelf: 'center' },
 
   placeholder: {
-    backgroundColor: '#444', padding: 32, borderRadius: 16, alignItems: 'center',
-    borderColor: '#666', borderWidth: 1,
+    backgroundColor: '#2a2a2a',
+    paddingVertical: 26,
+    paddingHorizontal: 18,
+    borderRadius: 18,
+    alignItems: 'center',
+    borderColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
   },
-  plus: { fontSize: 40, color: '#ccc' },
-  label: { fontSize: 16, color: '#aaa', marginTop: 8 },
+  plus: { fontSize: 40, color: '#d1d5db' },
+  label: { fontSize: 16, color: '#cbd5e1', marginTop: 8, fontWeight: '700' },
 
   selectedCard: {
-    backgroundColor: '#333', padding: 24, borderRadius: 16, alignItems: 'center',
-    borderColor: 'rgba(255,255,255,0.08)', borderWidth: 1,
-    shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 6,
-  },
-  selectedTitle: { fontSize: 20, fontWeight: '900', color: '#fff' },
-  selectedSub: { fontSize: 14, color: '#ddd', marginVertical: 4, fontWeight: '700' },
-  stats: { fontSize: 12.5, color: '#bbb' },
-
-  // Modals
-  modalContainer: { flex: 1, backgroundColor: '#121212', padding: 24, paddingTop: 50 },
-  modalTitle: { fontSize: 22, fontWeight: '900', color: '#fff', marginBottom: 12, alignSelf: 'center' },
-  modalSubtitle: { fontSize: 18, fontWeight: '900', color: '#eee', marginTop: 12, marginBottom: 6, textAlign: 'center' },
-
-  // Garage rows (restyled)
-  vehicleCard: {
-    backgroundColor: '#1b1b1b',
-    padding: 16,
-    marginBottom: 14,
+    backgroundColor: '#3a3a3a',
+    paddingVertical: 22,
+    paddingHorizontal: 18,
     borderRadius: 18,
+    alignItems: 'center',
+    borderColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
     shadowColor: '#000',
-    shadowOpacity: 0.18,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.14,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
     elevation: 6,
   },
-  vehicleHeaderRow: { flexDirection: 'row', alignItems: 'center' },
-  vehicleTitle: { flex: 1, fontSize: 18, fontWeight: '900', color: '#fff' },
-  vinBadge: {
-    backgroundColor: 'rgba(255,255,255,0.10)',
-    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999,
-    color: '#fff', fontSize: 12, fontWeight: '800',
+  selectedTitle: { fontSize: 20, fontWeight: '900', color: '#fff' },
+  selectedSub: { fontSize: 14, color: '#e5e7eb', marginVertical: 4, fontWeight: '700' },
+  stats: { fontSize: 12.5, color: '#cbd5e1', opacity: 0.9 },
+
+  // Modals
+  modalContainer: {
+    flex: 1,
+    backgroundColor: '#0b0b0b',
+    paddingHorizontal: 16,
+    paddingTop: 10,
   },
-  vehicleDetails: { marginTop: 8, fontSize: 13.5, color: '#ddd' },
-  rowDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.08)', marginVertical: 12 },
+  modalHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+    paddingTop: 8,
+    paddingBottom: 10,
+  },
+  modalTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: '#fff',
+    textAlign: 'center',
+  },
+  modalSubtitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#eee',
+    marginTop: 12,
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+
+  closePill: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  closePillText: { color: '#fff', fontSize: 20, fontWeight: '900' },
+
+  // FlatList spacing (LESS side padding + tighter feel)
+  garageListContent: {
+    paddingTop: 6,
+    paddingBottom: 18,
+    paddingHorizontal: 2,
+  },
+
+  // Garage rows (modern + tighter)
+  vehicleCard: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    marginBottom: 12,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    shadowColor: '#000',
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 4,
+  },
+  vehicleHeaderRow: { flexDirection: 'row', alignItems: 'center' },
+  vehicleTitle: { flex: 1, fontSize: 18, fontWeight: '900', color: '#fff', letterSpacing: 0.2 },
+
+  vinPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  vinPillText: { color: '#e5e7eb', fontSize: 12, fontWeight: '800' },
+
+  vehicleDetails: {
+    marginTop: 8,
+    fontSize: 13.5,
+    color: 'rgba(255,255,255,0.78)',
+    lineHeight: 18,
+  },
+  rowDivider: {
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    marginVertical: 12,
+  },
 
   inlineBtns: { flexDirection: 'row', gap: 10, justifyContent: 'flex-end' },
-  rowBtn: { paddingVertical: 10, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1 },
-  rowBtnNeutral: { backgroundColor: 'rgba(255,255,255,0.10)', borderColor: 'rgba(255,255,255,0.15)' },
-  rowBtnDanger: { backgroundColor: '#8b1d1d', borderColor: '#8b1d1d' },
-  rowBtnText: { color: '#fff', fontWeight: '800' },
-
-  addNewButton: {
-    marginTop: 20, padding: 16, backgroundColor: GREEN, borderRadius: 14, alignItems: 'center',
-    width: '80%', alignSelf: 'center', shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 5, shadowOffset: { width: 0, height: 2 }, elevation: 5,
+  rowBtn: {
+    height: 40,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    minWidth: 96,
   },
-  addNewText: { color: '#0b1220', fontSize: 17, fontWeight: '900' },
+  rowBtnNeutral: {
+    backgroundColor: 'rgba(0,0,0,0.22)',
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  rowBtnDanger: {
+    backgroundColor: 'rgba(255,102,102,0.10)',
+    borderColor: 'rgba(255,102,102,0.45)',
+  },
+  rowBtnText: { color: '#fff', fontWeight: '900', fontSize: 15 },
+  rowBtnTextDanger: { color: '#ffe4e6' },
 
+  // Bottom action (slightly smaller + cleaner)
+  addNewButton: {
+    marginTop: 12,
+    marginBottom: 10,
+    height: 56,
+    backgroundColor: GREEN,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '92%',
+    alignSelf: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 5,
+  },
+  addNewText: { color: '#07110a', fontSize: 18, fontWeight: '900', letterSpacing: 0.2 },
+
+  // Add VIN modal (unchanged)
   vinModalContainer: {
     flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', justifyContent: 'center', alignItems: 'center', paddingTop: 50,
   },
@@ -608,7 +749,15 @@ const styles = StyleSheet.create({
     paddingVertical: 24, paddingHorizontal: 20, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
   },
   vinScrollContent: { paddingBottom: 60, alignItems: 'center' },
-  closeIcon: { position: 'absolute', right: 16, zIndex: 10, backgroundColor: '#fff', borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4 },
+  closeIcon: {
+    position: 'absolute',
+    right: 16,
+    zIndex: 10,
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
   closeIconText: { fontSize: 22, color: '#000', fontWeight: 'bold' },
 
   optionButton: {
@@ -621,22 +770,66 @@ const styles = StyleSheet.create({
   helperText: { color: '#94a3b8', fontSize: 14, textAlign: 'center', marginVertical: 10, lineHeight: 20 },
   sectionTitle: { fontSize: 18, color: '#eee', fontWeight: '900', marginTop: 6, marginBottom: 8, textAlign: 'center' },
   vinCardWrapper: { width: '100%' },
-  vinCardStacked: { alignItems: 'center', backgroundColor: '#1e293b', padding: 20, borderRadius: 16, marginBottom: 20, width: '100%', borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)' },
+  vinCardStacked: {
+    alignItems: 'center',
+    backgroundColor: '#1e293b',
+    padding: 20,
+    borderRadius: 16,
+    marginBottom: 20,
+    width: '100%',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+  },
   vinImageLarge: { width: '100%', height: 180, resizeMode: 'contain', marginTop: 12, borderRadius: 8 },
   vinLabelLarge: { fontSize: 16, fontWeight: '800', color: '#e2e8f0', textAlign: 'center' },
 
-  inputLabel: { color: '#ccc', marginBottom: 4, fontSize: 14, fontWeight: '800' },
-  input: { backgroundColor: '#1b1b1b', color: '#fff', padding: 12, borderRadius: 10, borderColor: '#333', borderWidth: 1 },
+  // Edit modal fields (cleaner)
+  editField: {
+    marginBottom: 12,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 16,
+    padding: 12,
+  },
+  inputLabel: { color: '#e5e7eb', marginBottom: 6, fontSize: 13, fontWeight: '900' },
+  input: {
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    color: '#fff',
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+  },
 
-  transmissionSelector: { flexDirection: 'row', backgroundColor: '#1b1b1b', borderRadius: 10, borderColor: '#333', borderWidth: 1, height: 44, overflow: 'hidden' },
+  transmissionSelector: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    borderRadius: 12,
+    borderColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    height: 44,
+    overflow: 'hidden',
+  },
   transmissionButton: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  transmissionButtonSelected: { backgroundColor: '#22c55e' },
-  transmissionButtonText: { color: '#fff', fontSize: 14, fontWeight: '700' },
-  transmissionButtonTextSelected: { color: '#0b1220', fontWeight: '900' },
+  transmissionButtonSelected: { backgroundColor: GREEN },
+  transmissionButtonText: { color: '#fff', fontSize: 14, fontWeight: '800' },
+  transmissionButtonTextSelected: { color: '#07110a', fontWeight: '900' },
+
+  saveButton: {
+    marginTop: 10,
+    height: 56,
+    borderRadius: 18,
+    backgroundColor: BLUE,
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '92%',
+    alignSelf: 'center',
+  },
+  saveButtonText: { color: '#fff', fontSize: 17, fontWeight: '900' },
 
   EditModalContainer: { width: '100%', height: '100%' },
-  closeIconMod: { position: 'absolute', right: 16, top: 50, zIndex: 10, backgroundColor: '#fff', borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4 },
-  closeIconTextMod: { fontSize: 22, color: '#000', fontWeight: 'bold' },
 
   decodeBtn: { marginTop: 10, paddingVertical: 14, borderRadius: 12, alignItems: 'center', backgroundColor: GREEN },
   decodeBtnDisabled: { opacity: 0.6 },
