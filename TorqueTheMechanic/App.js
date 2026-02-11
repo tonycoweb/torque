@@ -54,6 +54,25 @@ const adUnitId = __DEV__
     : 'your-real-admob-id-here';
 
 // ===================== HELPERS =====================
+
+const findVehicleByKey = async (key) => {
+  if (!key) return null;
+  try {
+    const saved = await getAllVehicles();
+    const list = (saved || []).map(normalizeVehicle);
+
+    // vehicleKey matches VIN (upper) OR id
+    const upper = String(key).toUpperCase().trim();
+    return (
+      list.find((v) => (v?.vin ? String(v.vin).toUpperCase().trim() : null) === upper) ||
+      list.find((v) => String(v?.id) === String(key)) ||
+      null
+    );
+  } catch {
+    return null;
+  }
+};
+
 const LAST_CHAT_ID_KEY = 'last_chat_id'; // global fallback (kept)
 const LAST_CHAT_BY_VEHICLE_KEY = 'last_chat_id_by_vehicle'; // ✅ new per-vehicle map
 
@@ -900,55 +919,90 @@ useEffect(() => {
             visible={isChatting && showSavedChats}
             onClose={() => setShowSavedChats(false)}
             onSelect={async (chat) => {
-              if (loading) return;
+  if (loading) return;
 
-              if (!chat) {
-                setChatID(null);
-                setThreadKey('new');
-                setThreadVehicleKey(getVehicleKey(vehicle) || null);
-                setChatHistory([]);
-                setMessages([]);
-                setShowSavedChats(false);
-                setActiveChatVehicle(null);
-                setAttachedImage(null);
-                setAttachedAudio(null);
-                setAttachmentLocked(false);
+  // -------- New thread --------
+  if (!chat) {
+    setChatID(null);
+    setThreadKey('new');
+    const vKey = getVehicleKey(vehicle) || null;
+    setThreadVehicleKey(vKey);
 
-                await AsyncStorage.removeItem(LAST_CHAT_ID_KEY);
-                setFocusTick((x) => x + 1);
-                return;
-              }
+    setChatHistory([]);
+    setMessages([]);
+    setShowSavedChats(false);
 
-              const id = chat.id || Date.now().toString();
-              const history = Array.isArray(chat.messages) ? chat.messages : [];
+    // ✅ important: clear any previous override
+    setActiveChatVehicle(null);
 
-              setChatID(id);
-              setThreadKey(id);
-              setThreadVehicleKey(chat.vehicleKey || null); // ✅ add this
-              setChatHistory(history);
+    setAttachedImage(null);
+    setAttachedAudio(null);
+    setAttachmentLocked(false);
 
-              setMessages(
-                history.map((m) => ({
-                  sender: m.role === 'user' ? 'user' : 'api',
-                  text: normalizeMsgContent(m.content),
-                }))
-              );
+    await AsyncStorage.removeItem(LAST_CHAT_ID_KEY);
+    setFocusTick((x) => x + 1);
+    return;
+  }
 
-              // global last
-              await AsyncStorage.setItem(LAST_CHAT_ID_KEY, id);
+  // -------- Load selected saved chat --------
+  const id = chat.id || Date.now().toString();
+  const history = Array.isArray(chat.messages) ? chat.messages : [];
 
-              // ✅ also update per-vehicle mapping if this chat has a vehicleKey in the panel object
-              if (chat.vehicleKey) {
-                const map = await readLastChatByVehicleMap();
-                map[chat.vehicleKey] = id;
-                await writeLastChatByVehicleMap(map);
-              }
+  setChatID(id);
+  setThreadKey(id);
+  setThreadVehicleKey(chat.vehicleKey || null);
+  setChatHistory(history);
 
-              setShowSavedChats(false);
-              setActiveChatVehicle(null);
-              setIsChatting(true);
-              setFocusTick((x) => x + 1);
-            }}
+  setMessages(
+    history.map((m) => ({
+      sender: m.role === 'user' ? 'user' : 'api',
+      text: normalizeMsgContent(m.content),
+    }))
+  );
+
+  // global last
+  await AsyncStorage.setItem(LAST_CHAT_ID_KEY, id);
+
+  // ✅ update per-vehicle mapping for the chat's vehicleKey (NOT current selector)
+  if (chat.vehicleKey) {
+    const map = await readLastChatByVehicleMap();
+    map[chat.vehicleKey] = id;
+    await writeLastChatByVehicleMap(map);
+  }
+
+  // ✅ THE FIX:
+  // If the saved chat belongs to a different vehicle than the selector,
+  // either switch selector OR set an override context for chat.
+  const selectedKey = getVehicleKey(vehicle);
+  const chatKey = chat.vehicleKey || null;
+
+  if (chatKey && chatKey !== selectedKey) {
+    // Try to actually switch the selector to the chat’s vehicle (best UX)
+    const matched = await findVehicleByKey(chatKey);
+
+    if (matched) {
+      setVehicle(matched); // ✅ selector updates visually
+      setActiveChatVehicle(null); // selector now matches, no override needed
+    } else {
+      // Fallback: keep selector as-is, but force chat context to this vehicle
+      setActiveChatVehicle({
+        source: 'overridden',
+        vin: chat.vehicleVin || (String(chatKey).length === 17 ? chatKey : null),
+        id: chat.vehicleVin ? String(chat.vehicleVin) : String(chatKey),
+        year: chat.vehicleYear || null,
+        make: chat.vehicleMake || null,
+        model: chat.vehicleModel || null,
+      });
+    }
+  } else {
+    // chat matches selector, no override needed
+    setActiveChatVehicle(null);
+  }
+
+  setShowSavedChats(false);
+  setIsChatting(true);
+  setFocusTick((x) => x + 1);
+}}
           />
         </View>
 
