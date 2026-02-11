@@ -57,7 +57,16 @@ function buildTitle(messages = []) {
   return clean.length > 28 ? clean.slice(0, 28) + '…' : clean;
 }
 
-// ✅ Convert storage object -> array of chat objects
+function formatVehicleBadge(val) {
+  const year = val?.vehicleYear;
+  const make = val?.vehicleMake;
+  const model = val?.vehicleModel;
+
+  const label = [year, make, model].filter(Boolean).join(' ').trim();
+  return label || 'General Chat';
+}
+
+// ✅ Convert storage object -> array of chat objects (supports old + new formats)
 function toChatArray(allChatsObj) {
   const obj = allChatsObj && typeof allChatsObj === 'object' ? allChatsObj : {};
   const out = [];
@@ -73,12 +82,18 @@ function toChatArray(allChatsObj) {
         messages,
         title: buildTitle(messages),
         preview: buildPreview(messages),
-        updatedAt: Number(id) || 0, // best-effort for old format (often Date.now() ids)
+        updatedAt: Number(id) || 0, // old best-effort
+        vehicleBadge: 'General Chat', // ✅ clean placeholder for old chats
+        vehicleKey: null,
+        vehicleVin: null,
+        vehicleYear: null,
+        vehicleMake: null,
+        vehicleModel: null,
       });
       continue;
     }
 
-    // New-ish format: chats[id] = { messages, title, preview, updatedAt }
+    // New format: chats[id] = { messages, updatedAt, vehicleKey, vehicleVin, vehicleYear, vehicleMake, vehicleModel, ... }
     if (val && typeof val === 'object') {
       const messages = Array.isArray(val.messages) ? val.messages : [];
       out.push({
@@ -86,7 +101,13 @@ function toChatArray(allChatsObj) {
         messages,
         title: val.title || buildTitle(messages),
         preview: val.preview || buildPreview(messages),
-        updatedAt: val.updatedAt || Number(id) || 0,
+        updatedAt: Number(val.updatedAt) || Number(id) || 0,
+        vehicleBadge: formatVehicleBadge(val), // ✅ year make model or fallback
+        vehicleKey: val.vehicleKey || null,
+        vehicleVin: val.vehicleVin || null,
+        vehicleYear: val.vehicleYear || null,
+        vehicleMake: val.vehicleMake || null,
+        vehicleModel: val.vehicleModel || null,
       });
       continue;
     }
@@ -97,22 +118,24 @@ function toChatArray(allChatsObj) {
       title: 'Chat',
       preview: 'No messages',
       updatedAt: Number(id) || 0,
+      vehicleBadge: 'General Chat',
+      vehicleKey: null,
+      vehicleVin: null,
+      vehicleYear: null,
+      vehicleMake: null,
+      vehicleModel: null,
     });
   }
 
   return out;
 }
 
-export default function SavedChatsPanel({
-  visible = false,
-  onSelect,
-  onClose,
-} = {}) {
+export default function SavedChatsPanel({ visible = false, onSelect, onClose } = {}) {
   const [chats, setChats] = useState([]);
 
   const loadChats = async () => {
     try {
-      const all = await getAllChats(); // returns object per your utils/storage.js
+      const all = await getAllChats();
       const arr = toChatArray(all);
       setChats(arr);
     } catch (e) {
@@ -210,44 +233,61 @@ export default function SavedChatsPanel({
         </View>
 
         <ScrollView style={styles.list} contentContainerStyle={{ paddingBottom: 22 }}>
-          {sortedChats.map((c) => (
-            <TouchableOpacity
-              key={c.id}
-              style={styles.card}
-              onPress={() => onSelect?.(c)}
-              activeOpacity={0.9}
-            >
-              <View style={styles.cardTop}>
-                <Text style={styles.chatTitle} numberOfLines={1}>
-                  {c.title || `Chat ${c.id}`}
-                </Text>
-                <Text style={styles.time} numberOfLines={1}>
-                  {fmt(c.updatedAt)}
-                </Text>
-              </View>
+          {sortedChats.map((c) => {
+            const isGeneral = (c.vehicleBadge || '') === 'General Chat';
 
-              <Text style={styles.preview} numberOfLines={2}>
-                {c.preview || buildPreview(c.messages)}
-              </Text>
+            return (
+              <TouchableOpacity
+                key={c.id}
+                style={styles.card}
+                onPress={() => onSelect?.(c)}
+                activeOpacity={0.9}
+              >
+                <View style={styles.cardTop}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.chatTitle} numberOfLines={1}>
+                      {c.title || `Chat ${c.id}`}
+                    </Text>
 
-              <View style={styles.cardActions}>
-                <View style={styles.pill}>
-                  <Ionicons name="chatbubble-ellipses-outline" size={14} color="#cfcfcf" />
-                  <Text style={styles.pillText}>
-                    {Array.isArray(c.messages) ? c.messages.length : 0} msgs
+                    {/* ✅ Always show badge: year/make/model or clean fallback */}
+                    <View style={styles.badgeRow}>
+                      <View style={[styles.vehicleBadge, isGeneral && styles.generalBadge]}>
+                        <Ionicons name="car-outline" size={12} color="#cfcfcf" />
+                        <Text style={styles.vehicleBadgeText} numberOfLines={1}>
+                          {c.vehicleBadge || 'General Chat'}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+
+                  <Text style={styles.time} numberOfLines={1}>
+                    {fmt(c.updatedAt)}
                   </Text>
                 </View>
 
-                <TouchableOpacity
-                  onPress={() => handleDelete(c.id)}
-                  style={styles.deleteBtn}
-                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                >
-                  <Ionicons name="trash" size={16} color="#ffb4b4" />
-                </TouchableOpacity>
-              </View>
-            </TouchableOpacity>
-          ))}
+                <Text style={styles.preview} numberOfLines={2}>
+                  {c.preview || buildPreview(c.messages)}
+                </Text>
+
+                <View style={styles.cardActions}>
+                  <View style={styles.pill}>
+                    <Ionicons name="chatbubble-ellipses-outline" size={14} color="#cfcfcf" />
+                    <Text style={styles.pillText}>
+                      {Array.isArray(c.messages) ? c.messages.length : 0} msgs
+                    </Text>
+                  </View>
+
+                  <TouchableOpacity
+                    onPress={() => handleDelete(c.id)}
+                    style={styles.deleteBtn}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <Ionicons name="trash" size={16} color="#ffb4b4" />
+                  </TouchableOpacity>
+                </View>
+              </TouchableOpacity>
+            );
+          })}
 
           {sortedChats.length === 0 && (
             <View style={styles.emptyWrap}>
@@ -350,12 +390,35 @@ const styles = StyleSheet.create({
 
   cardTop: {
     flexDirection: 'row',
-    alignItems: 'baseline',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
     gap: 10,
   },
 
-  chatTitle: { color: '#fff', fontWeight: '800', fontSize: 15, flex: 1 },
+  chatTitle: { color: '#fff', fontWeight: '800', fontSize: 15 },
+
+  badgeRow: { marginTop: 6 },
+
+  vehicleBadge: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: '#171717',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    maxWidth: 260,
+  },
+
+  generalBadge: {
+    opacity: 0.6,
+  },
+
+  vehicleBadgeText: { color: '#cfcfcf', fontSize: 12, fontWeight: '700' },
+
   time: { color: '#8a8a8a', fontSize: 12 },
 
   preview: { color: '#bdbdbd', marginTop: 8, lineHeight: 18 },

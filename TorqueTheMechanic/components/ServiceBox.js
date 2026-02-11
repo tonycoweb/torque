@@ -841,7 +841,7 @@ export default function ServiceBox({ selectedVehicle, onUpdateVehicleCurrentMile
               {/* ======= CTAs / Mileage ======= */}
               {!hasGeneratedServices ? (
                 <View style={{ paddingHorizontal: 16, marginTop: 6, marginBottom: 6 }}>
-                  <TouchableOpacity style={styles.ctaBtnPrimary} onPress={handleGeneratePress} disabled={isGenerating} activeOpacity={0.95}>
+                  <TouchableOpacity style={styles.ctaBtnSecondary} onPress={handleGeneratePress} disabled={isGenerating} activeOpacity={0.95}>
                     <Text style={styles.ctaBtnText}>Generate Recommended Service Records</Text>
                   </TouchableOpacity>
                   <Text style={styles.ctaHint}>We’ll ask for your current mileage first.</Text>
@@ -1582,7 +1582,7 @@ const styles = StyleSheet.create({
   ctaBtnPrimary: {
     backgroundColor: BLUE,
     borderRadius: 18,
-    paddingVertical: 16,
+    paddingVertical: 14,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -1594,7 +1594,7 @@ const styles = StyleSheet.create({
   ctaBtnSecondary: {
     backgroundColor: GREEN,
     borderRadius: 18,
-    paddingVertical: 16,
+    paddingVertical: 14,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',

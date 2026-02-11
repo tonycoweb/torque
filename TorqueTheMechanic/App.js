@@ -38,6 +38,8 @@ import * as FileSystem from 'expo-file-system';
 
 import mobileAds, { RewardedAd, RewardedAdEventType } from 'react-native-google-mobile-ads';
 
+
+
 // ===================== BACKEND =====================
 const BACKEND_BASE = 'http://192.168.1.246:3001';
 const API_CHAT_URL = `${BACKEND_BASE}/chat`;
@@ -49,10 +51,11 @@ const adUnitId = __DEV__
   ? Platform.OS === 'ios'
     ? 'ca-app-pub-3940256099942544/1712485313'
     : 'ca-app-pub-3940256099942544/5224354917'
-  : 'your-real-admob-id-here';
+    : 'your-real-admob-id-here';
 
 // ===================== HELPERS =====================
-const LAST_CHAT_ID_KEY = 'last_chat_id';
+const LAST_CHAT_ID_KEY = 'last_chat_id'; // global fallback (kept)
+const LAST_CHAT_BY_VEHICLE_KEY = 'last_chat_id_by_vehicle'; // ✅ new per-vehicle map
 
 const trimTurns = (history, maxTurns = 6) => {
   const out = [];
@@ -70,6 +73,28 @@ const normalizeVehicle = (v = {}) => {
     [v.year, v.make, v.model].filter(Boolean).join('-') ||
     Math.random().toString(36).slice(2);
   return { ...v, id };
+};
+
+const getVehicleKey = (v) => {
+  if (!v) return null;
+  if (v.vin) return String(v.vin).toUpperCase().trim();
+  if (v.id) return String(v.id);
+  return null;
+};
+
+const readLastChatByVehicleMap = async () => {
+  try {
+    const raw = await AsyncStorage.getItem(LAST_CHAT_BY_VEHICLE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
+
+const writeLastChatByVehicleMap = async (mapObj) => {
+  try {
+    await AsyncStorage.setItem(LAST_CHAT_BY_VEHICLE_KEY, JSON.stringify(mapObj || {}));
+  } catch {}
 };
 
 const normalizeMsgContent = (content) => {
@@ -254,6 +279,10 @@ export default function App() {
 
   const rewardedRef = useRef(null);
 
+  // state for chat to set
+  const [threadVehicleKey, setThreadVehicleKey] = useState(null);
+
+
   // ===================== Robot anim =====================
   const robotTranslateY = useRef(new Animated.Value(0)).current;
   const robotScale = useRef(new Animated.Value(1)).current;
@@ -343,53 +372,133 @@ export default function App() {
     });
   };
 
-  // ===================== LAST CHAT AUTO-LOAD =====================
-  const loadLastChatIfNeeded = async () => {
-    try {
-      // If we already have a thread loaded, do nothing
-      if ((chatID && chatHistory?.length) || (messages && messages.length)) return;
+  // ===================== THREAD LOAD HELPERS =====================
+const loadChatThread = async (idToLoad) => {
+  if (!idToLoad) return false;
 
-      // Prefer explicit last id
-      const lastId = await AsyncStorage.getItem(LAST_CHAT_ID_KEY);
+  const loaded = await getChat(idToLoad);
+  if (!Array.isArray(loaded) || loaded.length === 0) return false;
 
-      let idToLoad = lastId;
+  // ✅ read metadata (vehicleKey) from storage object
+  let metaKey = null;
+  try {
+    const all = await getAllChats();
+    const val = all?.[idToLoad];
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      metaKey = val.vehicleKey || null;
+    }
+  } catch {}
 
-      // If no lastId, pick latest numeric key from storage
-      if (!idToLoad) {
-        const all = await getAllChats();
-        const ids = Object.keys(all || {});
-        const numeric = ids
-          .map((x) => ({ id: x, n: Number(x) }))
-          .filter((o) => Number.isFinite(o.n))
-          .sort((a, b) => b.n - a.n);
+  setChatID(idToLoad);
+  setThreadKey(idToLoad);
+  setThreadVehicleKey(metaKey); // ✅ important
+  setChatHistory(loaded);
+  setMessages(
+    loaded.map((m) => ({
+      sender: m.role === 'user' ? 'user' : 'api',
+      text: normalizeMsgContent(m.content),
+    }))
+  );
+  setFocusTick((x) => x + 1);
+  return true;
+};
 
-        if (numeric.length) idToLoad = numeric[0].id;
-      }
 
-      if (!idToLoad) return;
+  // ✅ requires this state somewhere near your other state:
+// const [threadVehicleKey, setThreadVehicleKey] = useState(null);
 
-      const loaded = await getChat(idToLoad);
-      if (!Array.isArray(loaded) || loaded.length === 0) return;
+const loadLastChatForSelectedVehicle = async () => {
+  try {
+    const vKey = getVehicleKey(vehicle);
 
-      setChatID(idToLoad);
-      setThreadKey(idToLoad);
-      setChatHistory(loaded);
+    // ✅ Re-hydrate ONLY if the in-memory thread belongs to the currently selected vehicle
+    if (
+      (!messages || messages.length === 0) &&
+      chatID &&
+      Array.isArray(chatHistory) &&
+      chatHistory.length > 0 &&
+      threadVehicleKey === vKey
+    ) {
+      setThreadKey(chatID);
       setMessages(
-        loaded.map((m) => ({
+        chatHistory.map((m) => ({
           sender: m.role === 'user' ? 'user' : 'api',
           text: normalizeMsgContent(m.content),
         }))
       );
       setFocusTick((x) => x + 1);
-    } catch (e) {
-      console.warn('loadLastChatIfNeeded failed:', e?.message || e);
+      return;
     }
-  };
 
-  useEffect(() => {
-    if (isChatting) loadLastChatIfNeeded();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isChatting]);
+    // ✅ If a thread is already visible, do nothing
+    if (messages && messages.length) return;
+
+    // If no vehicle, fall back to global last chat
+    if (!vKey) {
+      const globalLastId = await AsyncStorage.getItem(LAST_CHAT_ID_KEY);
+      if (globalLastId) await loadChatThread(globalLastId);
+      return;
+    }
+
+    // 1) try vehicle->lastChat map
+    const map = await readLastChatByVehicleMap();
+    const mappedId = map?.[vKey];
+
+    if (mappedId) {
+      const ok = await loadChatThread(mappedId);
+      if (ok) return;
+
+      // stale mapping
+      delete map[vKey];
+      await writeLastChatByVehicleMap(map);
+    }
+
+    // 2) scan all chats and pick newest matching vehicleKey
+    const all = await getAllChats(); // object
+    const entries = Object.entries(all || {});
+
+    let bestId = null;
+    let bestTs = 0;
+
+    for (const [id, val] of entries) {
+      const isObj = val && typeof val === 'object' && !Array.isArray(val);
+      const metaKey = isObj ? val.vehicleKey : null;
+      if (metaKey !== vKey) continue;
+
+      const ts = (isObj && Number(val.updatedAt)) || Number(id) || 0;
+      if (ts > bestTs) {
+        bestTs = ts;
+        bestId = id;
+      }
+    }
+
+    if (bestId) {
+      const ok = await loadChatThread(bestId);
+      if (ok) {
+        const nextMap = await readLastChatByVehicleMap();
+        nextMap[vKey] = bestId;
+        await writeLastChatByVehicleMap(nextMap);
+        return;
+      }
+    }
+
+    // 3) none found => new empty thread
+    setChatID(null);
+    setThreadKey('new');
+    setThreadVehicleKey(vKey); // ✅ track “this empty thread is for the selected vehicle”
+    setChatHistory([]);
+    setMessages([]);
+    setFocusTick((x) => x + 1);
+  } catch (e) {
+    console.warn('loadLastChatForSelectedVehicle failed:', e?.message || e);
+  }
+};
+
+// ✅ single source of truth for auto-load on entering chat
+useEffect(() => {
+  if (isChatting) loadLastChatForSelectedVehicle();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [isChatting, vehicle?.vin, vehicle?.id, threadVehicleKey]);
 
   // ===================== Attachments =====================
   const hasAnyAttachment = () => !!attachedImage || !!attachedAudio;
@@ -500,6 +609,8 @@ export default function App() {
       setAttachedImage(null);
       setAttachedAudio(null);
       setAttachmentLocked(false);
+
+      // optional: clear global last id only (per-vehicle map stays, you can clear too if you want)
       AsyncStorage.removeItem(LAST_CHAT_ID_KEY).catch(() => {});
       return;
     }
@@ -565,10 +676,30 @@ export default function App() {
       setChatID(id);
       setThreadKey(id);
 
-      await saveChat(id, updatedHistory);
+      // ✅ save with per-vehicle metadata (backward compatible in getChat / panel)
+      const vKey = getVehicleKey(vehicleForChat);
+      await saveChat(id, updatedHistory, {
+        vehicleKey: vKey,
+        vehicleVin: vehicleForChat?.vin ? String(vehicleForChat.vin).toUpperCase().trim() : null,
+        // ✅ NEW: used by SavedChatsPanel badge
+  vehicleYear: vehicleForChat?.year ? String(vehicleForChat.year) : null,
+  vehicleMake: vehicleForChat?.make ? String(vehicleForChat.make) : null,
+  vehicleModel: vehicleForChat?.model ? String(vehicleForChat.model) : null,
+      });
 
-      // ✅ remember last chat so next enter loads it automatically
+      //thread check
+      setThreadVehicleKey(vKey || null);
+
+
+      // ✅ global last fallback
       await AsyncStorage.setItem(LAST_CHAT_ID_KEY, id);
+
+      // ✅ per-vehicle last chat mapping
+      if (vKey) {
+        const map = await readLastChatByVehicleMap();
+        map[vKey] = id;
+        await writeLastChatByVehicleMap(map);
+      }
 
       setAttachmentLocked(false);
     } catch (e) {
@@ -588,52 +719,6 @@ export default function App() {
   const handleChatFocus = () => {
     setFocusTick((x) => x + 1);
   };
-
-  const restoreLastChatIfAny = async () => {
-    try {
-      if (messages?.length) return;
-
-      let lastId = await AsyncStorage.getItem(LAST_CHAT_ID_KEY);
-
-      if (!lastId) {
-        const raw = await AsyncStorage.getItem('saved_chats');
-        const obj = raw ? JSON.parse(raw) : {};
-        const ids = Object.keys(obj || {});
-        if (ids.length) {
-          ids.sort((a, b) => Number(b) - Number(a));
-          lastId = ids[0];
-        }
-      }
-
-      if (!lastId) return;
-
-      const raw = await AsyncStorage.getItem('saved_chats');
-      const chatsObj = raw ? JSON.parse(raw) : {};
-      const lastMessages = chatsObj?.[lastId];
-
-      if (!Array.isArray(lastMessages) || lastMessages.length === 0) return;
-
-      setChatID(lastId);
-      setThreadKey(lastId);
-      setChatHistory(lastMessages);
-
-      setMessages(
-        lastMessages.map((m) => ({
-          sender: m.role === 'user' ? 'user' : 'api',
-          text: normalizeMsgContent(m.content),
-        }))
-      );
-
-      setFocusTick((x) => x + 1);
-    } catch (e) {
-      console.log('restoreLastChatIfAny error:', e);
-    }
-  };
-
-  useEffect(() => {
-    if (isChatting) restoreLastChatIfAny();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isChatting]);
 
   const handleExitChat = () => {
     if (loading) return;
@@ -820,6 +905,7 @@ export default function App() {
               if (!chat) {
                 setChatID(null);
                 setThreadKey('new');
+                setThreadVehicleKey(getVehicleKey(vehicle) || null);
                 setChatHistory([]);
                 setMessages([]);
                 setShowSavedChats(false);
@@ -827,6 +913,7 @@ export default function App() {
                 setAttachedImage(null);
                 setAttachedAudio(null);
                 setAttachmentLocked(false);
+
                 await AsyncStorage.removeItem(LAST_CHAT_ID_KEY);
                 setFocusTick((x) => x + 1);
                 return;
@@ -837,6 +924,7 @@ export default function App() {
 
               setChatID(id);
               setThreadKey(id);
+              setThreadVehicleKey(chat.vehicleKey || null); // ✅ add this
               setChatHistory(history);
 
               setMessages(
@@ -846,7 +934,15 @@ export default function App() {
                 }))
               );
 
+              // global last
               await AsyncStorage.setItem(LAST_CHAT_ID_KEY, id);
+
+              // ✅ also update per-vehicle mapping if this chat has a vehicleKey in the panel object
+              if (chat.vehicleKey) {
+                const map = await readLastChatByVehicleMap();
+                map[chat.vehicleKey] = id;
+                await writeLastChatByVehicleMap(map);
+              }
 
               setShowSavedChats(false);
               setActiveChatVehicle(null);
@@ -986,7 +1082,7 @@ const styles = StyleSheet.create({
     paddingBottom: 33,
   },
 
-  chatMessagesArea: { flex: 1, },
+  chatMessagesArea: { flex: 1 },
   robotWrapper: { alignItems: 'center' },
 
   chatTopBar: {
