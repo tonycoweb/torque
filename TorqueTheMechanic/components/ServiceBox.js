@@ -1564,7 +1564,7 @@ const GREEN = '#22c55e';
 
 const styles = StyleSheet.create({
   // Entry tile
-  container: { backgroundColor: '#333', borderRadius: 16, padding: 28, alignItems: 'center', marginVertical: 10 },
+  container: { backgroundColor: '#333', borderRadius: 16, padding: 33, alignItems: 'center', marginVertical: 10 },
   disabledContainer: { backgroundColor: '#2d2d2d', borderColor: '#666', borderWidth: 1 },
   label: { color: '#aaa', fontSize: 15, fontWeight: '600' },
   mileage: { color: '#fff', fontSize: 19, fontWeight: '700', marginVertical: 6, textAlign: 'center' },

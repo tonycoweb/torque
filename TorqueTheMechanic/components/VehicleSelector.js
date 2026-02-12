@@ -1,12 +1,31 @@
 // components/VehicleSelector.js
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Modal, FlatList, Alert, TextInput,
-  SafeAreaView, Image, ScrollView, ActivityIndicator, Platform,
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  Modal,
+  FlatList,
+  Alert,
+  TextInput,
+  SafeAreaView,
+  Image,
+  ScrollView,
+  ActivityIndicator,
+  Platform,
 } from 'react-native';
-import Animated, { useSharedValue, useAnimatedStyle, withTiming, withSpring } from 'react-native-reanimated';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  withSpring,
+  withRepeat,
+} from 'react-native-reanimated';
 import { RewardedAd, RewardedAdEventType } from 'react-native-google-mobile-ads';
 import { getAllVehicles, deleteVehicleByVin, saveVehicle } from '../utils/VehicleStorage';
+import VehiclePhotoModal from './VehiclePhotoModal';
+import * as ImagePicker from 'expo-image-picker';
 
 // ---------- CONFIG ----------
 const API_BASE = 'http://192.168.1.246:3001';
@@ -40,20 +59,25 @@ const vinLocations = [
   { id: '4', label: 'Windshield Corner', image: require('../assets/vin_windshield.png') },
 ];
 
-// Tiny helper to animate "..." without extra libs (matches ServiceBox)
+// Tiny helper to animate "..." without extra libs
 function AnimatedEllipsis({ style, base = 'Generating' }) {
   const [dots, setDots] = React.useState('');
   React.useEffect(() => {
-    const id = setInterval(() => setDots(p => (p.length >= 3 ? '' : p + '.')), 450);
+    const id = setInterval(() => setDots((p) => (p.length >= 3 ? '' : p + '.')), 450);
     return () => clearInterval(id);
   }, []);
-  return <Text style={style}>{base}{dots}</Text>;
+  return (
+    <Text style={style}>
+      {base}
+      {dots}
+    </Text>
+  );
 }
 
 export default function VehicleSelector({
   selectedVehicle = null,
   onSelectVehicle,
-  triggerVinCamera,        // ✅ passed from App to open camera
+  triggerVinCamera,
   onShowRewardedAd,
   gateCameraWithAd = false,
 }) {
@@ -61,6 +85,13 @@ export default function VehicleSelector({
   const [modalVisible, setModalVisible] = useState(false);
   const [showVinModal, setShowVinModal] = useState(false);
   const [editMode, setEditMode] = useState(false);
+
+  // Vehicle photo modals
+  const [photoModalVisible, setPhotoModalVisible] = useState(false); // snap+adjust (VehiclePhotoModal)
+  const [photoTargetKey, setPhotoTargetKey] = useState(null); // vin or id
+
+  // ✅ NEW: chooser modal (choose vs snap)
+  const [photoChooserVisible, setPhotoChooserVisible] = useState(false);
 
   // Garage state
   const [vehicles, setVehicles] = useState([]);
@@ -83,15 +114,22 @@ export default function VehicleSelector({
 
   // mounted guard
   const isMountedRef = useRef(true);
-  useEffect(() => { isMountedRef.current = true; return () => { isMountedRef.current = false; }; }, []);
-
-  useEffect(() => { if (modalVisible) loadGarage(); }, [modalVisible]);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
-    const isOpen = modalVisible || showVinModal || editMode;
+    if (modalVisible) loadGarage();
+  }, [modalVisible]);
+
+  useEffect(() => {
+    const isOpen = modalVisible || showVinModal || editMode || photoModalVisible || photoChooserVisible;
     modalOpacity.value = withTiming(isOpen ? 1 : 0, { duration: 220 });
     modalTranslateY.value = withSpring(isOpen ? 0 : 100, { damping: 18, stiffness: 130 });
-  }, [modalVisible, showVinModal, editMode]);
+  }, [modalVisible, showVinModal, editMode, photoModalVisible, photoChooserVisible]);
 
   useEffect(() => {
     if (showVinModal && scrollRef.current) {
@@ -113,7 +151,13 @@ export default function VehicleSelector({
   // ---------- Rewarded Ad (safe, single-settle) ----------
   const showRewardedAdSafe = () =>
     new Promise((resolve) => {
-      const resolveOnce = (val) => { if (!settled) { settled = true; cleanup(); resolve(val); } };
+      const resolveOnce = (val) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          resolve(val);
+        }
+      };
       let settled = false;
       let rewarded;
       try {
@@ -123,13 +167,17 @@ export default function VehicleSelector({
       }
 
       const cleanup = () => {
-        try { rewarded?.removeAllListeners?.(); } catch {}
+        try {
+          rewarded?.removeAllListeners?.();
+        } catch {}
       };
 
-      const timeoutId = setTimeout(() => resolveOnce(false), 20000); // hard stop in 20s
+      const timeoutId = setTimeout(() => resolveOnce(false), 20000);
 
       rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
-        try { rewarded.show(); } catch {}
+        try {
+          rewarded.show();
+        } catch {}
       });
       rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => {
         clearTimeout(timeoutId);
@@ -144,7 +192,12 @@ export default function VehicleSelector({
         resolveOnce(false);
       });
 
-      try { rewarded.load(); } catch { clearTimeout(timeoutId); resolveOnce(false); }
+      try {
+        rewarded.load();
+      } catch {
+        clearTimeout(timeoutId);
+        resolveOnce(false);
+      }
     });
 
   const showRewarded = async () => {
@@ -157,6 +210,135 @@ export default function VehicleSelector({
       setAdLoading(false);
       setOverlay(null);
     }
+  };
+
+  // ---------- ✅ Vehicle Photo helpers ----------
+  const findVehicleByKey = (key) => {
+    if (!key) return null;
+    return (
+      vehicles.find((v) => v?.vin && v.vin === key) ||
+      vehicles.find((v) => ensureId(v).id === key) ||
+      null
+    );
+  };
+
+  const persistVehiclePhoto = async (key, uri) => {
+    if (!key || !uri) return;
+
+    const target = findVehicleByKey(key);
+    if (!target) return;
+
+    const updated = ensureId({ ...target, photoUri: uri });
+    await saveVehicle(updated);
+
+    if (!isMountedRef.current) return;
+
+    setVehicles((prev) =>
+      prev.map((v) => {
+        const vv = ensureId(v);
+        const match =
+          (vv.vin && updated.vin && vv.vin === updated.vin) || (vv.id && updated.id && vv.id === updated.id);
+        return match ? updated : v;
+      })
+    );
+
+    // ✅ update selected vehicle too so home card instantly showcases it
+    const sel = selectedVehicle ? ensureId(selectedVehicle) : null;
+    if (sel) {
+      const selMatch =
+        (sel.vin && updated.vin && sel.vin === updated.vin) || (sel.id && updated.id && sel.id === updated.id);
+      if (selMatch) onSelectVehicle(updated);
+    }
+  };
+
+  // open chooser for a specific vehicle
+  const openPhotoForVehicle = (vehicle) => {
+    const v = ensureId(vehicle);
+    const key = v?.vin || v?.id;
+    setPhotoTargetKey(key);
+    setPhotoChooserVisible(true);
+  };
+
+  // Called by VehiclePhotoModal (snap + adjust)
+  const handleSaveVehiclePhoto = async (uri) => {
+    const key = photoTargetKey;
+    setPhotoModalVisible(false);
+    setPhotoChooserVisible(false);
+    await persistVehiclePhoto(key, uri);
+  };
+
+  // ---------- ✅ NEW: pick/snap via ImagePicker ----------
+  const requestMediaPerms = async () => {
+    const media = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!media?.granted) {
+      Alert.alert('Permission needed', 'Please allow Photos access to choose a vehicle photo.');
+      return false;
+    }
+    return true;
+  };
+
+  const requestCameraPerms = async () => {
+    const cam = await ImagePicker.requestCameraPermissionsAsync();
+    if (!cam?.granted) {
+      Alert.alert('Permission needed', 'Please allow Camera access to snap a vehicle photo.');
+      return false;
+    }
+    return true;
+  };
+
+  const chooseFromLibrary = async () => {
+    const ok = await requestMediaPerms();
+    if (!ok) return;
+
+    try {
+      const res = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        quality: 0.9,
+      });
+
+      if (res.canceled) return;
+      const uri = res.assets?.[0]?.uri;
+      if (!uri) return;
+
+      // We persist raw URI; bg uses cover+overlay (looks great)
+      const key = photoTargetKey;
+      setPhotoChooserVisible(false);
+      await persistVehiclePhoto(key, uri);
+    } catch (e) {
+      Alert.alert('Photo error', e?.message || 'Could not open your Photos.');
+    }
+  };
+
+  const snapWithCameraQuick = async () => {
+    const ok = await requestCameraPerms();
+    if (!ok) return;
+
+    try {
+      const res = await ImagePicker.launchCameraAsync({
+        allowsEditing: false,
+        quality: 0.9,
+      });
+
+      if (res.canceled) return;
+      const uri = res.assets?.[0]?.uri;
+      if (!uri) return;
+
+      const key = photoTargetKey;
+      setPhotoChooserVisible(false);
+      await persistVehiclePhoto(key, uri);
+    } catch (e) {
+      Alert.alert('Camera error', e?.message || 'Could not open camera.');
+    }
+  };
+
+  // open the nicer snap+adjust modal
+  const snapAndAdjust = async () => {
+    const ok = await requestCameraPerms();
+    if (!ok) return;
+    // ✅ close chooser then open adjust modal
+    setPhotoChooserVisible(false);
+    setPhotoModalVisible(true);
   };
 
   // ---------- Camera VIN flow ----------
@@ -201,10 +383,12 @@ export default function VehicleSelector({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ vin }),
       });
+
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err?.error || `HTTP ${resp.status}`);
       }
+
       const { vehicle } = await resp.json();
       if (!vehicle || !vehicle.vin || !vehicle.make || !vehicle.model) {
         throw new Error('VIN decoded but missing key fields.');
@@ -214,7 +398,7 @@ export default function VehicleSelector({
       await saveVehicle(withId);
 
       if (!isMountedRef.current) return;
-      setVehicles(prev => [withId, ...prev]);
+      setVehicles((prev) => [withId, ...prev]);
       onSelectVehicle(withId);
 
       const name = `${withId.year || ''} ${withId.make || ''} ${withId.model || ''}`.trim();
@@ -236,11 +420,12 @@ export default function VehicleSelector({
     Alert.alert('Delete Vehicle?', 'This will remove it from your garage.', [
       { text: 'Cancel', style: 'cancel' },
       {
-        text: 'Delete', style: 'destructive',
+        text: 'Delete',
+        style: 'destructive',
         onPress: async () => {
           await deleteVehicleByVin(vin);
           if (!isMountedRef.current) return;
-          const updatedList = vehicles.filter(v => v.vin !== vin);
+          const updatedList = vehicles.filter((v) => v.vin !== vin);
           setVehicles(updatedList);
           if (selectedVehicle?.vin === vin) onSelectVehicle(null);
         },
@@ -255,7 +440,10 @@ export default function VehicleSelector({
       let highway = '';
       if (vehicle.mpg && typeof vehicle.mpg === 'string') {
         const match = vehicle.mpg.match(/(\d+)\s*city\s*\/\s*(\d+)\s*highway/);
-        if (match) { city = match[1]; highway = match[2]; }
+        if (match) {
+          city = match[1];
+          highway = match[2];
+        }
       }
       setEditableVehicle({
         ...vehicle,
@@ -281,7 +469,7 @@ export default function VehicleSelector({
     await saveVehicle(updatedVehicle);
     if (!isMountedRef.current) return;
 
-    const updatedList = vehicles.map(v => (v.vin === updatedVehicle.vin ? updatedVehicle : v));
+    const updatedList = vehicles.map((v) => (v.vin === updatedVehicle.vin ? updatedVehicle : v));
     setVehicles(updatedList);
     if (selectedVehicle?.vin === updatedVehicle.vin) onSelectVehicle(updatedVehicle);
 
@@ -296,18 +484,53 @@ export default function VehicleSelector({
     return match ? `${match[1]}/${match[2]}` : '--/--';
   };
 
+  // ✅ subtle “alive” motion for backgrounds (home + rows)
+  const makeHeroDrift = () => {
+    const drift = useSharedValue(0);
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useEffect(() => {
+      drift.value = withRepeat(withTiming(1, { duration: 9000 }), -1, true);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+    const heroStyle = useAnimatedStyle(() => ({
+      transform: [
+        { translateX: drift.value * 8 - 4 },
+        { translateY: drift.value * 6 - 3 },
+        { scale: 1.06 },
+      ],
+    }));
+    return heroStyle;
+  };
+
   const VehicleRow = ({ item }) => {
     const withId = ensureId(item);
+    const heroStyle = makeHeroDrift();
+
     return (
       <TouchableOpacity
         style={styles.vehicleCard}
-        onPress={() => { onSelectVehicle(withId); setModalVisible(false); }}
+        onPress={() => {
+          onSelectVehicle(withId);
+          setModalVisible(false);
+        }}
         activeOpacity={0.92}
       >
+        {!!withId.photoUri && (
+          <View style={styles.vehicleBgWrap} pointerEvents="none">
+            <Animated.Image source={{ uri: withId.photoUri }} style={[styles.vehicleBg, heroStyle]} resizeMode="cover" />
+            <View style={styles.vehicleBgOverlay} />
+          </View>
+        )}
+
         <View style={styles.vehicleHeaderRow}>
           <Text style={styles.vehicleTitle} numberOfLines={1}>
             {withId.year} {withId.make} {withId.model}
           </Text>
+
+          {/* ✅ photo options */}
+          <TouchableOpacity onPress={() => openPhotoForVehicle(withId)} style={styles.photoIconBtn} activeOpacity={0.9}>
+            <Text style={styles.photoIconText}>📷</Text>
+          </TouchableOpacity>
 
           {!!withId.vin && (
             <View style={styles.vinPill}>
@@ -317,17 +540,14 @@ export default function VehicleSelector({
         </View>
 
         <Text style={styles.vehicleDetails} numberOfLines={2}>
-          {withId.engine || '—'} • {withId.transmission || '—'} • {withId.hp || '--'} HP • {renderMpg(withId.mpg)} MPG • GVW {withId.gvw || '--'}
+          {withId.engine || '—'} • {withId.transmission || '—'} • {withId.hp || '--'} HP • {renderMpg(withId.mpg)} MPG •
+          GVW {withId.gvw || '--'}
         </Text>
 
         <View style={styles.rowDivider} />
 
         <View style={styles.inlineBtns}>
-          <TouchableOpacity
-            onPress={() => handleEdit(withId)}
-            style={[styles.rowBtn, styles.rowBtnNeutral]}
-            activeOpacity={0.9}
-          >
+          <TouchableOpacity onPress={() => handleEdit(withId)} style={[styles.rowBtn, styles.rowBtnNeutral]} activeOpacity={0.9}>
             <Text style={styles.rowBtnText}>Edit</Text>
           </TouchableOpacity>
 
@@ -343,15 +563,40 @@ export default function VehicleSelector({
     );
   };
 
+  // ✅ HOME drift style (for selected card background)
+  const homeHeroStyle = makeHeroDrift();
+
   // ---------- UI ----------
+  const sel = selectedVehicle ? ensureId(selectedVehicle) : null;
+
   return (
     <View style={styles.container}>
-      {selectedVehicle ? (
+      {sel ? (
         <TouchableOpacity style={styles.selectedCard} onPress={() => setModalVisible(true)} activeOpacity={0.9}>
-          <Text style={styles.selectedTitle} numberOfLines={1}>{selectedVehicle.year} {selectedVehicle.make}</Text>
-          <Text style={styles.selectedSub} numberOfLines={1}>{selectedVehicle.model} {selectedVehicle.engine ? `(${selectedVehicle.engine})` : ''}</Text>
+          {!!sel.photoUri && (
+            <View style={styles.homeBgWrap} pointerEvents="none">
+              <Animated.Image source={{ uri: sel.photoUri }} style={[styles.homeBg, homeHeroStyle]} resizeMode="cover" />
+              <View style={styles.homeBgOverlay} />
+            </View>
+          )}
+
+          {/* small photo shortcut on the home card too */}
+          <TouchableOpacity
+            onPress={() => openPhotoForVehicle(sel)}
+            style={styles.homePhotoBtn}
+            activeOpacity={0.9}
+          >
+            <Text style={{ fontSize: 16 }}>📷</Text>
+          </TouchableOpacity>
+
+          <Text style={styles.selectedTitle} numberOfLines={1}>
+            {sel.year} {sel.make}
+          </Text>
+          <Text style={styles.selectedSub} numberOfLines={1}>
+            {sel.model} {sel.engine ? `(${sel.engine})` : ''}
+          </Text>
           <Text style={styles.stats}>
-            MPG: {renderMpg(selectedVehicle.mpg)} • HP: {selectedVehicle.hp || '--'} • GVW: {selectedVehicle.gvw || '--'}
+            MPG: {renderMpg(sel.mpg)} • HP: {sel.hp || '--'} • GVW: {sel.gvw || '--'}
           </Text>
         </TouchableOpacity>
       ) : (
@@ -361,8 +606,9 @@ export default function VehicleSelector({
         </TouchableOpacity>
       )}
 
-      {/* Garage modal */}
-      <Modal visible={modalVisible} animationType="slide" onRequestClose={() => setModalVisible(false)}>
+      {/* Garage modal
+          ✅ IMPORTANT: avoid double animation (Modal slide + Reanimated). */}
+      <Modal visible={modalVisible} animationType="none" onRequestClose={() => setModalVisible(false)}>
         <Animated.View style={[styles.EditModalContainer, animatedModalStyle]}>
           <SafeAreaView style={styles.modalContainer}>
             <View style={styles.modalHeaderRow}>
@@ -387,6 +633,57 @@ export default function VehicleSelector({
           </SafeAreaView>
         </Animated.View>
       </Modal>
+
+      {/* ✅ Photo chooser modal */}
+      <Modal
+        visible={photoChooserVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPhotoChooserVisible(false)}
+      >
+        <View style={styles.chooserBackdrop}>
+          <View style={styles.chooserSheet}>
+            <View style={styles.chooserHeaderRow}>
+              <Text style={styles.chooserTitle}>Showcase your ride</Text>
+              <TouchableOpacity style={styles.chooserClose} onPress={() => setPhotoChooserVisible(false)} activeOpacity={0.9}>
+                <Text style={styles.chooserCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.chooserSub}>
+              Choose a photo or snap one now. This becomes the background on your vehicle card.
+            </Text>
+
+            <TouchableOpacity style={styles.chooserBtnPrimary} onPress={chooseFromLibrary} activeOpacity={0.92}>
+              <Text style={styles.chooserBtnPrimaryText}>🖼️ Choose from Photos</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.chooserBtnPrimary} onPress={snapWithCameraQuick} activeOpacity={0.92}>
+              <Text style={styles.chooserBtnPrimaryText}>📷 Snap a Photo</Text>
+            </TouchableOpacity>
+
+            {/* optional: your fancy crop/adjust flow */}
+            <TouchableOpacity style={styles.chooserBtnSecondary} onPress={snapAndAdjust} activeOpacity={0.92}>
+              <Text style={styles.chooserBtnSecondaryText}>✨ Snap & Adjust (pro look)</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.chooserBtnSecondary}
+              onPress={() => setPhotoChooserVisible(false)}
+              activeOpacity={0.92}
+            >
+              <Text style={styles.chooserBtnSecondaryText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ✅ Snap & Adjust Modal */}
+      <VehiclePhotoModal
+        visible={photoModalVisible}
+        onClose={() => setPhotoModalVisible(false)}
+        onSave={handleSaveVehiclePhoto}
+      />
 
       {/* Add Vehicle modal */}
       <Modal visible={showVinModal} animationType="none" transparent onRequestClose={() => setShowVinModal(false)}>
@@ -451,7 +748,9 @@ export default function VehicleSelector({
 
               {/* VIN help & locations */}
               <Text style={styles.modalSubtitle}>What’s a VIN?</Text>
-              <Text style={styles.helperText}>A VIN (Vehicle Identification Number) is a unique 17-digit code that identifies your car.</Text>
+              <Text style={styles.helperText}>
+                A VIN (Vehicle Identification Number) is a unique 17-digit code that identifies your car.
+              </Text>
 
               <Text style={styles.sectionTitle}>Where to Find Your VIN</Text>
               {vinLocations.map((item) => (
@@ -462,15 +761,19 @@ export default function VehicleSelector({
                   </View>
                 </View>
               ))}
-              <Text style={[styles.helperText, { marginTop: 12 }]}>Snap a clear photo of any of these VIN locations, and we’ll do the rest. 🚗</Text>
+              <Text style={[styles.helperText, { marginTop: 12 }]}>
+                Snap a clear photo of any of these VIN locations, and we’ll do the rest. 🚗
+              </Text>
             </ScrollView>
           </SafeAreaView>
 
-          {/* THINKING OVERLAY (consistent with ServiceBox) */}
+          {/* THINKING OVERLAY */}
           {overlay === 'thinking' && (
             <View style={styles.overlay} pointerEvents="auto">
               <View style={styles.thinkingCard}>
-                <View style={styles.spinnerRow}><ActivityIndicator size="large" /></View>
+                <View style={styles.spinnerRow}>
+                  <ActivityIndicator size="large" />
+                </View>
                 <Text style={styles.thinkingTitle}>Torque is thinking</Text>
                 <AnimatedEllipsis style={styles.thinkingSub} base="Generating your decode" />
               </View>
@@ -481,7 +784,7 @@ export default function VehicleSelector({
 
       {/* Edit modal */}
       {editMode && editableVehicle && (
-        <Modal visible={editMode} animationType="slide" onRequestClose={() => setEditMode(false)}>
+        <Modal visible={editMode} animationType="none" onRequestClose={() => setEditMode(false)}>
           <Animated.View style={[styles.EditModalContainer, animatedModalStyle]}>
             <SafeAreaView style={styles.modalContainer}>
               <View style={styles.modalHeaderRow}>
@@ -576,16 +879,15 @@ export default function VehicleSelector({
 // ---------- STYLES ----------
 const BLUE = '#3b82f6';
 const GREEN = '#22c55e';
-const RED = '#FF6666';
 
 const styles = StyleSheet.create({
-  container: { width: '100%', paddingVertical: 20, alignSelf: 'center' },
+  container: { width: '100%', paddingVertical: 10, alignSelf: 'center' },
 
   placeholder: {
     backgroundColor: '#2a2a2a',
-    paddingVertical: 26,
+    paddingVertical: 40,
     paddingHorizontal: 18,
-    borderRadius: 18,
+    borderRadius: 16,
     alignItems: 'center',
     borderColor: 'rgba(255,255,255,0.10)',
     borderWidth: 1,
@@ -595,18 +897,49 @@ const styles = StyleSheet.create({
 
   selectedCard: {
     backgroundColor: '#3a3a3a',
-    paddingVertical: 22,
+    paddingVertical: 40,
     paddingHorizontal: 18,
-    borderRadius: 18,
+    borderRadius: 16,
     alignItems: 'center',
     borderColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
     shadowColor: '#000',
     shadowOpacity: 0.14,
     shadowRadius: 14,
-    shadowOffset: { width: 0, height: 8 },
     elevation: 6,
+    overflow: 'hidden', // ✅ for bg
   },
+
+  // ✅ Home background photo
+  homeBgWrap: { ...StyleSheet.absoluteFillObject, borderRadius: 16, overflow: 'hidden' },
+  homeBg: {
+    width: '110%',
+    height: '110%',
+    position: 'absolute',
+    top: '-5%',
+    left: '-5%',
+  },
+  homeBgOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+
+  // small photo button on selected card
+  homePhotoBtn: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.30)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    zIndex: 10,
+  },
+
   selectedTitle: { fontSize: 20, fontWeight: '900', color: '#fff' },
   selectedSub: { fontSize: 14, color: '#e5e7eb', marginVertical: 4, fontWeight: '700' },
   stats: { fontSize: 12.5, color: '#cbd5e1', opacity: 0.9 },
@@ -653,14 +986,8 @@ const styles = StyleSheet.create({
   },
   closePillText: { color: '#fff', fontSize: 20, fontWeight: '900' },
 
-  // FlatList spacing (LESS side padding + tighter feel)
-  garageListContent: {
-    paddingTop: 6,
-    paddingBottom: 18,
-    paddingHorizontal: 2,
-  },
+  garageListContent: { paddingTop: 10, paddingBottom: 18, paddingHorizontal: 10 },
 
-  // Garage rows (modern + tighter)
   vehicleCard: {
     backgroundColor: 'rgba(255,255,255,0.06)',
     paddingVertical: 14,
@@ -670,13 +997,39 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
     shadowColor: '#000',
-    shadowOpacity: 0.10,
+    shadowOpacity: 0.1,
     shadowRadius: 14,
     shadowOffset: { width: 0, height: 8 },
     elevation: 4,
+    overflow: 'hidden',
   },
+
+  vehicleBgWrap: { ...StyleSheet.absoluteFillObject, borderRadius: 22, overflow: 'hidden' },
+  vehicleBg: {
+    width: '110%',
+    height: '110%',
+    position: 'absolute',
+    top: '-5%',
+    left: '-5%',
+  },
+  vehicleBgOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
+
   vehicleHeaderRow: { flexDirection: 'row', alignItems: 'center' },
   vehicleTitle: { flex: 1, fontSize: 18, fontWeight: '900', color: '#fff', letterSpacing: 0.2 },
+
+  photoIconBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.30)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    marginLeft: 10,
+    marginRight: 8,
+  },
+  photoIconText: { fontSize: 16 },
 
   vinPill: {
     paddingHorizontal: 10,
@@ -688,17 +1041,8 @@ const styles = StyleSheet.create({
   },
   vinPillText: { color: '#e5e7eb', fontSize: 12, fontWeight: '800' },
 
-  vehicleDetails: {
-    marginTop: 8,
-    fontSize: 13.5,
-    color: 'rgba(255,255,255,0.78)',
-    lineHeight: 18,
-  },
-  rowDivider: {
-    height: 1,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    marginVertical: 12,
-  },
+  vehicleDetails: { marginTop: 8, fontSize: 13.5, color: 'rgba(255,255,255,0.78)', lineHeight: 18 },
+  rowDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.08)', marginVertical: 12 },
 
   inlineBtns: { flexDirection: 'row', gap: 10, justifyContent: 'flex-end' },
   rowBtn: {
@@ -710,18 +1054,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     minWidth: 96,
   },
-  rowBtnNeutral: {
-    backgroundColor: 'rgba(0,0,0,0.22)',
-    borderColor: 'rgba(255,255,255,0.12)',
-  },
-  rowBtnDanger: {
-    backgroundColor: 'rgba(255,102,102,0.10)',
-    borderColor: 'rgba(255,102,102,0.45)',
-  },
+  rowBtnNeutral: { backgroundColor: 'rgba(0,0,0,0.22)', borderColor: 'rgba(255,255,255,0.12)' },
+  rowBtnDanger: { backgroundColor: 'rgba(255,102,102,0.10)', borderColor: 'rgba(255,102,102,0.45)' },
   rowBtnText: { color: '#fff', fontWeight: '900', fontSize: 15 },
   rowBtnTextDanger: { color: '#ffe4e6' },
 
-  // Bottom action (slightly smaller + cleaner)
   addNewButton: {
     marginTop: 12,
     marginBottom: 10,
@@ -740,13 +1077,17 @@ const styles = StyleSheet.create({
   },
   addNewText: { color: '#07110a', fontSize: 18, fontWeight: '900', letterSpacing: 0.2 },
 
-  // Add VIN modal (unchanged)
-  vinModalContainer: {
-    flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', justifyContent: 'center', alignItems: 'center', paddingTop: 50,
-  },
+  // Add VIN modal
+  vinModalContainer: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', justifyContent: 'center', alignItems: 'center', paddingTop: 50 },
   vinModalContent: {
-    backgroundColor: '#121212', borderRadius: 20, width: '92%', maxHeight: '94%',
-    paddingVertical: 24, paddingHorizontal: 20, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: '#121212',
+    borderRadius: 20,
+    width: '92%',
+    maxHeight: '94%',
+    paddingVertical: 24,
+    paddingHorizontal: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
   },
   vinScrollContent: { paddingBottom: 60, alignItems: 'center' },
   closeIcon: {
@@ -761,8 +1102,18 @@ const styles = StyleSheet.create({
   closeIconText: { fontSize: 22, color: '#000', fontWeight: 'bold' },
 
   optionButton: {
-    backgroundColor: GREEN, paddingVertical: 20, paddingHorizontal: 24, borderRadius: 14, marginBottom: 18,
-    width: '100%', alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.1, shadowOffset: { width: 0, height: 2 }, shadowRadius: 4, elevation: 3,
+    backgroundColor: GREEN,
+    paddingVertical: 20,
+    paddingHorizontal: 24,
+    borderRadius: 14,
+    marginBottom: 18,
+    width: '100%',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 4,
+    elevation: 3,
   },
   optionButtonText: { color: '#0f172a', fontSize: 16, fontWeight: '900' },
   optionSubText: { color: '#14532d', fontSize: 13, marginTop: 4, textAlign: 'center', fontWeight: '700' },
@@ -783,7 +1134,7 @@ const styles = StyleSheet.create({
   vinImageLarge: { width: '100%', height: 180, resizeMode: 'contain', marginTop: 12, borderRadius: 8 },
   vinLabelLarge: { fontSize: 16, fontWeight: '800', color: '#e2e8f0', textAlign: 'center' },
 
-  // Edit modal fields (cleaner)
+  // Edit modal fields
   editField: {
     marginBottom: 12,
     backgroundColor: 'rgba(255,255,255,0.05)',
@@ -835,7 +1186,7 @@ const styles = StyleSheet.create({
   decodeBtnDisabled: { opacity: 0.6 },
   decodeBtnText: { color: '#0f172a', fontSize: 16, fontWeight: '900' },
 
-  // Overlay (shared look with ServiceBox)
+  // Overlay
   overlay: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 99999,
@@ -861,9 +1212,75 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 10 },
   },
   spinnerRow: {
-    width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.06)', marginBottom: 12,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    marginBottom: 12,
   },
   thinkingTitle: { color: '#fff', fontSize: 18, fontWeight: '900' },
   thinkingSub: { color: '#9aa5b1', fontSize: 13, textAlign: 'center', marginTop: 6 },
+
+  // ✅ Photo chooser styles
+  chooserBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.80)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+  },
+  chooserSheet: {
+    width: '100%',
+    maxWidth: 520,
+    backgroundColor: '#121212',
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    padding: 16,
+  },
+  chooserHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  chooserTitle: { color: '#fff', fontSize: 18, fontWeight: '900' },
+  chooserClose: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  chooserCloseText: { color: '#fff', fontSize: 18, fontWeight: '900' },
+  chooserSub: { color: '#94a3b8', fontSize: 13, marginTop: 10, textAlign: 'center', lineHeight: 18 },
+
+  chooserBtnPrimary: {
+    marginTop: 12,
+    backgroundColor: GREEN,
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.22,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 5,
+  },
+  chooserBtnPrimaryText: { color: '#0f172a', fontWeight: '900', fontSize: 14 },
+
+  chooserBtnSecondary: {
+    marginTop: 10,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chooserBtnSecondaryText: { color: '#fff', fontWeight: '900', fontSize: 14 },
 });

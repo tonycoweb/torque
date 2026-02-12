@@ -81,7 +81,7 @@ export default function RobotAssistant({ isChatting }) {
 
 const styles = StyleSheet.create({
   container: {
-    marginTop: 10,
+    marginTop: -10,
     marginLeft: 10,
     flexDirection: 'row',
     alignItems: 'flex-start',

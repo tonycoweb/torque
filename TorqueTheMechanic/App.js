@@ -23,6 +23,7 @@ import ChatMessages from './components/ChatMessages';
 import ChatBoxFixed from './components/ChatBoxFixed';
 import SavedChatsPanel from './components/SavedChatsPanel';
 import VehicleSelector from './components/VehicleSelector';
+import VehiclePhotoModal from './components/VehiclePhotoModal'; // ✅ hosted at App root
 import LoginScreen from './components/LoginScreen';
 import SettingsModal from './components/SettingsModal';
 
@@ -38,8 +39,6 @@ import * as FileSystem from 'expo-file-system';
 
 import mobileAds, { RewardedAd, RewardedAdEventType } from 'react-native-google-mobile-ads';
 
-
-
 // ===================== BACKEND =====================
 const BACKEND_BASE = 'http://192.168.1.246:3001';
 const API_CHAT_URL = `${BACKEND_BASE}/chat`;
@@ -51,30 +50,12 @@ const adUnitId = __DEV__
   ? Platform.OS === 'ios'
     ? 'ca-app-pub-3940256099942544/1712485313'
     : 'ca-app-pub-3940256099942544/5224354917'
-    : 'your-real-admob-id-here';
+  : 'your-real-admob-id-here';
 
 // ===================== HELPERS =====================
 
-const findVehicleByKey = async (key) => {
-  if (!key) return null;
-  try {
-    const saved = await getAllVehicles();
-    const list = (saved || []).map(normalizeVehicle);
-
-    // vehicleKey matches VIN (upper) OR id
-    const upper = String(key).toUpperCase().trim();
-    return (
-      list.find((v) => (v?.vin ? String(v.vin).toUpperCase().trim() : null) === upper) ||
-      list.find((v) => String(v?.id) === String(key)) ||
-      null
-    );
-  } catch {
-    return null;
-  }
-};
-
-const LAST_CHAT_ID_KEY = 'last_chat_id'; // global fallback (kept)
-const LAST_CHAT_BY_VEHICLE_KEY = 'last_chat_id_by_vehicle'; // ✅ new per-vehicle map
+const LAST_CHAT_ID_KEY = 'last_chat_id';
+const LAST_CHAT_BY_VEHICLE_KEY = 'last_chat_id_by_vehicle';
 
 const trimTurns = (history, maxTurns = 6) => {
   const out = [];
@@ -99,6 +80,23 @@ const getVehicleKey = (v) => {
   if (v.vin) return String(v.vin).toUpperCase().trim();
   if (v.id) return String(v.id);
   return null;
+};
+
+const findVehicleByKey = async (key) => {
+  if (!key) return null;
+  try {
+    const saved = await getAllVehicles();
+    const list = (saved || []).map(normalizeVehicle);
+
+    const upper = String(key).toUpperCase().trim();
+    return (
+      list.find((v) => (v?.vin ? String(v.vin).toUpperCase().trim() : null) === upper) ||
+      list.find((v) => String(v?.id) === String(key)) ||
+      null
+    );
+  } catch {
+    return null;
+  }
 };
 
 const readLastChatByVehicleMap = async () => {
@@ -278,8 +276,8 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
 
   // Attachments
-  const [attachedImage, setAttachedImage] = useState(null); // { uri, base64 }
-  const [attachedAudio, setAttachedAudio] = useState(null); // { uri, durationMs, mimeType, filename }
+  const [attachedImage, setAttachedImage] = useState(null);
+  const [attachedAudio, setAttachedAudio] = useState(null);
   const [attachmentLocked, setAttachmentLocked] = useState(false);
 
   const [showAudioRecorder, setShowAudioRecorder] = useState(false);
@@ -293,14 +291,70 @@ export default function App() {
 
   const [focusTick, setFocusTick] = useState(0);
 
-  // forces ChatMessages snap-to-bottom when thread changes
   const [threadKey, setThreadKey] = useState('new');
 
   const rewardedRef = useRef(null);
 
-  // state for chat to set
   const [threadVehicleKey, setThreadVehicleKey] = useState(null);
 
+  // ✅ vehicle photo modal state (hosted at App root)
+  const [photoModalVisible, setPhotoModalVisible] = useState(false);
+  const [photoTargetKey, setPhotoTargetKey] = useState(null);
+
+  const openVehiclePhoto = (v) => {
+    const key = getVehicleKey(v);
+    if (!key) return;
+    setPhotoTargetKey(key);
+    setPhotoModalVisible(true);
+  };
+
+  const pickVehiclePhotoFromLibrary = async () => {
+  try {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm?.granted) {
+      Alert.alert('Permission needed', 'Enable Photo Library access in Settings.');
+      return null;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: false,  // ✅ let VehiclePhotoModal handle the crop/adjust
+      quality: 0.9,
+    });
+
+    if (result.canceled) return null;
+
+    const uri = result.assets?.[0]?.uri;
+    return uri || null;
+  } catch (e) {
+    Alert.alert('Photo error', e?.message || 'Could not open photo library.');
+    return null;
+  }
+};
+
+
+  const handleSaveVehiclePhoto = async (uri) => {
+    try {
+      const key = photoTargetKey;
+      if (!key || !uri) return;
+
+      const target = await findVehicleByKey(key);
+      if (!target) return;
+
+      const updated = normalizeVehicle({ ...target, photoUri: uri });
+
+      await saveVehicle(updated);
+
+      // ✅ Update home-selected vehicle instantly if it matches
+      const selectedKey = getVehicleKey(vehicle);
+      const updatedKey = getVehicleKey(updated);
+      if (selectedKey && updatedKey && selectedKey === updatedKey) {
+        setVehicle(updated);
+      }
+    } catch (e) {
+      console.warn('handleSaveVehiclePhoto failed:', e?.message || e);
+    }
+  };
 
   // ===================== Robot anim =====================
   const robotTranslateY = useRef(new Animated.Value(0)).current;
@@ -327,12 +381,33 @@ export default function App() {
     })();
   }, []);
 
-  // ===================== Load vehicles =====================
+  // ===================== Load vehicles (improved: restore selectedVehicle first) =====================
   useEffect(() => {
     (async () => {
-      const saved = await getAllVehicles();
-      const list = (saved || []).map(normalizeVehicle);
-      if (list.length > 0) setVehicle(list[0]);
+      try {
+        const saved = await getAllVehicles();
+        const list = (saved || []).map(normalizeVehicle);
+        if (list.length === 0) return;
+
+        // ✅ prefer persisted selectedVehicle if present
+        const rawSel = await AsyncStorage.getItem('selectedVehicle');
+        if (rawSel) {
+          try {
+            const parsed = JSON.parse(rawSel);
+            const key = getVehicleKey(parsed);
+            const found = key ? await findVehicleByKey(key) : null;
+            if (found) {
+              setVehicle(found);
+              return;
+            }
+          } catch {}
+        }
+
+        // fallback
+        setVehicle(list[0]);
+      } catch (e) {
+        console.warn('Load vehicles failed:', e?.message || e);
+      }
     })();
   }, []);
 
@@ -392,137 +467,123 @@ export default function App() {
   };
 
   // ===================== THREAD LOAD HELPERS =====================
-const loadChatThread = async (idToLoad) => {
-  if (!idToLoad) return false;
+  const loadChatThread = async (idToLoad) => {
+    if (!idToLoad) return false;
 
-  const loaded = await getChat(idToLoad);
-  if (!Array.isArray(loaded) || loaded.length === 0) return false;
+    const loaded = await getChat(idToLoad);
+    if (!Array.isArray(loaded) || loaded.length === 0) return false;
 
-  // ✅ read metadata (vehicleKey) from storage object
-  let metaKey = null;
-  try {
-    const all = await getAllChats();
-    const val = all?.[idToLoad];
-    if (val && typeof val === 'object' && !Array.isArray(val)) {
-      metaKey = val.vehicleKey || null;
-    }
-  } catch {}
-
-  setChatID(idToLoad);
-  setThreadKey(idToLoad);
-  setThreadVehicleKey(metaKey); // ✅ important
-  setChatHistory(loaded);
-  setMessages(
-    loaded.map((m) => ({
-      sender: m.role === 'user' ? 'user' : 'api',
-      text: normalizeMsgContent(m.content),
-    }))
-  );
-  setFocusTick((x) => x + 1);
-  return true;
-};
-
-
-  // ✅ requires this state somewhere near your other state:
-// const [threadVehicleKey, setThreadVehicleKey] = useState(null);
-
-const loadLastChatForSelectedVehicle = async () => {
-  try {
-    const vKey = getVehicleKey(vehicle);
-
-    // ✅ Re-hydrate ONLY if the in-memory thread belongs to the currently selected vehicle
-    if (
-      (!messages || messages.length === 0) &&
-      chatID &&
-      Array.isArray(chatHistory) &&
-      chatHistory.length > 0 &&
-      threadVehicleKey === vKey
-    ) {
-      setThreadKey(chatID);
-      setMessages(
-        chatHistory.map((m) => ({
-          sender: m.role === 'user' ? 'user' : 'api',
-          text: normalizeMsgContent(m.content),
-        }))
-      );
-      setFocusTick((x) => x + 1);
-      return;
-    }
-
-    // ✅ If a thread is already visible, do nothing
-    if (messages && messages.length) return;
-
-    // If no vehicle, fall back to global last chat
-    if (!vKey) {
-      const globalLastId = await AsyncStorage.getItem(LAST_CHAT_ID_KEY);
-      if (globalLastId) await loadChatThread(globalLastId);
-      return;
-    }
-
-    // 1) try vehicle->lastChat map
-    const map = await readLastChatByVehicleMap();
-    const mappedId = map?.[vKey];
-
-    if (mappedId) {
-      const ok = await loadChatThread(mappedId);
-      if (ok) return;
-
-      // stale mapping
-      delete map[vKey];
-      await writeLastChatByVehicleMap(map);
-    }
-
-    // 2) scan all chats and pick newest matching vehicleKey
-    const all = await getAllChats(); // object
-    const entries = Object.entries(all || {});
-
-    let bestId = null;
-    let bestTs = 0;
-
-    for (const [id, val] of entries) {
-      const isObj = val && typeof val === 'object' && !Array.isArray(val);
-      const metaKey = isObj ? val.vehicleKey : null;
-      if (metaKey !== vKey) continue;
-
-      const ts = (isObj && Number(val.updatedAt)) || Number(id) || 0;
-      if (ts > bestTs) {
-        bestTs = ts;
-        bestId = id;
+    let metaKey = null;
+    try {
+      const all = await getAllChats();
+      const val = all?.[idToLoad];
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        metaKey = val.vehicleKey || null;
       }
-    }
+    } catch {}
 
-    if (bestId) {
-      const ok = await loadChatThread(bestId);
-      if (ok) {
-        const nextMap = await readLastChatByVehicleMap();
-        nextMap[vKey] = bestId;
-        await writeLastChatByVehicleMap(nextMap);
+    setChatID(idToLoad);
+    setThreadKey(idToLoad);
+    setThreadVehicleKey(metaKey);
+    setChatHistory(loaded);
+    setMessages(
+      loaded.map((m) => ({
+        sender: m.role === 'user' ? 'user' : 'api',
+        text: normalizeMsgContent(m.content),
+      }))
+    );
+    setFocusTick((x) => x + 1);
+    return true;
+  };
+
+  const loadLastChatForSelectedVehicle = async () => {
+    try {
+      const vKey = getVehicleKey(vehicle);
+
+      if (
+        (!messages || messages.length === 0) &&
+        chatID &&
+        Array.isArray(chatHistory) &&
+        chatHistory.length > 0 &&
+        threadVehicleKey === vKey
+      ) {
+        setThreadKey(chatID);
+        setMessages(
+          chatHistory.map((m) => ({
+            sender: m.role === 'user' ? 'user' : 'api',
+            text: normalizeMsgContent(m.content),
+          }))
+        );
+        setFocusTick((x) => x + 1);
         return;
       }
+
+      if (messages && messages.length) return;
+
+      if (!vKey) {
+        const globalLastId = await AsyncStorage.getItem(LAST_CHAT_ID_KEY);
+        if (globalLastId) await loadChatThread(globalLastId);
+        return;
+      }
+
+      const map = await readLastChatByVehicleMap();
+      const mappedId = map?.[vKey];
+
+      if (mappedId) {
+        const ok = await loadChatThread(mappedId);
+        if (ok) return;
+
+        delete map[vKey];
+        await writeLastChatByVehicleMap(map);
+      }
+
+      const all = await getAllChats();
+      const entries = Object.entries(all || {});
+
+      let bestId = null;
+      let bestTs = 0;
+
+      for (const [id, val] of entries) {
+        const isObj = val && typeof val === 'object' && !Array.isArray(val);
+        const metaKey = isObj ? val.vehicleKey : null;
+        if (metaKey !== vKey) continue;
+
+        const ts = (isObj && Number(val.updatedAt)) || Number(id) || 0;
+        if (ts > bestTs) {
+          bestTs = ts;
+          bestId = id;
+        }
+      }
+
+      if (bestId) {
+        const ok = await loadChatThread(bestId);
+        if (ok) {
+          const nextMap = await readLastChatByVehicleMap();
+          nextMap[vKey] = bestId;
+          await writeLastChatByVehicleMap(nextMap);
+          return;
+        }
+      }
+
+      setChatID(null);
+      setThreadKey('new');
+      setThreadVehicleKey(vKey);
+      setChatHistory([]);
+      setMessages([]);
+      setFocusTick((x) => x + 1);
+    } catch (e) {
+      console.warn('loadLastChatForSelectedVehicle failed:', e?.message || e);
     }
+  };
 
-    // 3) none found => new empty thread
-    setChatID(null);
-    setThreadKey('new');
-    setThreadVehicleKey(vKey); // ✅ track “this empty thread is for the selected vehicle”
-    setChatHistory([]);
-    setMessages([]);
-    setFocusTick((x) => x + 1);
-  } catch (e) {
-    console.warn('loadLastChatForSelectedVehicle failed:', e?.message || e);
-  }
-};
-
-// ✅ single source of truth for auto-load on entering chat
-useEffect(() => {
-  if (isChatting) loadLastChatForSelectedVehicle();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [isChatting, vehicle?.vin, vehicle?.id, threadVehicleKey]);
+  useEffect(() => {
+    if (isChatting) loadLastChatForSelectedVehicle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isChatting, vehicle?.vin, vehicle?.id, threadVehicleKey]);
 
   // ===================== Attachments =====================
   const hasAnyAttachment = () => !!attachedImage || !!attachedAudio;
 
-  // ✅ Explicit “open chat” action (ONLY called from chat box user actions)
   const openChat = () => {
     if (!isChatting) setIsChatting(true);
     setShowSavedChats(false);
@@ -537,7 +598,6 @@ useEffect(() => {
     }
 
     try {
-      // ✅ camera means user wants to chat (attachment flows through chat)
       openChat();
 
       const perm = await ImagePicker.requestCameraPermissionsAsync();
@@ -589,7 +649,6 @@ useEffect(() => {
       return;
     }
 
-    // ✅ mic means user wants to chat (audio flows through chat)
     openChat();
     setShowAudioRecorder(true);
   };
@@ -608,7 +667,6 @@ useEffect(() => {
   const handleSend = async (textOrPayload) => {
     if (loading) return;
 
-    // ✅ sending is always an explicit chat action
     openChat();
 
     const text = typeof textOrPayload === 'string' ? textOrPayload : textOrPayload?.text || '';
@@ -629,7 +687,6 @@ useEffect(() => {
       setAttachedAudio(null);
       setAttachmentLocked(false);
 
-      // optional: clear global last id only (per-vehicle map stays, you can clear too if you want)
       AsyncStorage.removeItem(LAST_CHAT_ID_KEY).catch(() => {});
       return;
     }
@@ -695,25 +752,19 @@ useEffect(() => {
       setChatID(id);
       setThreadKey(id);
 
-      // ✅ save with per-vehicle metadata (backward compatible in getChat / panel)
       const vKey = getVehicleKey(vehicleForChat);
       await saveChat(id, updatedHistory, {
         vehicleKey: vKey,
         vehicleVin: vehicleForChat?.vin ? String(vehicleForChat.vin).toUpperCase().trim() : null,
-        // ✅ NEW: used by SavedChatsPanel badge
-  vehicleYear: vehicleForChat?.year ? String(vehicleForChat.year) : null,
-  vehicleMake: vehicleForChat?.make ? String(vehicleForChat.make) : null,
-  vehicleModel: vehicleForChat?.model ? String(vehicleForChat.model) : null,
+        vehicleYear: vehicleForChat?.year ? String(vehicleForChat.year) : null,
+        vehicleMake: vehicleForChat?.make ? String(vehicleForChat.make) : null,
+        vehicleModel: vehicleForChat?.model ? String(vehicleForChat.model) : null,
       });
 
-      //thread check
       setThreadVehicleKey(vKey || null);
 
-
-      // ✅ global last fallback
       await AsyncStorage.setItem(LAST_CHAT_ID_KEY, id);
 
-      // ✅ per-vehicle last chat mapping
       if (vKey) {
         const map = await readLastChatByVehicleMap();
         map[vKey] = id;
@@ -722,8 +773,8 @@ useEffect(() => {
 
       setAttachmentLocked(false);
     } catch (e) {
-      if (hasImg && imgSnap) setAttachedImage(imgSnap);
-      if (hasAudio && audioSnap) setAttachedAudio(audioSnap);
+      if (imgSnap) setAttachedImage(imgSnap);
+      if (audioSnap) setAttachedAudio(audioSnap);
 
       setMessages((prev) => [...prev, { sender: 'api', text: `⚠️ ${e?.message || 'Error sending message.'}` }]);
       setAttachmentLocked(false);
@@ -732,9 +783,6 @@ useEffect(() => {
     }
   };
 
-  // ✅ KEY FIX:
-  // ChatBoxFixed currently calls onFocus from keyboardDidShow + TextInput onFocus.
-  // So we MUST NOT open chat here — only bump focusTick.
   const handleChatFocus = () => {
     setFocusTick((x) => x + 1);
   };
@@ -744,8 +792,6 @@ useEffect(() => {
     Keyboard.dismiss();
     setIsChatting(false);
     setShowSavedChats(false);
-
-    // ✅ Hide messages visually, but keep history so it restores instantly
     setMessages([]);
 
     setActiveChatVehicle(null);
@@ -754,8 +800,9 @@ useEffect(() => {
     setAttachmentLocked(false);
   };
 
+  // ✅ UPDATED: don’t overwrite a newer object (ex: selector updated photoUri)
   const handleSelectVehicle = async (v) => {
-    const normalized = normalizeVehicle(v);
+    const normalized = normalizeVehicle(v || {});
     await saveVehicle(normalized);
     setVehicle(normalized);
     setActiveChatVehicle(null);
@@ -866,6 +913,7 @@ useEffect(() => {
                 onShowRewardedAd={showRewardedAd}
                 gateCameraWithAd={false}
                 triggerVinCamera={() => setShowCamera(true)}
+                onOpenVehiclePhoto={openVehiclePhoto}
               />
               <ServiceBox selectedVehicle={vehicle} />
             </>
@@ -902,14 +950,13 @@ useEffect(() => {
             </View>
           )}
 
-          {/* ✅ Chat messages only when chatting */}
           {isChatting && (
             <View style={styles.chatMessagesArea}>
               <ChatMessages
                 messages={messages}
                 loading={loading}
                 focusTick={focusTick}
-                bottomInset={120} // dock height-ish
+                bottomInset={120}
                 threadKey={threadKey}
               />
             </View>
@@ -919,100 +966,95 @@ useEffect(() => {
             visible={isChatting && showSavedChats}
             onClose={() => setShowSavedChats(false)}
             onSelect={async (chat) => {
-  if (loading) return;
+              if (loading) return;
 
-  // -------- New thread --------
-  if (!chat) {
-    setChatID(null);
-    setThreadKey('new');
-    const vKey = getVehicleKey(vehicle) || null;
-    setThreadVehicleKey(vKey);
+              if (!chat) {
+                setChatID(null);
+                setThreadKey('new');
+                const vKey = getVehicleKey(vehicle) || null;
+                setThreadVehicleKey(vKey);
 
-    setChatHistory([]);
-    setMessages([]);
-    setShowSavedChats(false);
+                setChatHistory([]);
+                setMessages([]);
+                setShowSavedChats(false);
 
-    // ✅ important: clear any previous override
-    setActiveChatVehicle(null);
+                setActiveChatVehicle(null);
 
-    setAttachedImage(null);
-    setAttachedAudio(null);
-    setAttachmentLocked(false);
+                setAttachedImage(null);
+                setAttachedAudio(null);
+                setAttachmentLocked(false);
 
-    await AsyncStorage.removeItem(LAST_CHAT_ID_KEY);
-    setFocusTick((x) => x + 1);
-    return;
-  }
+                await AsyncStorage.removeItem(LAST_CHAT_ID_KEY);
+                setFocusTick((x) => x + 1);
+                return;
+              }
 
-  // -------- Load selected saved chat --------
-  const id = chat.id || Date.now().toString();
-  const history = Array.isArray(chat.messages) ? chat.messages : [];
+              const id = chat.id || Date.now().toString();
+              const history = Array.isArray(chat.messages) ? chat.messages : [];
 
-  setChatID(id);
-  setThreadKey(id);
-  setThreadVehicleKey(chat.vehicleKey || null);
-  setChatHistory(history);
+              setChatID(id);
+              setThreadKey(id);
+              setThreadVehicleKey(chat.vehicleKey || null);
+              setChatHistory(history);
 
-  setMessages(
-    history.map((m) => ({
-      sender: m.role === 'user' ? 'user' : 'api',
-      text: normalizeMsgContent(m.content),
-    }))
-  );
+              setMessages(
+                history.map((m) => ({
+                  sender: m.role === 'user' ? 'user' : 'api',
+                  text: normalizeMsgContent(m.content),
+                }))
+              );
 
-  // global last
-  await AsyncStorage.setItem(LAST_CHAT_ID_KEY, id);
+              await AsyncStorage.setItem(LAST_CHAT_ID_KEY, id);
 
-  // ✅ update per-vehicle mapping for the chat's vehicleKey (NOT current selector)
-  if (chat.vehicleKey) {
-    const map = await readLastChatByVehicleMap();
-    map[chat.vehicleKey] = id;
-    await writeLastChatByVehicleMap(map);
-  }
+              if (chat.vehicleKey) {
+                const map = await readLastChatByVehicleMap();
+                map[chat.vehicleKey] = id;
+                await writeLastChatByVehicleMap(map);
+              }
 
-  // ✅ THE FIX:
-  // If the saved chat belongs to a different vehicle than the selector,
-  // either switch selector OR set an override context for chat.
-  const selectedKey = getVehicleKey(vehicle);
-  const chatKey = chat.vehicleKey || null;
+              const selectedKey = getVehicleKey(vehicle);
+              const chatKey = chat.vehicleKey || null;
 
-  if (chatKey && chatKey !== selectedKey) {
-    // Try to actually switch the selector to the chat’s vehicle (best UX)
-    const matched = await findVehicleByKey(chatKey);
+              if (chatKey && chatKey !== selectedKey) {
+                const matched = await findVehicleByKey(chatKey);
 
-    if (matched) {
-      setVehicle(matched); // ✅ selector updates visually
-      setActiveChatVehicle(null); // selector now matches, no override needed
-    } else {
-      // Fallback: keep selector as-is, but force chat context to this vehicle
-      setActiveChatVehicle({
-        source: 'overridden',
-        vin: chat.vehicleVin || (String(chatKey).length === 17 ? chatKey : null),
-        id: chat.vehicleVin ? String(chat.vehicleVin) : String(chatKey),
-        year: chat.vehicleYear || null,
-        make: chat.vehicleMake || null,
-        model: chat.vehicleModel || null,
-      });
-    }
-  } else {
-    // chat matches selector, no override needed
-    setActiveChatVehicle(null);
-  }
+                if (matched) {
+                  setVehicle(matched);
+                  setActiveChatVehicle(null);
+                } else {
+                  setActiveChatVehicle({
+                    source: 'overridden',
+                    vin: chat.vehicleVin || (String(chatKey).length === 17 ? chatKey : null),
+                    id: chat.vehicleVin ? String(chat.vehicleVin) : String(chatKey),
+                    year: chat.vehicleYear || null,
+                    make: chat.vehicleMake || null,
+                    model: chat.vehicleModel || null,
+                  });
+                }
+              } else {
+                setActiveChatVehicle(null);
+              }
 
-  setShowSavedChats(false);
-  setIsChatting(true);
-  setFocusTick((x) => x + 1);
-}}
+              setShowSavedChats(false);
+              setIsChatting(true);
+              setFocusTick((x) => x + 1);
+            }}
           />
         </View>
 
-        {/* ✅ FIXED BOTTOM DOCK (always visible) */}
         <View style={styles.chatDock}>
           <ChatBoxFixed
             onSend={handleSend}
-            // ✅ do NOT open chat on focus; ChatBoxFixed triggers onFocus on keyboardDidShow too
             onFocus={handleChatFocus}
-            onMicPress={handleMicPress}
+            onMicPress={() => {
+              if (loading || attachmentLocked) return;
+              if (attachedImage || attachedAudio) {
+                Alert.alert('One attachment at a time', 'Remove the current attachment before adding another.');
+                return;
+              }
+              openChat();
+              setShowAudioRecorder(true);
+            }}
             onCameraPress={handleCameraPress}
             onClearAudio={clearAttachedAudio}
             onClearImage={clearAttachedImage}
@@ -1021,12 +1063,10 @@ useEffect(() => {
             isSending={loading || attachmentLocked}
           />
 
-          {/* ✅ Optional: make “tap anywhere on dock” open chat WITHOUT relying on focus */}
           {!isChatting && (
             <TouchableOpacity
               style={styles.dockTapCatcher}
               onPress={() => {
-                // only open chat when user taps dock intentionally
                 openChat();
               }}
               activeOpacity={1}
@@ -1083,6 +1123,15 @@ useEffect(() => {
         renderContent()
       )}
 
+      {/* ✅ Vehicle Photo Modal hosted at App root */}
+      <VehiclePhotoModal
+        visible={photoModalVisible}
+        onClose={() => setPhotoModalVisible(false)}
+        onSave={handleSaveVehiclePhoto}
+        // ✅ Optional hook so App can enforce cropping UX
+        onPickFromLibrary={pickVehiclePhotoFromLibrary}
+      />
+
       <AudioRecorderModal
         visible={showAudioRecorder}
         onClose={() => setShowAudioRecorder(false)}
@@ -1123,16 +1172,13 @@ useEffect(() => {
 }
 
 const styles = StyleSheet.create({
-  // ✅ critical: remove padding from container so dock doesn't get pushed around
   container: { flex: 1, backgroundColor: '#121212' },
   loading: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
-  // ✅ move padding to content instead
   pageContent: {
     flex: 1,
     paddingTop: 50,
     paddingHorizontal: 20,
-    // ✅ prevents ServiceBox inputs from being hidden under dock
     paddingBottom: 33,
   },
 
@@ -1183,21 +1229,16 @@ const styles = StyleSheet.create({
   },
   decodeTitle: { color: '#fff', fontSize: 18, marginBottom: 5 },
 
-  // ✅ truly fixed dock
   chatDock: {
     left: 0,
     right: 0,
     bottom: 0,
     paddingHorizontal: 12,
     paddingTop: 8,
-    paddingBottom: Platform.OS === 'ios' ? 18 : 12,
     backgroundColor: 'rgba(18,18,18,0.92)',
     borderTopWidth: 1,
     borderTopColor: 'rgba(255,255,255,0.08)',
   },
 
-  // Optional: invisible layer that lets the whole dock area open chat intentionally
-  dockTapCatcher: {
-    ...StyleSheet.absoluteFillObject,
-  },
+  dockTapCatcher: { ...StyleSheet.absoluteFillObject },
 });
