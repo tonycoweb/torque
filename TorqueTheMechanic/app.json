@@ -1,6 +1,7 @@
 {
   "expo": {
-    "name": "Pocket Mechanic",
+    "name": "Torque The Mechanic",
+    "scheme": "pocketmechanic",
     "slug": "pocket-mechanic",
     "version": "1.1.0",
     "orientation": "portrait",
@@ -21,7 +22,9 @@
         {
           "microphonePermission": "Allow Torque The Mechanic to access your microphone for recording car sounds."
         }
-      ]
+      ],
+      "expo-secure-store",
+      "expo-web-browser"
     ],
     "splash": {
       "image": "./assets/splash-icon.png",

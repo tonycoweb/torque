@@ -48,7 +48,11 @@
     "react-native-typewriter-effect": "^0.1.4",
     "react-native-vector-icons": "^10.2.0",
     "uuid": "^11.1.0",
-    "expo-av": "~15.1.7"
+    "expo-av": "~15.1.7",
+    "expo-auth-session": "~6.2.1",
+    "expo-crypto": "~14.1.5",
+    "expo-secure-store": "~14.2.4",
+    "expo-web-browser": "~14.2.0"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",

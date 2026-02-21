@@ -20,54 +20,73 @@ export default function VinCamera({ onCapture, onCancel }) {
 
   useEffect(() => {
     if (!permission?.granted) requestPermission();
-  }, [permission]);
+  }, [permission, requestPermission]);
 
   const takePicture = async () => {
     if (!cameraRef.current) return;
 
-    // Take a full-frame photo with base64 for cropping
+    // ✅ Take full-frame photo WITHOUT base64 first (faster + smaller memory spike)
     const photo = await cameraRef.current.takePictureAsync({
-      quality: 0.75,
-      base64: true,
-      skipProcessing: Platform.OS === 'android', // faster
+      quality: 1,
+      base64: false,
+      skipProcessing: Platform.OS === 'android',
     });
 
-    // Map overlay rect (screen coords) to image pixels
     const imgW = photo.width;
     const imgH = photo.height;
 
+    // Map overlay rect (screen coords) to image pixels (best-effort)
     const scaleX = imgW / SCREEN_W;
     const scaleY = imgH / SCREEN_H;
 
+    const PAD_Y = 36; // a little more vertical forgiveness
     const crop = {
       originX: Math.max(0, Math.round(BOX.left * scaleX)),
-      originY: Math.max(0, Math.round(BOX.top * scaleY)),
+      originY: Math.max(0, Math.round((BOX.top - PAD_Y) * scaleY)),
       width: Math.min(imgW, Math.round(BOX.width * scaleX)),
-      height: Math.min(imgH, Math.round(BOX.height * scaleY)),
+      height: Math.min(imgH, Math.round((BOX.height + PAD_Y * 2) * scaleY)),
     };
 
+    // 1) Cropped strip (best OCR): bigger + higher quality
     let cropped = null;
     try {
-      // Keep final width in ~700–900px band; slightly lower JPEG to 0.7 for lean payload
       cropped = await ImageManipulator.manipulateAsync(
         photo.uri,
         [
           { crop },
-          { resize: { width: Math.min(900, Math.max(700, Math.round(crop.width))) } },
+          // ✅ sharper characters without exploding payload
+          { resize: { width: 1400 } },
         ],
-        { compress: 0.7, base64: true, format: ImageManipulator.SaveFormat.JPEG }
+        {
+          compress: 0.88,
+          base64: true,
+          format: ImageManipulator.SaveFormat.JPEG,
+        }
       );
     } catch (e) {
-      // Fallback to original if cropping fails
-      cropped = { uri: photo.uri, base64: photo.base64, width: imgW, height: imgH };
+      cropped = null;
     }
 
+    // 2) Full-frame fallback (downscaled): used only if server can't read the crop
+    // Keep this modest so it doesn’t blow payload/tokens.
+    const full = await ImageManipulator.manipulateAsync(
+      photo.uri,
+      [{ resize: { width: 1600 } }],
+      {
+        compress: 0.75,
+        base64: true,
+        format: ImageManipulator.SaveFormat.JPEG,
+      }
+    );
+
     onCapture?.({
-      uri: cropped.uri,
-      base64: cropped.base64,
-      width: cropped.width,
-      height: cropped.height,
-      original: { uri: photo.uri, base64: photo.base64, width: photo.width, height: photo.height },
+      uri: (cropped && cropped.uri) || photo.uri,
+      base64: (cropped && cropped.base64) || full.base64,
+      fullBase64: full.base64, // ✅ NEW: send this to backend as fallback
+      width: (cropped && cropped.width) || imgW,
+      height: (cropped && cropped.height) || imgH,
+      // Keep some originals handy if you were using them elsewhere
+      original: { uri: photo.uri, width: photo.width, height: photo.height },
     });
   };
 
@@ -92,12 +111,12 @@ export default function VinCamera({ onCapture, onCancel }) {
       <View style={styles.rectangle} />
 
       {/* Capture */}
-      <TouchableOpacity onPress={takePicture} style={styles.snapButton}>
+      <TouchableOpacity onPress={takePicture} style={styles.snapButton} activeOpacity={0.9}>
         <Text style={styles.snapText}>📸 Capture VIN</Text>
       </TouchableOpacity>
 
       {/* Cancel */}
-      <TouchableOpacity onPress={onCancel} style={styles.cancelButton}>
+      <TouchableOpacity onPress={onCancel} style={styles.cancelButton} activeOpacity={0.9}>
         <Text style={styles.cancelText}>Cancel</Text>
       </TouchableOpacity>
     </View>
@@ -126,9 +145,9 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     zIndex: 20,
   },
-  snapText: { color: '#fff', fontSize: 16 },
+  snapText: { color: '#fff', fontSize: 16, fontWeight: '700' },
   cancelButton: { position: 'absolute', top: 40, right: 20, padding: 10, zIndex: 20 },
-  cancelText: { color: '#ccc', fontSize: 16 },
+  cancelText: { color: '#ccc', fontSize: 16, fontWeight: '700' },
   permissionContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   permissionText: { color: '#fff', fontSize: 16 },
 });

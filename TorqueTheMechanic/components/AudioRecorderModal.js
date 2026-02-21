@@ -2,14 +2,18 @@
 // ✅ Pill-style recorder that supports playback + attach checkmark.
 // ✅ Does NOT auto-send. It returns { uri, durationMs } to App via onDone().
 // ✅ Adds: 3s countdown before record + 10s max cap + waveform visual.
+// ✅ UPDATED: uses smaller recording profile (LOW_QUALITY) to help keep uploads under 10MB.
+// ✅ UPDATED: safer cleanup + avoids timer leaks + avoids calling setState after unmount.
+// ✅ UPDATED: metering enabled where possible; waveform fallback remains.
+
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, View, Text, TouchableOpacity, StyleSheet, Platform, Alert } from 'react-native';
 import { Audio } from 'expo-av';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 
-const MAX_RECORD_MS = 10_000;     // ✅ safeguard cap
-const COUNTDOWN_SEC = 3;          // ✅ pre-roll safety countdown
-const WAVE_BARS = 18;             // waveform bar count
+const MAX_RECORD_MS = 10_000; // ✅ safeguard cap
+const COUNTDOWN_SEC = 3; // ✅ pre-roll safety countdown
+const WAVE_BARS = 18; // waveform bar count
 
 async function safeSetModeRecording(on) {
   try {
@@ -35,6 +39,8 @@ async function safeSetModeRecording(on) {
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 export default function AudioRecorderModal({ visible, onClose, onDone, disabled = false }) {
+  const mountedRef = useRef(false);
+
   const recRef = useRef(null);
   const soundRef = useRef(null);
 
@@ -45,40 +51,49 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
 
-  const [countdown, setCountdown] = useState(0);      // 3..2..1
+  const [countdown, setCountdown] = useState(0); // 3..2..1
   const countingDown = countdown > 0;
 
   const [uri, setUri] = useState(null);
   const [durationMs, setDurationMs] = useState(null);
 
-  const [meter, setMeter] = useState(0);              // 0..1
+  const [meter, setMeter] = useState(0); // 0..1
   const meterSmoothRef = useRef(0);
 
   const [playing, setPlaying] = useState(false);
   const [posMs, setPosMs] = useState(0);
 
-  const [recordedMs, setRecordedMs] = useState(0);    // live while recording
+  const [recordedMs, setRecordedMs] = useState(0); // live while recording
   const recordedMsRef = useRef(0);
 
   // “waveform” state – array of heights (0..1)
   const [wave, setWave] = useState(Array.from({ length: WAVE_BARS }, () => 0.1));
   const waveRef = useRef(wave);
 
+  const safeSet = (setter) => {
+    if (!mountedRef.current) return;
+    setter();
+  };
+
   const resetState = () => {
-    setReady(false);
-    setBusy(false);
-    setRecording(false);
-    setCountdown(0);
-    setUri(null);
-    setDurationMs(null);
-    setMeter(0);
-    setPlaying(false);
-    setPosMs(0);
-    setRecordedMs(0);
+    safeSet(() => {
+      setReady(false);
+      setBusy(false);
+      setRecording(false);
+      setCountdown(0);
+      setUri(null);
+      setDurationMs(null);
+      setMeter(0);
+      setPlaying(false);
+      setPosMs(0);
+      setRecordedMs(0);
+    });
+
     recordedMsRef.current = 0;
+
     const init = Array.from({ length: WAVE_BARS }, () => 0.12);
     waveRef.current = init;
-    setWave(init);
+    safeSet(() => setWave(init));
   };
 
   const clearTimers = () => {
@@ -116,8 +131,10 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
         soundRef.current = null;
       }
     } catch {}
-    setPlaying(false);
-    setPosMs(0);
+    safeSet(() => {
+      setPlaying(false);
+      setPosMs(0);
+    });
   };
 
   const cleanupAll = async () => {
@@ -130,6 +147,13 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
   };
 
   useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!visible) {
       cleanupAll().finally(() => resetState());
       return;
@@ -137,7 +161,7 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
 
     (async () => {
       try {
-        setBusy(true);
+        safeSet(() => setBusy(true));
 
         const perm = await Audio.requestPermissionsAsync();
         if (!perm?.granted) {
@@ -146,12 +170,12 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
         }
 
         await safeSetModeRecording(true);
-        setReady(true);
+        safeSet(() => setReady(true));
       } catch (e) {
         console.log('Audio init error:', e);
         Alert.alert('Audio init failed', e?.message || 'Could not initialize audio.');
       } finally {
-        setBusy(false);
+        safeSet(() => setBusy(false));
       }
     })();
 
@@ -163,26 +187,23 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
 
   // -------- waveform animator (driven by metering) --------
   const pushWave = (normMeter) => {
-    // smooth meter a bit so wave looks stable
     meterSmoothRef.current = meterSmoothRef.current * 0.75 + normMeter * 0.25;
     const base = meterSmoothRef.current;
 
-    // create “wave” bars around base + jitter
     const prev = waveRef.current || [];
     const next = [];
     for (let i = 0; i < WAVE_BARS; i++) {
       const jitter = (Math.random() - 0.5) * 0.22;
-      const drift = (i % 2 === 0 ? 0.04 : -0.04);
+      const drift = i % 2 === 0 ? 0.04 : -0.04;
       const target = clamp(base + jitter + drift, 0.08, 1);
 
-      // ease to target
       const last = prev[i] ?? 0.1;
       const eased = last * 0.65 + target * 0.35;
       next.push(eased);
     }
 
     waveRef.current = next;
-    setWave(next);
+    safeSet(() => setWave(next));
   };
 
   // -------- countdown -> start --------
@@ -190,29 +211,29 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
     if (disabled || !ready || busy || recording || countingDown) return;
 
     try {
-      // clear any previous clip
       await cleanupSound();
-      setUri(null);
-      setDurationMs(null);
-      setMeter(0);
-      setPosMs(0);
-      setRecordedMs(0);
+
+      safeSet(() => {
+        setUri(null);
+        setDurationMs(null);
+        setMeter(0);
+        setPosMs(0);
+        setRecordedMs(0);
+      });
       recordedMsRef.current = 0;
 
-      // start countdown
-      setCountdown(COUNTDOWN_SEC);
+      safeSet(() => setCountdown(COUNTDOWN_SEC));
       clearTimers();
 
-      countdownTimerRef.current = setInterval(async () => {
+      countdownTimerRef.current = setInterval(() => {
+        if (!mountedRef.current) return;
         setCountdown((c) => {
           const next = c - 1;
           if (next <= 0) {
-            // stop interval and actually start recording
             if (countdownTimerRef.current) {
               clearInterval(countdownTimerRef.current);
               countdownTimerRef.current = null;
             }
-            // fire and forget
             startRecording().catch(() => {});
             return 0;
           }
@@ -222,14 +243,14 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
     } catch (e) {
       console.log('countdown error:', e);
       Alert.alert('Recording failed', e?.message || 'Could not start countdown.');
-      setCountdown(0);
+      safeSet(() => setCountdown(0));
       clearTimers();
     }
   };
 
   const cancelCountdown = () => {
     if (!countingDown) return;
-    setCountdown(0);
+    safeSet(() => setCountdown(0));
     clearTimers();
   };
 
@@ -238,19 +259,21 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
     if (disabled || !ready || busy || recording) return;
 
     try {
-      setBusy(true);
+      safeSet(() => setBusy(true));
 
       await safeSetModeRecording(true);
 
       const rec = new Audio.Recording();
 
-      // Enable metering where supported
-      const options = Audio.RecordingOptionsPresets.HIGH_QUALITY;
+      // ✅ Smaller file sizes vs HIGH_QUALITY
+      // For engine/road noises, this is more than enough and helps stay under 10MB comfortably.
+      const options = Audio.RecordingOptionsPresets.LOW_QUALITY;
+
       await rec.prepareToRecordAsync(options);
 
       rec.setProgressUpdateInterval(90);
       rec.setOnRecordingStatusUpdate((st) => {
-        if (!st) return;
+        if (!st || !mountedRef.current) return;
 
         if (typeof st.durationMillis === 'number') {
           recordedMsRef.current = st.durationMillis;
@@ -259,20 +282,18 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
 
         if (typeof st?.metering === 'number') {
           const db = clamp(st.metering, -60, 0);
-          const norm = (db + 60) / 60; // 0..1
+          const norm = (db + 60) / 60;
           setMeter(norm);
           pushWave(norm);
         } else {
-          // fallback: still animate wave a bit so it doesn’t look dead on Android configs
           pushWave(0.18 + Math.random() * 0.06);
         }
       });
 
       await rec.startAsync();
       recRef.current = rec;
-      setRecording(true);
+      safeSet(() => setRecording(true));
 
-      // ✅ hard stop safety at 10 seconds
       clearTimers();
       hardStopTimerRef.current = setTimeout(() => {
         stop().catch(() => {});
@@ -280,10 +301,10 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
     } catch (e) {
       console.log('startRecording error:', e);
       Alert.alert('Recording failed', e?.message || 'Could not start recording.');
-      setRecording(false);
+      safeSet(() => setRecording(false));
       clearTimers();
     } finally {
-      setBusy(false);
+      safeSet(() => setBusy(false));
     }
   };
 
@@ -292,7 +313,7 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
     if (disabled || !recRef.current || busy) return;
 
     try {
-      setBusy(true);
+      safeSet(() => setBusy(true));
       clearTimers();
 
       await recRef.current.stopAndUnloadAsync();
@@ -305,16 +326,19 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
       } catch {}
 
       recRef.current = null;
-      setRecording(false);
-      setUri(u || null);
-      setDurationMs(dur ?? recordedMsRef.current ?? null);
+
+      safeSet(() => {
+        setRecording(false);
+        setUri(u || null);
+        setDurationMs(dur ?? recordedMsRef.current ?? null);
+      });
 
       await safeSetModeRecording(false);
     } catch (e) {
       console.log('stopRecording error:', e);
       Alert.alert('Stop failed', e?.message || 'Could not stop recording.');
     } finally {
-      setBusy(false);
+      safeSet(() => setBusy(false));
     }
   };
 
@@ -322,14 +346,15 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
     if (disabled || busy || !uri) return;
 
     try {
-      setBusy(true);
+      safeSet(() => setBusy(true));
 
       if (!soundRef.current) {
         const { sound } = await Audio.Sound.createAsync(
           { uri },
           { shouldPlay: false, isLooping: false },
           (st) => {
-            if (!st) return;
+            if (!st || !mountedRef.current) return;
+
             if (typeof st.positionMillis === 'number') setPosMs(st.positionMillis);
 
             if (st.didJustFinish) {
@@ -344,16 +369,16 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
       const st = await soundRef.current.getStatusAsync();
       if (st?.isPlaying) {
         await soundRef.current.pauseAsync();
-        setPlaying(false);
+        safeSet(() => setPlaying(false));
       } else {
         await soundRef.current.playAsync();
-        setPlaying(true);
+        safeSet(() => setPlaying(true));
       }
     } catch (e) {
       console.log('playback error:', e);
       Alert.alert('Playback failed', e?.message || 'Could not play audio.');
     } finally {
-      setBusy(false);
+      safeSet(() => setBusy(false));
     }
   };
 
@@ -361,7 +386,7 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
     if (disabled || busy || !uri || recording || countingDown) return;
 
     try {
-      setBusy(true);
+      safeSet(() => setBusy(true));
       await cleanupSound();
 
       onDone?.({ uri, durationMs: durationMs || null });
@@ -369,19 +394,19 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
       onClose?.();
       resetState();
     } finally {
-      setBusy(false);
+      safeSet(() => setBusy(false));
     }
   };
 
   const close = async () => {
     if (busy) return;
     try {
-      setBusy(true);
+      safeSet(() => setBusy(true));
       await cleanupAll();
       onClose?.();
       resetState();
     } finally {
-      setBusy(false);
+      safeSet(() => setBusy(false));
     }
   };
 
@@ -392,14 +417,11 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
   // live “remaining” while recording
   const remainingSec = recording ? Math.max(0, Math.ceil((MAX_RECORD_MS - recordedMs) / 1000)) : null;
 
-  const canRecord = ready && !disabled && !busy && !recording && !countingDown;
-  const canStop = !disabled && !busy && recording;
   const canAttach = !!uri && !recording && !countingDown && !disabled && !busy;
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={close}>
       <View style={styles.overlay} pointerEvents="box-none">
-        {/* Bottom pill */}
         <View style={[styles.pill, (disabled || busy) && styles.pillDisabled]}>
           {/* left record/stop */}
           <TouchableOpacity
@@ -412,14 +434,8 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
             onPress={recording ? stop : countingDown ? cancelCountdown : beginCountdownThenStart}
             activeOpacity={0.85}
           >
-            <Ionicons
-              name={recording ? 'stop' : countingDown ? 'close' : 'mic'}
-              size={16}
-              color="#fff"
-            />
-            <Text style={styles.leftText}>
-              {recording ? 'Stop' : countingDown ? 'Cancel' : 'Record'}
-            </Text>
+            <Ionicons name={recording ? 'stop' : countingDown ? 'close' : 'mic'} size={16} color="#fff" />
+            <Text style={styles.leftText}>{recording ? 'Stop' : countingDown ? 'Cancel' : 'Record'}</Text>
           </TouchableOpacity>
 
           {/* middle waveform / playback */}
@@ -446,9 +462,7 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
                 >
                   <Ionicons name={playing ? 'pause' : 'play'} size={16} color="#fff" />
                 </TouchableOpacity>
-                <Text style={styles.midText}>
-                  {durSec ? `${durSec}s ready` : 'Play recording'}
-                </Text>
+                <Text style={styles.midText}>{durSec ? `${durSec}s ready` : 'Play recording'}</Text>
               </>
             ) : (
               <>
@@ -479,11 +493,8 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
           </TouchableOpacity>
         </View>
 
-        {/* small hint line */}
         <View style={styles.hintRow}>
-          <Text style={styles.hintText}>
-
-          </Text>
+          <Text style={styles.hintText} />
         </View>
       </View>
     </Modal>
@@ -504,11 +515,7 @@ function Waveform({ bars = [], idle = false }) {
         return (
           <View
             key={i}
-            style={[
-              styles.waveBar,
-              { height, opacity: idle ? 0.55 : 1 },
-              i % 3 === 0 ? styles.waveBarStrong : null,
-            ]}
+            style={[styles.waveBar, { height, opacity: idle ? 0.55 : 1 }, i % 3 === 0 ? styles.waveBarStrong : null]}
           />
         );
       })}
@@ -547,7 +554,7 @@ const styles = StyleSheet.create({
   },
   btnRec: { backgroundColor: '#4CAF50' },
   btnStop: { backgroundColor: '#FF6666' },
-  btnCountdown: { backgroundColor: '#3b82f6' }, // countdown state
+  btnCountdown: { backgroundColor: '#3b82f6' },
   btnDisabled: { opacity: 0.6 },
   leftText: { color: '#fff', fontWeight: '900', fontSize: 12 },
 
@@ -563,7 +570,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // Waveform
   waveWrap: {
     width: '100%',
     height: 30,
@@ -580,11 +586,9 @@ const styles = StyleSheet.create({
   waveBar: {
     width: 4,
     borderRadius: 999,
-    backgroundColor: '#3b82f6', // match your blue theme
+    backgroundColor: '#3b82f6',
   },
-  waveBarStrong: {
-    opacity: 0.92,
-  },
+  waveBarStrong: { opacity: 0.92 },
 
   playBtn: {
     width: 34,
@@ -616,5 +620,5 @@ const styles = StyleSheet.create({
     paddingLeft: 6,
     paddingBottom: Platform.OS === 'ios' ? 6 : 0,
   },
-  hintText: { color: '#888', fontSize: 11, fontWeight: '700', textAlign: 'center'},
+  hintText: { color: '#888', fontSize: 11, fontWeight: '700', textAlign: 'center' },
 });

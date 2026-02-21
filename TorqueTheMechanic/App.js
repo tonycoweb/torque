@@ -1,4 +1,12 @@
-// App.js
+// App.js (FULL FILE) — updated for ServiceBox backend integration (minimal deltas)
+//
+// ✅ ADDED IN THIS REVISION (keeps your current flow intact)
+// 1) Adds API_GENERATE_SERVICE_URL constant
+// 2) Adds authed helper: generateServiceRecommendations({ vehicle, currentMileage })
+// 3) Adds onGenerateServiceRecs + onRefreshEnergy props to <ServiceBox />
+//    - ServiceBox can call the backend directly through App (auth + energy + consistent errors)
+// 4) Passes selectedVehicle + mileage hint (from vehicle.mileage if present) safely
+
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
@@ -23,7 +31,7 @@ import ChatMessages from './components/ChatMessages';
 import ChatBoxFixed from './components/ChatBoxFixed';
 import SavedChatsPanel from './components/SavedChatsPanel';
 import VehicleSelector from './components/VehicleSelector';
-import VehiclePhotoModal from './components/VehiclePhotoModal'; // ✅ hosted at App root
+import VehiclePhotoModal from './components/VehiclePhotoModal';
 import LoginScreen from './components/LoginScreen';
 import SettingsModal from './components/SettingsModal';
 
@@ -36,16 +44,36 @@ import { getAllVehicles, saveVehicle } from './utils/VehicleStorage';
 
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
+import * as SecureStore from 'expo-secure-store';
+import EnergyPill from './components/EnergyPill';
 
-import mobileAds, { RewardedAd, RewardedAdEventType } from 'react-native-google-mobile-ads';
+import mobileAds, { RewardedAd, RewardedAdEventType, AdEventType } from 'react-native-google-mobile-ads';
 
 // ===================== BACKEND =====================
-const BACKEND_BASE = 'http://192.168.1.246:3001';
+// ✅ LIVE deployed SAM API (HTTP API)
+const BACKEND_BASE = 'https://rd9gvjuco8.execute-api.us-east-2.amazonaws.com';
+
 const API_CHAT_URL = `${BACKEND_BASE}/chat`;
 const API_AUDIO_URL = `${BACKEND_BASE}/audio-diagnose`;
 const API_IMAGE_URL = `${BACKEND_BASE}/image-diagnose`;
 const API_DECODE_VIN_URL = `${BACKEND_BASE}/decode-vin`;
+const API_DECODE_VIN_TEXT_URL = `${BACKEND_BASE}/decode-vin-text`;
+const API_ME_URL = `${BACKEND_BASE}/me`;
 
+// ✅ NEW: Service recs endpoint (matches Lambda route you pasted)
+const API_GENERATE_SERVICE_URL = `${BACKEND_BASE}/generate-service-recommendations`;
+
+// ===================== TOKENS =====================
+// Legacy single-JSON key (your older LoginScreen)
+const LEGACY_TOKEN_KEY = 'cognito_tokens_v1';
+
+// New split keys (your updated LoginScreen fix)
+const KEY_ID = 'pm_id_token_v1';
+const KEY_ACCESS = 'pm_access_token_v1';
+const KEY_REFRESH = 'pm_refresh_token_v1';
+const KEY_META = 'pm_token_meta_v1';
+
+// ===================== ADS =====================
 const adUnitId = __DEV__
   ? Platform.OS === 'ios'
     ? 'ca-app-pub-3940256099942544/1712485313'
@@ -53,7 +81,6 @@ const adUnitId = __DEV__
   : 'your-real-admob-id-here';
 
 // ===================== HELPERS =====================
-
 const LAST_CHAT_ID_KEY = 'last_chat_id';
 const LAST_CHAT_BY_VEHICLE_KEY = 'last_chat_id_by_vehicle';
 
@@ -191,12 +218,70 @@ const normalizeFileUri = (input) => {
   return uri;
 };
 
+// ===================== TOKEN HELPERS =====================
+async function clearAllTokens() {
+  await SecureStore.deleteItemAsync(KEY_ID).catch(() => {});
+  await SecureStore.deleteItemAsync(KEY_ACCESS).catch(() => {});
+  await SecureStore.deleteItemAsync(KEY_REFRESH).catch(() => {});
+  await SecureStore.deleteItemAsync(KEY_META).catch(() => {});
+  await SecureStore.deleteItemAsync(LEGACY_TOKEN_KEY).catch(() => {});
+}
+
+// ✅ reads split tokens first, falls back to legacy JSON, returns idToken||accessToken
+async function getJwtForApi() {
+  // 1) new split format
+  const [idToken, accessToken] = await Promise.all([
+    SecureStore.getItemAsync(KEY_ID).catch(() => null),
+    SecureStore.getItemAsync(KEY_ACCESS).catch(() => null),
+  ]);
+
+  if (idToken || accessToken) {
+    return idToken || accessToken || null;
+  }
+
+  // 2) legacy JSON blob (fallback)
+  const raw = await SecureStore.getItemAsync(LEGACY_TOKEN_KEY).catch(() => null);
+  if (!raw) return null;
+  try {
+    const tokens = JSON.parse(raw);
+    return tokens?.idToken || tokens?.accessToken || null;
+  } catch {
+    return null;
+  }
+}
+
+async function authedFetch(url, options = {}) {
+  const token = await getJwtForApi();
+  if (!token) {
+    const err = new Error('NOT_LOGGED_IN');
+    err.code = 'NOT_LOGGED_IN';
+    throw err;
+  }
+
+  const headers = {
+    ...(options.headers || {}),
+    Authorization: `Bearer ${token}`,
+  };
+
+  const resp = await fetch(url, { ...options, headers });
+
+  // centralized 401 handling so callers don’t forget
+  if (resp.status === 401) {
+    const txt = await resp.text().catch(() => '');
+    const err = new Error(`UNAUTHORIZED: ${txt || 'Token rejected/expired'}`);
+    err.code = 'UNAUTHORIZED';
+    throw err;
+  }
+
+  return resp;
+}
+
 // ===================== API CALLS =====================
 async function chatWithBackend({ messages, vehicle }) {
-  const resp = await fetch(API_CHAT_URL, {
+  const resp = await authedFetch(API_CHAT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, vehicle: vehicle || null }),
+    body: JSON.stringify({ messages, vehicle: vehicle || null, convoId: 'default' }),
   });
 
   let data = null;
@@ -219,7 +304,7 @@ async function sendAudioToBackend({ uri, prompt, vehicle, mimeType, filename }) 
     encoding: FileSystem.EncodingType.Base64,
   });
 
-  const resp = await fetch(API_AUDIO_URL, {
+  const resp = await authedFetch(API_AUDIO_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -241,7 +326,7 @@ async function sendAudioToBackend({ uri, prompt, vehicle, mimeType, filename }) 
 }
 
 async function sendImageToBackend({ base64, text, vehicle }) {
-  const resp = await fetch(API_IMAGE_URL, {
+  const resp = await authedFetch(API_IMAGE_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -260,7 +345,113 @@ async function sendImageToBackend({ base64, text, vehicle }) {
   return data;
 }
 
+// ✅ NEW: service recommendations (authed, centralized errors, matches Lambda response)
+// expected response (from your updated lambda):
+// { compact:[15], result:[15], flags, usage, mileage_used }
+async function generateServiceRecommendations({ vehicle, currentMileage }) {
+  const resp = await authedFetch(API_GENERATE_SERVICE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      vehicle: vehicle || null,
+      currentMileage: currentMileage ?? null,
+    }),
+  });
+
+  let data = null;
+  try {
+    data = await resp.json();
+  } catch {}
+
+  if (!resp.ok) {
+    const msg = data?.error || `Service recs failed (HTTP ${resp.status})`;
+    const err = new Error(msg);
+    err.code = data?.error === 'Insufficient energy' ? 'INSUFFICIENT_ENERGY' : 'SERVICE_RECS_FAILED';
+    err.data = data;
+    throw err;
+  }
+
+  return data;
+}
+
+// ===================== AD HELPERS =====================
+const runRewardedAd = async (unitId, { timeoutMs = 20000 } = {}) => {
+  return new Promise((resolve) => {
+    const rewarded = RewardedAd.createForAdRequest(unitId, {
+      requestNonPersonalizedAdsOnly: true,
+    });
+
+    const unsubs = [];
+    const cleanup = () => {
+      while (unsubs.length) {
+        try {
+          const u = unsubs.pop();
+          typeof u === 'function' ? u() : u?.remove?.();
+        } catch {}
+      }
+    };
+
+    let settled = false;
+    const resolveOnce = (val) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(val);
+    };
+
+    const timeoutId = setTimeout(() => resolveOnce(false), timeoutMs);
+
+    // Rewarded-specific events (these exist)
+    unsubs.push(
+      rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
+        try {
+          rewarded.show();
+        } catch {
+          clearTimeout(timeoutId);
+          resolveOnce(false);
+        }
+      })
+    );
+
+    unsubs.push(
+      rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => {
+        clearTimeout(timeoutId);
+        resolveOnce(true);
+      })
+    );
+
+    // Generic ad lifecycle events (use AdEventType, not RewardedAdEventType)
+    if (AdEventType?.CLOSED) {
+      unsubs.push(
+        rewarded.addAdEventListener(AdEventType.CLOSED, () => {
+          clearTimeout(timeoutId);
+          resolveOnce(false);
+        })
+      );
+    }
+
+    if (AdEventType?.ERROR) {
+      unsubs.push(
+        rewarded.addAdEventListener(AdEventType.ERROR, () => {
+          clearTimeout(timeoutId);
+          resolveOnce(false);
+        })
+      );
+    }
+
+    try {
+      rewarded.load();
+    } catch {
+      clearTimeout(timeoutId);
+      resolveOnce(false);
+    }
+  });
+};
+
 export default function App() {
+  const [energyBalance, setEnergyBalance] = useState(null);
+  const [energyLoading, setEnergyLoading] = useState(false);
+
   const [vehicle, setVehicle] = useState(null);
   const [garageName, setGarageName] = useState('');
 
@@ -269,7 +460,10 @@ export default function App() {
 
   const [isChatting, setIsChatting] = useState(false);
   const [showSavedChats, setShowSavedChats] = useState(false);
+
+  // null = loading, false = show login, true = app
   const [isLoggedIn, setIsLoggedIn] = useState(null);
+
   const [loading, setLoading] = useState(false);
   const [chatID, setChatID] = useState(null);
 
@@ -290,12 +484,39 @@ export default function App() {
   const [activeChatVehicle, setActiveChatVehicle] = useState(null);
 
   const [focusTick, setFocusTick] = useState(0);
-
   const [threadKey, setThreadKey] = useState('new');
-
-  const rewardedRef = useRef(null);
-
   const [threadVehicleKey, setThreadVehicleKey] = useState(null);
+
+  // ✅ prevent energy spam
+  const lastEnergyFetchRef = useRef(0);
+  // ✅ prevent multiple simultaneous VIN decodes (camera or typed)
+  const decodeVinInFlightRef = useRef(false);
+
+  // ✅ FIX A: remember user’s selected vehicle when a saved chat temporarily switches it
+  const chatVehicleRestoreRef = useRef({
+    shouldRestore: false,
+    vehicleObj: null,
+    vehicleKey: null,
+  });
+
+  const refreshEnergy = async ({ force = false } = {}) => {
+    const now = Date.now();
+    if (!force && now - lastEnergyFetchRef.current < 8000) return; // 8s cooldown
+    lastEnergyFetchRef.current = now;
+
+    try {
+      setEnergyLoading(true);
+      const r = await authedFetch(API_ME_URL, { method: 'GET' });
+      const data = await r.json().catch(() => null);
+      if (r.ok && data && typeof data.energy_balance === 'number') {
+        setEnergyBalance(data.energy_balance);
+      }
+    } catch (e) {
+      // auth failures handled elsewhere
+    } finally {
+      setEnergyLoading(false);
+    }
+  };
 
   // ✅ vehicle photo modal state (hosted at App root)
   const [photoModalVisible, setPhotoModalVisible] = useState(false);
@@ -309,29 +530,28 @@ export default function App() {
   };
 
   const pickVehiclePhotoFromLibrary = async () => {
-  try {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm?.granted) {
-      Alert.alert('Permission needed', 'Enable Photo Library access in Settings.');
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm?.granted) {
+        Alert.alert('Permission needed', 'Enable Photo Library access in Settings.');
+        return null;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        quality: 0.9,
+      });
+
+      if (result.canceled) return null;
+
+      const uri = result.assets?.[0]?.uri;
+      return uri || null;
+    } catch (e) {
+      Alert.alert('Photo error', e?.message || 'Could not open photo library.');
       return null;
     }
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: false,  // ✅ let VehiclePhotoModal handle the crop/adjust
-      quality: 0.9,
-    });
-
-    if (result.canceled) return null;
-
-    const uri = result.assets?.[0]?.uri;
-    return uri || null;
-  } catch (e) {
-    Alert.alert('Photo error', e?.message || 'Could not open photo library.');
-    return null;
-  }
-};
-
+  };
 
   const handleSaveVehiclePhoto = async (uri) => {
     try {
@@ -342,7 +562,6 @@ export default function App() {
       if (!target) return;
 
       const updated = normalizeVehicle({ ...target, photoUri: uri });
-
       await saveVehicle(updated);
 
       // ✅ Update home-selected vehicle instantly if it matches
@@ -376,12 +595,33 @@ export default function App() {
   // ===================== Init login =====================
   useEffect(() => {
     (async () => {
-      const user = await AsyncStorage.getItem('user');
-      setIsLoggedIn(!!user);
+      try {
+        const jwt = await getJwtForApi();
+
+        // No tokens saved → must login
+        if (!jwt) {
+          setIsLoggedIn(false);
+          return;
+        }
+
+        // Tokens exist → verify they're accepted by API Gateway (/me)
+        try {
+          await authedFetch(API_ME_URL, { method: 'GET' });
+          setIsLoggedIn(true);
+          refreshEnergy({ force: true });
+        } catch (e) {
+          // Token rejected/expired/audience mismatch → wipe + show login
+          await clearAllTokens();
+          setIsLoggedIn(false);
+        }
+      } catch (e) {
+        setIsLoggedIn(false);
+      }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ===================== Load vehicles (improved: restore selectedVehicle first) =====================
+  // ===================== Load vehicles =====================
   useEffect(() => {
     (async () => {
       try {
@@ -389,7 +629,6 @@ export default function App() {
         const list = (saved || []).map(normalizeVehicle);
         if (list.length === 0) return;
 
-        // ✅ prefer persisted selectedVehicle if present
         const rawSel = await AsyncStorage.getItem('selectedVehicle');
         if (rawSel) {
           try {
@@ -403,7 +642,6 @@ export default function App() {
           } catch {}
         }
 
-        // fallback
         setVehicle(list[0]);
       } catch (e) {
         console.warn('Load vehicles failed:', e?.message || e);
@@ -429,42 +667,7 @@ export default function App() {
     })();
   }, []);
 
-  const showRewardedAd = async () => {
-    return new Promise((resolve) => {
-      const rewarded = RewardedAd.createForAdRequest(adUnitId, { requestNonPersonalizedAdsOnly: true });
-      const cleanup = () => rewarded.removeAllListeners();
-
-      const timeoutId = setTimeout(() => {
-        cleanup();
-        resolve(false);
-      }, 10000);
-
-      rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
-        clearTimeout(timeoutId);
-        try {
-          rewarded.show();
-        } catch {
-          cleanup();
-          resolve(false);
-        }
-      });
-
-      rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => {
-        clearTimeout(timeoutId);
-        cleanup();
-        resolve(true);
-      });
-
-      try {
-        rewarded.load();
-        rewardedRef.current = rewarded;
-      } catch {
-        clearTimeout(timeoutId);
-        cleanup();
-        resolve(false);
-      }
-    });
-  };
+  const showRewardedAd = async () => runRewardedAd(adUnitId, { timeoutMs: 10000 });
 
   // ===================== THREAD LOAD HELPERS =====================
   const loadChatThread = async (idToLoad) => {
@@ -648,7 +851,6 @@ export default function App() {
       Alert.alert('One attachment at a time', 'Remove the current attachment before adding another.');
       return;
     }
-
     openChat();
     setShowAudioRecorder(true);
   };
@@ -772,7 +974,17 @@ export default function App() {
       }
 
       setAttachmentLocked(false);
+      refreshEnergy();
     } catch (e) {
+      if (String(e?.code) === 'NOT_LOGGED_IN' || String(e?.code) === 'UNAUTHORIZED') {
+        Alert.alert('Session expired', 'Please sign in again.');
+        await clearAllTokens();
+        setIsLoggedIn(false);
+        setLoading(false);
+        setAttachmentLocked(false);
+        return;
+      }
+
       if (imgSnap) setAttachedImage(imgSnap);
       if (audioSnap) setAttachedAudio(audioSnap);
 
@@ -798,6 +1010,12 @@ export default function App() {
     setAttachedImage(null);
     setAttachedAudio(null);
     setAttachmentLocked(false);
+
+    // ✅ FIX A: restore the user’s selected vehicle if we temporarily switched it to match a saved chat
+    if (chatVehicleRestoreRef.current?.shouldRestore && chatVehicleRestoreRef.current?.vehicleObj) {
+      setVehicle(chatVehicleRestoreRef.current.vehicleObj);
+    }
+    chatVehicleRestoreRef.current = { shouldRestore: false, vehicleObj: null, vehicleKey: null };
   };
 
   // ✅ UPDATED: don’t overwrite a newer object (ex: selector updated photoUri)
@@ -806,82 +1024,119 @@ export default function App() {
     await saveVehicle(normalized);
     setVehicle(normalized);
     setActiveChatVehicle(null);
+
+    // ✅ If user manually selects a vehicle, do NOT restore later on exit
+    chatVehicleRestoreRef.current = { shouldRestore: false, vehicleObj: null, vehicleKey: null };
   };
 
-  // ===================== VIN decode flow (kept) =====================
-  const decodeVinWithAd = async (base64Image) => {
-    return new Promise((resolve) => {
-      const rewarded = RewardedAd.createForAdRequest(adUnitId, { requestNonPersonalizedAdsOnly: true });
-      const cleanup = () => rewarded.removeAllListeners();
+  // ✅ NEW: wrapper so ServiceBox can call backend safely (with auth + energy refresh)
+  const handleGenerateServiceRecs = async ({ vehicle: vIn, currentMileage } = {}) => {
+    const v = vIn || vehicle;
+    if (!v) throw new Error('No vehicle selected.');
 
-      const timeoutId = setTimeout(() => {
-        Alert.alert('⚠️ Ad not ready', 'Try again in a few seconds.');
-        cleanup();
-        resolve();
-      }, 10000);
+    // Mileage hint:
+    // - prefer explicit currentMileage
+    // - else use v.mileage if present
+    const mileageHint =
+      currentMileage != null
+        ? currentMileage
+        : v?.mileage != null
+          ? v.mileage
+          : null;
 
-      rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
-        clearTimeout(timeoutId);
-        try {
-          rewarded.show();
-        } catch {
-          cleanup();
-          resolve();
-        }
-      });
-
-      rewarded.addAdEventListener(RewardedAdEventType.EARNED_REWARD, async () => {
-        setShowDecodingModal(true);
-        try {
-          const resp = await fetch(API_DECODE_VIN_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ base64Image }),
-          });
-          const data = await resp.json();
-
-          if (!resp.ok) {
-            Alert.alert('❌ VIN Decode Failed', data?.error || `HTTP ${resp.status}`);
-            setVinPhoto(null);
-            setShowDecodingModal(false);
-            cleanup();
-            return resolve();
-          }
-
-          const vehicleFromPhoto = data?.vehicle;
-          if (vehicleFromPhoto && vehicleFromPhoto.vin && vehicleFromPhoto.make && vehicleFromPhoto.model) {
-            const normalized = normalizeVehicle(vehicleFromPhoto);
-            await saveVehicle(normalized);
-            setVehicle(normalized);
-            setActiveChatVehicle(null);
-            setVinPhoto(null);
-
-            const name = `${normalized.year || ''} ${normalized.make || ''} ${normalized.model || ''}`.trim();
-            Alert.alert(`✅ ${name} added to garage`, normalized.engine || '');
-          } else {
-            Alert.alert('⚠️ No valid vehicle data', 'Could not parse a VIN from that image.');
-            setVinPhoto(null);
-          }
-        } catch (err) {
-          Alert.alert('❌ Error', err?.message || 'Could not decode VIN.');
-          setVinPhoto(null);
-        } finally {
-          setShowDecodingModal(false);
-          cleanup();
-          resolve();
-        }
-      });
-
-      try {
-        rewarded.load();
-        rewardedRef.current = rewarded;
-      } catch (e) {
-        clearTimeout(timeoutId);
-        cleanup();
-        Alert.alert('❌ Ad error', e?.message || 'Unknown error');
-        resolve();
-      }
+    const res = await generateServiceRecommendations({
+      vehicle: v,
+      currentMileage: mileageHint,
     });
+
+    // Keep energy pill accurate after spend
+    refreshEnergy();
+
+    return res; // {compact,result,flags,usage,mileage_used}
+  };
+
+  // ===================== VIN decode flow =====================
+  const decodeVinWithAd = async (primaryBase64, fullBase64) => {
+    if (decodeVinInFlightRef.current) return;
+    decodeVinInFlightRef.current = true;
+
+    setShowDecodingModal(true);
+
+    try {
+      const earned = await runRewardedAd(adUnitId, { timeoutMs: 10000 });
+      if (!earned) {
+        Alert.alert('⚠️ Ad not ready', 'Try again in a few seconds.');
+        return;
+      }
+
+      const resp1 = await authedFetch(API_DECODE_VIN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base64Image: stripDataUrl(primaryBase64),
+          fullBase64: fullBase64 ? stripDataUrl(fullBase64) : null,
+        }),
+      });
+
+      const data1 = await resp1.json().catch(() => null);
+      if (!resp1.ok) throw new Error(data1?.error || `VIN decode failed (HTTP ${resp1.status})`);
+
+      const vin = data1?.vin || data1?.vin_extracted;
+
+      if (!vin) {
+        Alert.alert('⚠️ No VIN found', 'Could not read a VIN from that image. Retake with better focus/light.');
+        setVinPhoto(null);
+        return;
+      }
+
+      const resp2 = await authedFetch(API_DECODE_VIN_TEXT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vin }),
+      });
+
+      const data2 = await resp2.json().catch(() => null);
+      if (!resp2.ok) throw new Error(data2?.error || `VIN text decode failed (HTTP ${resp2.status})`);
+
+      const decoded =
+        (data2?.vehicle && typeof data2.vehicle === 'object' && data2.vehicle) ||
+        (data2?.decoded && typeof data2.decoded === 'object' && data2.decoded) ||
+        null;
+
+      if (!decoded?.make || !decoded?.model) {
+        Alert.alert('⚠️ VIN decoded but incomplete', 'Got a VIN, but could not decode vehicle details.');
+        setVinPhoto(null);
+        return;
+      }
+
+      const vehicleFromPhoto = normalizeVehicle({ ...decoded, vin });
+      await saveVehicle(vehicleFromPhoto);
+      setVehicle(vehicleFromPhoto);
+      setActiveChatVehicle(null);
+      setVinPhoto(null);
+
+      const name = `${vehicleFromPhoto.year || ''} ${vehicleFromPhoto.make || ''} ${vehicleFromPhoto.model || ''}`.trim();
+      Alert.alert(`✅ ${name} added to garage`, vehicleFromPhoto.engine || '');
+
+      refreshEnergy();
+    } catch (err) {
+      if (String(err?.code) === 'NOT_LOGGED_IN' || String(err?.code) === 'UNAUTHORIZED') {
+        Alert.alert('Session expired', 'Please sign in again.');
+        await clearAllTokens();
+        setIsLoggedIn(false);
+        return;
+      }
+      Alert.alert('❌ Error', err?.message || 'Could not decode VIN.');
+      setVinPhoto(null);
+    } finally {
+      setShowDecodingModal(false);
+      decodeVinInFlightRef.current = false;
+    }
+  };
+
+  const devResetLogin = async () => {
+    await clearAllTokens();
+    setIsLoggedIn(false);
   };
 
   const renderContent = () => {
@@ -893,16 +1148,36 @@ export default function App() {
       );
     }
 
-    if (!isLoggedIn) return <LoginScreen onLogin={() => setIsLoggedIn(true)} />;
+    if (!isLoggedIn) {
+      return (
+        <LoginScreen
+          onLogin={async () => {
+            try {
+              const r = await authedFetch(API_ME_URL, { method: 'GET' });
+              if (!r.ok) {
+                const t = await r.text().catch(() => '');
+                throw new Error(`ME_FAILED: HTTP ${r.status} ${t}`);
+              }
+              setIsLoggedIn(true);
+              refreshEnergy({ force: true });
+            } catch (e) {
+              console.warn('Login success but /me failed:', e?.message || e);
+              Alert.alert(
+                'Signed in, but server setup failed',
+                `Your token was issued, but /me failed.\n\n${e?.message || 'Unknown error'}`
+              );
+              await clearAllTokens();
+              setIsLoggedIn(false);
+            }
+          }}
+        />
+      );
+    }
 
     return (
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
         <View style={styles.pageContent}>
-          <HomeHeader
-            garageName={garageName}
-            setGarageName={setGarageName}
-            onSettingsPress={() => setShowSettings(true)}
-          />
+          <HomeHeader garageName={garageName} setGarageName={setGarageName} onSettingsPress={() => setShowSettings(true)} />
           <SettingsModal visible={showSettings} onClose={() => setShowSettings(false)} />
 
           {!isChatting && (
@@ -914,9 +1189,50 @@ export default function App() {
                 gateCameraWithAd={false}
                 triggerVinCamera={() => setShowCamera(true)}
                 onOpenVehiclePhoto={openVehiclePhoto}
+                onDecodeVinTyped={async (vin) => {
+                  const resp = await authedFetch(API_DECODE_VIN_TEXT_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ vin }),
+                  });
+
+                  const data = await resp.json().catch(() => null);
+                  if (!resp.ok) throw new Error(data?.error || `VIN text decode failed (HTTP ${resp.status})`);
+
+                  const decoded =
+                    (data?.vehicle && typeof data.vehicle === 'object' && data.vehicle) ||
+                    (data?.decoded && typeof data.decoded === 'object' && data.decoded) ||
+                    null;
+
+                  if (!decoded?.make || !decoded?.model) {
+                    throw new Error('VIN decoded but missing key fields.');
+                  }
+
+                  const vehicleFromVin = normalizeVehicle({ ...decoded, vin });
+                  await saveVehicle(vehicleFromVin);
+                  setVehicle(vehicleFromVin);
+                  setActiveChatVehicle(null);
+
+                  refreshEnergy?.();
+
+                  const name = `${vehicleFromVin.year || ''} ${vehicleFromVin.make || ''} ${vehicleFromVin.model || ''}`.trim();
+                  Alert.alert(`✅ ${name} added to garage`, vehicleFromVin.engine || '');
+                }}
               />
-              <ServiceBox selectedVehicle={vehicle} />
+
+              {/* ✅ UPDATED: ServiceBox gets backend hook + energy refresh */}
+              <ServiceBox
+                selectedVehicle={vehicle}
+                onGenerateServiceRecs={handleGenerateServiceRecs}
+                onRefreshEnergy={() => refreshEnergy({ force: true })}
+              />
             </>
+          )}
+
+          {__DEV__ && (
+            <TouchableOpacity onPress={devResetLogin} style={{ marginTop: 12 }}>
+              <Text style={{ color: '#ff6666', fontWeight: '700' }}>DEV: Reset Login</Text>
+            </TouchableOpacity>
           )}
 
           {!isChatting && (
@@ -952,13 +1268,7 @@ export default function App() {
 
           {isChatting && (
             <View style={styles.chatMessagesArea}>
-              <ChatMessages
-                messages={messages}
-                loading={loading}
-                focusTick={focusTick}
-                bottomInset={120}
-                threadKey={threadKey}
-              />
+              <ChatMessages messages={messages} loading={loading} focusTick={focusTick} bottomInset={120} threadKey={threadKey} />
             </View>
           )}
 
@@ -1019,9 +1329,17 @@ export default function App() {
                 const matched = await findVehicleByKey(chatKey);
 
                 if (matched) {
+                  chatVehicleRestoreRef.current = {
+                    shouldRestore: true,
+                    vehicleObj: vehicle ? normalizeVehicle(vehicle) : null,
+                    vehicleKey: selectedKey || null,
+                  };
+
                   setVehicle(matched);
                   setActiveChatVehicle(null);
                 } else {
+                  chatVehicleRestoreRef.current = { shouldRestore: false, vehicleObj: null, vehicleKey: null };
+
                   setActiveChatVehicle({
                     source: 'overridden',
                     vin: chat.vehicleVin || (String(chatKey).length === 17 ? chatKey : null),
@@ -1032,6 +1350,7 @@ export default function App() {
                   });
                 }
               } else {
+                chatVehicleRestoreRef.current = { shouldRestore: false, vehicleObj: null, vehicleKey: null };
                 setActiveChatVehicle(null);
               }
 
@@ -1042,19 +1361,15 @@ export default function App() {
           />
         </View>
 
+        <View style={{ marginTop: 10 }}>
+          <EnergyPill energy={energyBalance} loading={energyLoading} />
+        </View>
+
         <View style={styles.chatDock}>
           <ChatBoxFixed
             onSend={handleSend}
             onFocus={handleChatFocus}
-            onMicPress={() => {
-              if (loading || attachmentLocked) return;
-              if (attachedImage || attachedAudio) {
-                Alert.alert('One attachment at a time', 'Remove the current attachment before adding another.');
-                return;
-              }
-              openChat();
-              setShowAudioRecorder(true);
-            }}
+            onMicPress={handleMicPress}
             onCameraPress={handleCameraPress}
             onClearAudio={clearAttachedAudio}
             onClearImage={clearAttachedImage}
@@ -1096,24 +1411,35 @@ export default function App() {
           }}
           onConfirm={async (b64FromPreview) => {
             try {
-              let payload = b64FromPreview;
+              let primary = b64FromPreview;
 
-              if (!payload && vinPhoto?.base64) payload = vinPhoto.base64;
-              if (!payload && vinPhoto?.original?.base64) payload = vinPhoto.original.base64;
+              if (!primary && vinPhoto?.base64) primary = vinPhoto.base64;
+              if (!primary && vinPhoto?.original?.base64) primary = vinPhoto.original.base64;
 
-              if (!payload && vinPhoto?.uri) {
+              let full = vinPhoto?.fullBase64 || vinPhoto?.original?.base64 || null;
+
+              if (!primary && vinPhoto?.uri) {
                 const fileB64 = await FileSystem.readAsStringAsync(vinPhoto.uri, {
                   encoding: FileSystem.EncodingType.Base64,
                 });
-                payload = fileB64;
+                primary = fileB64;
               }
 
-              if (!payload) {
+              if (!full && vinPhoto?.original?.uri) {
+                try {
+                  const fullFileB64 = await FileSystem.readAsStringAsync(vinPhoto.original.uri, {
+                    encoding: FileSystem.EncodingType.Base64,
+                  });
+                  full = fullFileB64;
+                } catch {}
+              }
+
+              if (!primary) {
                 Alert.alert('Image error', 'No image data found. Please retake the photo.');
                 return;
               }
 
-              await decodeVinWithAd(payload);
+              await decodeVinWithAd(primary, full);
             } catch (e) {
               Alert.alert('Image error', e?.message || 'Could not process image.');
             }
@@ -1128,7 +1454,6 @@ export default function App() {
         visible={photoModalVisible}
         onClose={() => setPhotoModalVisible(false)}
         onSave={handleSaveVehiclePhoto}
-        // ✅ Optional hook so App can enforce cropping UX
         onPickFromLibrary={pickVehiclePhotoFromLibrary}
       />
 
