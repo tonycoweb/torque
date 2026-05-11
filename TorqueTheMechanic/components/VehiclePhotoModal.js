@@ -14,7 +14,7 @@ import {
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -26,6 +26,14 @@ const { width: SCREEN_W } = Dimensions.get('window');
 
 // Card aspect for the garage tiles (matches VehicleSelector bg)
 const CARD_ASPECT = 16 / 9;
+
+// Expo SDK 53+ deprecates ImagePicker.MediaTypeOptions.
+// This helper keeps the code safe if Expo changes the exact enum shape.
+const IMAGE_MEDIA_TYPES = ImagePicker.MediaType?.Images
+  ? [ImagePicker.MediaType.Images]
+  : ImagePicker.MediaType?.IMAGE
+    ? [ImagePicker.MediaType.IMAGE]
+    : ['images'];
 
 export default function VehiclePhotoModal({
   visible,
@@ -61,6 +69,7 @@ export default function VehiclePhotoModal({
 
   // subtle “alive” drift while adjusting (optional)
   const drift = useSharedValue(0);
+
   useEffect(() => {
     drift.value = withRepeat(withTiming(1, { duration: 8000 }), -1, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -125,9 +134,9 @@ export default function VehiclePhotoModal({
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,     // ✅ native cropper
-        aspect: [16, 9],         // ✅ matches your card aspect
+        mediaTypes: IMAGE_MEDIA_TYPES,
+        allowsEditing: true,
+        aspect: [16, 9],
         quality: 0.95,
       });
 
@@ -173,7 +182,7 @@ export default function VehiclePhotoModal({
       resetAdjust();
       setStep('adjust');
     } catch (e) {
-      // noop
+      Alert.alert('Camera error', e?.message || 'Could not take photo.');
     } finally {
       setBusy(false);
     }
@@ -187,10 +196,15 @@ export default function VehiclePhotoModal({
   const baseRenderW = imgW ? imgW * baseScale : frameW;
   const baseRenderH = imgH ? imgH * baseScale : frameH;
 
-  // Clamp translate so you can’t drag the image beyond its edges
-  const clampTranslate = (tx, ty) => {
-    const renderW = baseRenderW * (scale.value || 1);
-    const renderH = baseRenderH * (scale.value || 1);
+  // ✅ IMPORTANT:
+  // Gesture callbacks run on Reanimated's UI thread.
+  // Any helper called inside them must be a worklet, or Reanimated throws:
+  // "Tried to synchronously call a non-worklet function on the UI thread."
+  const clampTranslate = (tx, ty, nextScale = scale.value) => {
+    'worklet';
+
+    const renderW = baseRenderW * (nextScale || 1);
+    const renderH = baseRenderH * (nextScale || 1);
 
     const maxX = Math.max(0, (renderW - frameW) / 2);
     const maxY = Math.max(0, (renderH - frameH) / 2);
@@ -209,9 +223,9 @@ export default function VehiclePhotoModal({
     .onChange((e) => {
       const nextX = startX.value + e.translationX;
       const nextY = startY.value + e.translationY;
-      const { x, y } = clampTranslate(nextX, nextY);
-      translateX.value = x;
-      translateY.value = y;
+      const clamped = clampTranslate(nextX, nextY, scale.value);
+      translateX.value = clamped.x;
+      translateY.value = clamped.y;
     });
 
   const pinchGesture = Gesture.Pinch()
@@ -220,12 +234,12 @@ export default function VehiclePhotoModal({
     })
     .onChange((e) => {
       const next = startScale.value * e.scale;
-      const clamped = Math.max(1, Math.min(next, 3.5));
-      scale.value = clamped;
+      const clampedScale = Math.max(1, Math.min(next, 3.5));
+      scale.value = clampedScale;
 
-      const { x, y } = clampTranslate(translateX.value, translateY.value);
-      translateX.value = x;
-      translateY.value = y;
+      const clamped = clampTranslate(translateX.value, translateY.value, clampedScale);
+      translateX.value = clamped.x;
+      translateY.value = clamped.y;
     });
 
   const composed = Gesture.Simultaneous(panGesture, pinchGesture);
@@ -281,7 +295,7 @@ export default function VehiclePhotoModal({
       onSave?.(result.uri);
       onClose?.();
     } catch (e) {
-      // noop
+      Alert.alert('Save failed', e?.message || 'Could not save the vehicle photo.');
     } finally {
       setBusy(false);
     }
@@ -296,153 +310,159 @@ export default function VehiclePhotoModal({
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={S.backdrop}>
-        <View style={S.sheet}>
-          <View style={S.header}>
-            <Text style={S.title}>{Title}</Text>
+      <GestureHandlerRootView style={S.root}>
+        <View style={S.backdrop}>
+          <View style={S.sheet}>
+            <View style={S.header}>
+              <Text style={S.title}>{Title}</Text>
 
-            <TouchableOpacity style={S.closePill} onPress={onClose} activeOpacity={0.9}>
-              <Text style={S.closeText}>✕</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* ============== PICK STEP ============== */}
-          {step === 'pick' && (
-            <View style={{ alignItems: 'center' }}>
-              <View style={[S.previewBox, { width: frameW, height: frameH }]}>
-                <View style={S.previewInner}>
-                  <Text style={S.previewTitle}>Choose a clean photo of the vehicle</Text>
-                  <Text style={S.previewSub}>You can crop/adjust it next.</Text>
-                </View>
-              </View>
-
-              <TouchableOpacity
-                style={[S.primaryBtn, { marginTop: 14, width: frameW }]}
-                onPress={pickFromPhotos}
-                disabled={busy}
-                activeOpacity={0.9}
-              >
-                {busy ? (
-                  <ActivityIndicator color="#0f172a" />
-                ) : (
-                  <Text style={S.primaryText}>🖼️ Choose from Photos</Text>
-                )}
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[S.secondaryBtn, { marginTop: 10, width: frameW }]}
-                onPress={openCamera}
-                disabled={busy}
-                activeOpacity={0.9}
-              >
-                <Text style={S.secondaryText}>📷 Take Photo</Text>
+              <TouchableOpacity style={S.closePill} onPress={onClose} activeOpacity={0.9}>
+                <Text style={S.closeText}>✕</Text>
               </TouchableOpacity>
             </View>
-          )}
 
-          {/* ============== CAMERA STEP ============== */}
-          {step === 'camera' && (
-            <View style={{ alignItems: 'center' }}>
-              {!permission ? (
-                <ActivityIndicator />
-              ) : !permission.granted ? (
-                <View style={{ padding: 14 }}>
-                  <Text style={S.sub}>Camera permission is needed to take a vehicle photo.</Text>
-                  <TouchableOpacity style={S.primaryBtn} onPress={requestPermission} activeOpacity={0.9}>
-                    <Text style={S.primaryText}>Allow Camera</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                <View style={[S.cameraWrap, { width: frameW, height: frameH + 110 }]}>
-                  <View style={[S.frame, { width: frameW, height: frameH }]}>
-                    <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
-                    <View style={S.frameBorder} pointerEvents="none" />
-                    <View style={S.frameShadeTop} pointerEvents="none" />
-                    <View style={S.frameShadeBottom} pointerEvents="none" />
-                    <Text style={S.frameHint} pointerEvents="none">
-                      Fit the car in the frame
-                    </Text>
+            {/* ============== PICK STEP ============== */}
+            {step === 'pick' && (
+              <View style={{ alignItems: 'center' }}>
+                <View style={[S.previewBox, { width: frameW, height: frameH }]}>
+                  <View style={S.previewInner}>
+                    <Text style={S.previewTitle}>Choose a clean photo of the vehicle</Text>
+                    <Text style={S.previewSub}>You can crop/adjust it next.</Text>
                   </View>
-
-                  <TouchableOpacity
-                    style={[S.primaryBtn, { marginTop: 14, width: frameW }]}
-                    onPress={takePhoto}
-                    disabled={busy}
-                    activeOpacity={0.9}
-                  >
-                    {busy ? <ActivityIndicator color="#0f172a" /> : <Text style={S.primaryText}>📷 Capture</Text>}
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[S.secondaryBtn, { marginTop: 10, width: frameW }]}
-                    onPress={() => setStep('pick')}
-                    disabled={busy}
-                    activeOpacity={0.9}
-                  >
-                    <Text style={S.secondaryText}>Back</Text>
-                  </TouchableOpacity>
                 </View>
-              )}
-            </View>
-          )}
 
-          {/* ============== ADJUST STEP ============== */}
-          {step === 'adjust' && (
-            <View style={{ alignItems: 'center' }}>
-              <View style={[S.frame, { width: frameW, height: frameH, overflow: 'hidden' }]}>
-                <GestureDetector gesture={composed}>
-                  <Animated.View style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center' }]}>
-                    <Animated.Image
-                      source={{ uri: capturedUri }}
-                      style={[
-                        {
-                          width: baseRenderW,
-                          height: baseRenderH,
-                        },
-                        imageAnimatedStyle,
-                      ]}
-                      resizeMode="cover"
-                    />
-                  </Animated.View>
-                </GestureDetector>
-
-                <View style={S.frameBorder} pointerEvents="none" />
-                <View style={S.frameShadeTop} pointerEvents="none" />
-                <View style={S.frameShadeBottom} pointerEvents="none" />
-                <Text style={S.frameHint} pointerEvents="none">
-                  Pinch to zoom • Drag to reposition
-                </Text>
-              </View>
-
-              <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
                 <TouchableOpacity
-                  style={S.secondaryBtn}
-                  onPress={() => {
-                    setCapturedUri(null);
-                    setStep('pick');
-                  }}
+                  style={[S.primaryBtn, { marginTop: 14, width: frameW }]}
+                  onPress={pickFromPhotos}
+                  disabled={busy}
                   activeOpacity={0.9}
                 >
-                  <Text style={S.secondaryText}>Change</Text>
+                  {busy ? (
+                    <ActivityIndicator color="#0f172a" />
+                  ) : (
+                    <Text style={S.primaryText}>🖼️ Choose from Photos</Text>
+                  )}
                 </TouchableOpacity>
 
-                <TouchableOpacity style={S.primaryBtn} onPress={saveCropped} disabled={busy} activeOpacity={0.9}>
-                  {busy ? <ActivityIndicator color="#0f172a" /> : <Text style={S.primaryText}>Save Photo</Text>}
+                <TouchableOpacity
+                  style={[S.secondaryBtn, { marginTop: 10, width: frameW }]}
+                  onPress={openCamera}
+                  disabled={busy}
+                  activeOpacity={0.9}
+                >
+                  <Text style={S.secondaryText}>📷 Take Photo</Text>
                 </TouchableOpacity>
               </View>
-            </View>
-          )}
+            )}
 
-          <Text style={S.sub}>
-            This photo becomes your vehicle card background (with a clean gradient so the text stays readable).
-          </Text>
+            {/* ============== CAMERA STEP ============== */}
+            {step === 'camera' && (
+              <View style={{ alignItems: 'center' }}>
+                {!permission ? (
+                  <ActivityIndicator />
+                ) : !permission.granted ? (
+                  <View style={{ padding: 14 }}>
+                    <Text style={S.sub}>Camera permission is needed to take a vehicle photo.</Text>
+                    <TouchableOpacity style={S.primaryBtn} onPress={requestPermission} activeOpacity={0.9}>
+                      <Text style={S.primaryText}>Allow Camera</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <View style={[S.cameraWrap, { width: frameW, height: frameH + 110 }]}>
+                    <View style={[S.frame, { width: frameW, height: frameH }]}>
+                      <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
+                      <View style={S.frameBorder} pointerEvents="none" />
+                      <View style={S.frameShadeTop} pointerEvents="none" />
+                      <View style={S.frameShadeBottom} pointerEvents="none" />
+                      <Text style={S.frameHint} pointerEvents="none">
+                        Fit the car in the frame
+                      </Text>
+                    </View>
+
+                    <TouchableOpacity
+                      style={[S.primaryBtn, { marginTop: 14, width: frameW }]}
+                      onPress={takePhoto}
+                      disabled={busy}
+                      activeOpacity={0.9}
+                    >
+                      {busy ? <ActivityIndicator color="#0f172a" /> : <Text style={S.primaryText}>📷 Capture</Text>}
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[S.secondaryBtn, { marginTop: 10, width: frameW }]}
+                      onPress={() => setStep('pick')}
+                      disabled={busy}
+                      activeOpacity={0.9}
+                    >
+                      <Text style={S.secondaryText}>Back</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+            )}
+
+            {/* ============== ADJUST STEP ============== */}
+            {step === 'adjust' && (
+              <View style={{ alignItems: 'center' }}>
+                <View style={[S.frame, { width: frameW, height: frameH, overflow: 'hidden' }]}>
+                  <GestureDetector gesture={composed}>
+                    <Animated.View style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center' }]}>
+                      <Animated.Image
+                        source={{ uri: capturedUri }}
+                        style={[
+                          {
+                            width: baseRenderW,
+                            height: baseRenderH,
+                          },
+                          imageAnimatedStyle,
+                        ]}
+                        resizeMode="cover"
+                      />
+                    </Animated.View>
+                  </GestureDetector>
+
+                  <View style={S.frameBorder} pointerEvents="none" />
+                  <View style={S.frameShadeTop} pointerEvents="none" />
+                  <View style={S.frameShadeBottom} pointerEvents="none" />
+                  <Text style={S.frameHint} pointerEvents="none">
+                    Pinch to zoom • Drag to reposition
+                  </Text>
+                </View>
+
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+                  <TouchableOpacity
+                    style={S.secondaryBtn}
+                    onPress={() => {
+                      setCapturedUri(null);
+                      setStep('pick');
+                    }}
+                    disabled={busy}
+                    activeOpacity={0.9}
+                  >
+                    <Text style={S.secondaryText}>Change</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity style={S.primaryBtn} onPress={saveCropped} disabled={busy} activeOpacity={0.9}>
+                    {busy ? <ActivityIndicator color="#0f172a" /> : <Text style={S.primaryText}>Save Photo</Text>}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+
+            <Text style={S.sub}>
+              This photo becomes your vehicle card background with a clean gradient so the text stays readable.
+            </Text>
+          </View>
         </View>
-      </View>
+      </GestureHandlerRootView>
     </Modal>
   );
 }
 
 const S = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.86)',

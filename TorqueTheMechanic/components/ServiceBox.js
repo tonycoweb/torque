@@ -43,10 +43,10 @@ export default function ServiceBox({
   onUpdateVehicleCurrentMileage,
   onRequestAddVehicle,
 
-  // ✅ NEW: passed from App.js — uses authedFetch + backend route
+  // ✅ passed from App.js — uses authedFetch + backend route
   onGenerateServiceRecs,
 
-  // ✅ NEW: passed from App.js — keeps EnergyPill accurate
+  // ✅ OPTIONAL: keep EnergyPill accurate (but this feature doesn’t spend energy)
   onRefreshEnergy,
 }) {
   const [modalVisible, setModalVisible] = useState(false);
@@ -105,6 +105,20 @@ export default function ServiceBox({
 
   const scrollViewRef = useRef(null);
   const saveTimeoutRef = useRef(null);
+
+  // ✅ NEW: lightweight auth/energy refresh guard (prevents /me calls unless absolutely needed)
+  // This feature doesn’t spend energy, so we should NOT refresh energy after generation.
+  // But we *may* need /me *once* if the session is stale and we receive an auth error.
+  const authCheckedOnceRef = useRef(false);
+  const tryEnsureAuthOnce = async () => {
+    if (authCheckedOnceRef.current) return;
+    authCheckedOnceRef.current = true;
+    try {
+      // If App.js chooses to implement onRefreshEnergy by calling /me, it will only happen once here.
+      // This is ONLY used as an auth sanity-check fallback, not a token/energy refresh.
+      await onRefreshEnergy?.();
+    } catch {}
+  };
 
   const { width } = useWindowDimensions();
   const sheetWidth = Math.min(width - 24, 720);
@@ -438,22 +452,19 @@ export default function ServiceBox({
 
       await handleConfirmGenerate();
 
-      // ✅ keep EnergyPill accurate after spend
-      try {
-        onRefreshEnergy?.();
-      } catch {}
+      // ❌ IMPORTANT: do NOT call /me or refresh energy here
+      // This action doesn’t spend energy/tokens; App.js should keep EnergyPill stable.
+      // If auth actually fails, we’ll do a ONE-TIME auth sanity check in the catch.
 
       setTimeout(() => scrollViewRef.current?.scrollToEnd?.({ animated: true }), 350);
     } catch (e) {
       const msg = String(e?.message || e);
 
-      // ✅ nice UX for energy / auth failures coming from backend wrapper
-      if (/insufficient energy/i.test(msg) || e?.code === 'INSUFFICIENT_ENERGY') {
-        Alert.alert('Not enough energy', 'You’re out of energy for this action. Earn more or upgrade.');
+      // ✅ if auth/session related, do ONE optional sanity check (may call /me once)
+      if (/not_logged_in|unauthorized|session/i.test(msg) || e?.code === 'UNAUTHORIZED') {
         try {
-          onRefreshEnergy?.();
+          await tryEnsureAuthOnce();
         } catch {}
-      } else if (/not_logged_in|unauthorized|session/i.test(msg) || e?.code === 'UNAUTHORIZED') {
         Alert.alert('Session expired', 'Please sign in again.');
       } else {
         Alert.alert('Error', msg);
@@ -1044,7 +1055,11 @@ export default function ServiceBox({
                       returnKeyType="done"
                       onSubmitEditing={saveVehicleMilesAndRecalc}
                     />
-                    <TouchableOpacity style={styles.mileageSaveBtn} onPress={saveVehicleMilesAndRecalc} activeOpacity={0.9}>
+                    <TouchableOpacity
+                      style={styles.mileageSaveBtn}
+                      onPress={saveVehicleMilesAndRecalc}
+                      activeOpacity={0.9}
+                    >
                       <Text style={styles.mileageSaveText}>Save</Text>
                     </TouchableOpacity>
                   </View>
@@ -1421,7 +1436,12 @@ export default function ServiceBox({
 
               {/* THINKING */}
               {overlay === 'thinking' && (
-                <View style={styles.overlay} pointerEvents="auto" accessible accessibilityLabel="Generating services, please wait">
+                <View
+                  style={styles.overlay}
+                  pointerEvents="auto"
+                  accessible
+                  accessibilityLabel="Generating services, please wait"
+                >
                   <View style={styles.thinkingCard}>
                     <View style={styles.spinnerRow}>
                       <ActivityIndicator size="large" />
@@ -1463,7 +1483,12 @@ export default function ServiceBox({
                       <TouchableOpacity onPress={() => setOverlay(null)} style={styles.btnGrey} activeOpacity={0.9}>
                         <Text style={styles.btnText}>Cancel</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity onPress={startGenerationAfterMileage} style={styles.btnGreen} disabled={isGenerating} activeOpacity={0.9}>
+                      <TouchableOpacity
+                        onPress={startGenerationAfterMileage}
+                        style={styles.btnGreen}
+                        disabled={isGenerating}
+                        activeOpacity={0.9}
+                      >
                         <Text style={[styles.btnText, { fontWeight: '800', color: UI.textDark }]}>Continue</Text>
                       </TouchableOpacity>
                     </View>
@@ -1497,12 +1522,21 @@ export default function ServiceBox({
                       </View>
 
                       {pendingCompleteServiceId === editService.id ? (
-                        <Text style={[styles.banner, { backgroundColor: 'rgba(34,197,94,0.14)', borderColor: '#22c55e' }]}>
+                        <Text
+                          style={[
+                            styles.banner,
+                            { backgroundColor: 'rgba(34,197,94,0.14)', borderColor: '#22c55e' },
+                          ]}
+                        >
                           Marking as completed — completion mileage is required.
                         </Text>
                       ) : null}
 
-                      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 16 }} showsVerticalScrollIndicator={false}>
+                      <ScrollView
+                        keyboardShouldPersistTaps="handled"
+                        contentContainerStyle={{ paddingBottom: 16 }}
+                        showsVerticalScrollIndicator={false}
+                      >
                         <View style={styles.formRow}>
                           <View style={styles.formCol}>
                             <Text style={styles.labelStrong}>Completed Mileage {editMileageRequired ? '(required)' : ''}</Text>
@@ -1528,10 +1562,19 @@ export default function ServiceBox({
 
                           <View style={styles.formCol}>
                             <Text style={styles.labelStrong}>Date</Text>
-                            <TouchableOpacity onPress={() => setShowDatePicker(true)} style={styles.inputRowButton} activeOpacity={0.9}>
+                            <TouchableOpacity
+                              onPress={() => setShowDatePicker(true)}
+                              style={styles.inputRowButton}
+                              activeOpacity={0.9}
+                            >
                               <MaterialCommunityIcons name="calendar-month-outline" size={18} color="#94a3b8" />
                               <Text style={styles.inputRowButtonText}>{tempDate || 'Select date'}</Text>
-                              <MaterialIcons name="edit-calendar" size={18} color="#cbd5e1" style={{ marginLeft: 'auto' }} />
+                              <MaterialIcons
+                                name="edit-calendar"
+                                size={18}
+                                color="#cbd5e1"
+                                style={{ marginLeft: 'auto' }}
+                              />
                             </TouchableOpacity>
                             <Text style={styles.helperText}>Tap to choose a completion date.</Text>
                           </View>
@@ -1695,7 +1738,11 @@ export default function ServiceBox({
                         </TouchableOpacity>
                       </View>
 
-                      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 16 }} showsVerticalScrollIndicator={false}>
+                      <ScrollView
+                        keyboardShouldPersistTaps="handled"
+                        contentContainerStyle={{ paddingBottom: 16 }}
+                        showsVerticalScrollIndicator={false}
+                      >
                         <Text style={styles.labelStrong}>Title *</Text>
                         <View style={styles.inputRow}>
                           <MaterialCommunityIcons name="wrench-outline" size={18} color="#94a3b8" />

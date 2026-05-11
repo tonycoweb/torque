@@ -98,7 +98,7 @@ export default function ChatBoxFixed({
           <TextInput
             ref={inputRef}
             style={styles.input}
-            placeholder="Message Torque…"
+            placeholder="Message Torque"
             placeholderTextColor="#8a8a8a"
             value={inputText}
             onChangeText={setInputText}

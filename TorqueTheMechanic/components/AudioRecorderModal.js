@@ -2,7 +2,7 @@
 // ✅ Pill-style recorder that supports playback + attach checkmark.
 // ✅ Does NOT auto-send. It returns { uri, durationMs } to App via onDone().
 // ✅ Adds: 3s countdown before record + 10s max cap + waveform visual.
-// ✅ UPDATED: uses smaller recording profile (LOW_QUALITY) to help keep uploads under 10MB.
+// ✅ UPDATED: records WAV/PCM so OpenAI direct audio analysis can actually listen to the clip.
 // ✅ UPDATED: safer cleanup + avoids timer leaks + avoids calling setState after unmount.
 // ✅ UPDATED: metering enabled where possible; waveform fallback remains.
 
@@ -14,6 +14,37 @@ import { Ionicons } from '@expo/vector-icons';
 const MAX_RECORD_MS = 10_000; // ✅ safeguard cap
 const COUNTDOWN_SEC = 3; // ✅ pre-roll safety countdown
 const WAVE_BARS = 18; // waveform bar count
+
+// Direct audio analysis through Chat Completions currently accepts only WAV or MP3.
+// Expo/React Native cannot reliably encode MP3 without native/extra dependencies, so WAV/PCM
+// is the dependency-free path. Keep this mono + 16 kHz to keep uploads and token/audio cost low.
+const DIRECT_AUDIO_RECORDING_OPTIONS = {
+  android: {
+    extension: '.wav',
+    outputFormat: Audio.RECORDING_OPTION_ANDROID_OUTPUT_FORMAT_DEFAULT,
+    audioEncoder: Audio.RECORDING_OPTION_ANDROID_AUDIO_ENCODER_DEFAULT,
+    sampleRate: 16000,
+    numberOfChannels: 1,
+    bitRate: 256000,
+  },
+  ios: {
+    extension: '.wav',
+    outputFormat: Audio.RECORDING_OPTION_IOS_OUTPUT_FORMAT_LINEARPCM,
+    audioQuality: Audio.RECORDING_OPTION_IOS_AUDIO_QUALITY_HIGH,
+    sampleRate: 16000,
+    numberOfChannels: 1,
+    bitRate: 256000,
+    linearPCMBitDepth: 16,
+    linearPCMIsBigEndian: false,
+    linearPCMIsFloat: false,
+  },
+  web: {
+    mimeType: 'audio/wav',
+    bitsPerSecond: 256000,
+  },
+  isMeteringEnabled: true,
+};
+
 
 async function safeSetModeRecording(on) {
   try {
@@ -265,11 +296,9 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
 
       const rec = new Audio.Recording();
 
-      // ✅ Smaller file sizes vs HIGH_QUALITY
-      // For engine/road noises, this is more than enough and helps stay under 10MB comfortably.
-      const options = Audio.RecordingOptionsPresets.LOW_QUALITY;
-
-      await rec.prepareToRecordAsync(options);
+      // ✅ Direct audio analysis supports WAV/MP3 only. This records WAV/PCM without adding ffmpeg or extra packages.
+      // The 10s cap + mono/16kHz keeps file size and model cost low.
+      await rec.prepareToRecordAsync(DIRECT_AUDIO_RECORDING_OPTIONS);
 
       rec.setProgressUpdateInterval(90);
       rec.setOnRecordingStatusUpdate((st) => {
@@ -389,7 +418,12 @@ export default function AudioRecorderModal({ visible, onClose, onDone, disabled 
       safeSet(() => setBusy(true));
       await cleanupSound();
 
-      onDone?.({ uri, durationMs: durationMs || null });
+      onDone?.({
+        uri,
+        durationMs: durationMs || null,
+        mimeType: 'audio/wav',
+        filename: 'audio.wav',
+      });
 
       onClose?.();
       resetState();

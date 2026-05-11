@@ -55,9 +55,29 @@ const VIN_MAP = (() => {
   const map = {};
   '0123456789'.split('').forEach((d, i) => (map[d] = i));
   Object.assign(map, {
-    A: 1, B: 2, C: 3, D: 4, E: 5, F: 6, G: 7, H: 8,
-    J: 1, K: 2, L: 3, M: 4, N: 5, P: 7, R: 9,
-    S: 2, T: 3, U: 4, V: 5, W: 6, X: 7, Y: 8, Z: 9,
+    A: 1,
+    B: 2,
+    C: 3,
+    D: 4,
+    E: 5,
+    F: 6,
+    G: 7,
+    H: 8,
+    J: 1,
+    K: 2,
+    L: 3,
+    M: 4,
+    N: 5,
+    P: 7,
+    R: 9,
+    S: 2,
+    T: 3,
+    U: 4,
+    V: 5,
+    W: 6,
+    X: 7,
+    Y: 8,
+    Z: 9,
   });
   return map;
 })();
@@ -252,6 +272,11 @@ export default function VehicleSelector({
   gateCameraWithAd = false,
   onDecodeVinTyped, // (vin) => Promise<void>  (App.js does /decode-vin-text)
   onOpenVehiclePhoto, // optional if you still want App-root modal
+
+  // ✅ Garage slot control
+  // App.js should pass: vehicleSlotLimit={1 + Number(carSlotBonus || 0)}
+  vehicleSlotLimit = 1,
+  onOpenShop, // optional: App.js can open TorqueStoreModal / shop flow
 }) {
   // UI state
   const [modalVisible, setModalVisible] = useState(false);
@@ -424,7 +449,7 @@ export default function VehicleSelector({
 
     try {
       const res = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: IMAGE_MEDIA_TYPES,
         allowsEditing: false,
         quality: 0.9,
       });
@@ -471,8 +496,72 @@ export default function VehicleSelector({
     setPhotoModalVisible(true);
   };
 
+  // ---------- Garage slot gate ----------
+  const getNormalizedSlotLimit = () => {
+    const n = Number(vehicleSlotLimit);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
+  };
+
+  const getFreshGarageCount = async () => {
+    const saved = await getAllVehicles();
+
+    // Dedupe so old duplicate saves do not unfairly block users.
+    const seen = new Set();
+
+    (saved || []).forEach((raw) => {
+      const v = ensureId(raw);
+      const key = v.vin
+        ? `vin:${String(v.vin).toUpperCase().trim()}`
+        : v.id
+          ? `id:${String(v.id)}`
+          : `vehicle:${[v.year, v.make, v.model, v.engine].filter(Boolean).join('-').toLowerCase()}`;
+
+      if (key && key !== 'vehicle:') seen.add(key);
+    });
+
+    return seen.size;
+  };
+
+  const showGarageFullAlert = ({ currentCount, limit }) => {
+    const slotWord = limit === 1 ? 'slot' : 'slots';
+
+    Alert.alert(
+      'Garage Full',
+      `You currently have ${currentCount}/${limit} vehicles saved. Your plan includes ${limit} vehicle ${slotWord}.\n\nDelete a saved vehicle to free a slot, or unlock more garage slots.`,
+      [
+        { text: 'Not Now', style: 'cancel' },
+        {
+          text: 'Unlock Slots',
+          onPress: () => {
+            setModalVisible(false);
+            setShowVinModal(false);
+
+            if (onOpenShop) {
+              onOpenShop({ reason: 'vehicle_slots' });
+            } else {
+              Alert.alert('Shop Not Connected', 'The store screen is not connected here yet.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const canAddAnotherVehicle = async () => {
+    const limit = getNormalizedSlotLimit();
+    const currentCount = await getFreshGarageCount();
+
+    if (currentCount < limit) return true;
+
+    showGarageFullAlert({ currentCount, limit });
+    return false;
+  };
+
   // ---------- Camera VIN flow ----------
-  const handleAddNew = () => {
+  const handleAddNew = async () => {
+    const allowed = await canAddAnotherVehicle();
+    if (!allowed) return;
+
     setModalVisible(false);
     setShowVinModal(true);
   };
@@ -569,8 +658,8 @@ export default function VehicleSelector({
         mpgCity: city != null ? String(city) : '',
         mpgHighway: highway != null ? String(highway) : '',
         transmission: v.transmission || 'Automatic',
-        hp: getHp(v) != null ? String(getHp(v)) : (v.hp ? String(v.hp) : ''),
-        gvw: getGvw(v) != null ? String(getGvw(v)) : (v.gvw ? String(v.gvw) : ''),
+        hp: getHp(v) != null ? String(getHp(v)) : v.hp ? String(v.hp) : '',
+        gvw: getGvw(v) != null ? String(getGvw(v)) : v.gvw ? String(v.gvw) : '',
       });
 
       setEditMode(true);
@@ -599,7 +688,9 @@ export default function VehicleSelector({
     await saveVehicle(updatedVehicle);
     if (!isMountedRef.current) return;
 
-    const updatedList = vehicles.map((x) => (String(x.vin) === String(updatedVehicle.vin) ? updatedVehicle : x));
+    const updatedList = vehicles.map((x) =>
+      String(x.vin) === String(updatedVehicle.vin) ? updatedVehicle : x
+    );
     setVehicles(updatedList);
 
     const sel = selectedVehicle ? ensureId(selectedVehicle) : null;
@@ -640,9 +731,6 @@ export default function VehicleSelector({
             {withId.year} {withId.make} {withId.model}
           </Text>
 
-          <TouchableOpacity onPress={() => openPhotoForVehicle(withId)} style={styles.photoIconBtn} activeOpacity={0.9}>
-            <Text style={styles.photoIconText}>📷</Text>
-          </TouchableOpacity>
 
           {!!withId.vin && (
             <View style={styles.vinPill}>
@@ -713,7 +801,7 @@ export default function VehicleSelector({
           </Text>
         </TouchableOpacity>
       ) : (
-        <TouchableOpacity style={styles.placeholder} onPress={() => setShowVinModal(true)} activeOpacity={0.95}>
+        <TouchableOpacity style={styles.placeholder} onPress={handleAddNew} activeOpacity={0.95}>
           <Text style={styles.plus}>+</Text>
           <Text style={styles.label}>Add Your Vehicle</Text>
         </TouchableOpacity>
@@ -731,6 +819,16 @@ export default function VehicleSelector({
               </TouchableOpacity>
             </View>
 
+            <View style={styles.garageIntroCard}>
+              <Text style={styles.garageIntroTitle}>Saved Vehicles</Text>
+              <Text style={styles.garageIntroText}>
+                Tap a vehicle to make it active. Use Edit or Delete to manage your garage.
+              </Text>
+              <View style={styles.slotPill}>
+                <Text style={styles.slotPillText}>Slots used: {vehicles.length}/{getNormalizedSlotLimit()}</Text>
+              </View>
+            </View>
+
             <FlatList
               data={vehicles}
               keyExtractor={(item) => ensureId(item).id}
@@ -740,7 +838,9 @@ export default function VehicleSelector({
             />
 
             <TouchableOpacity style={styles.addNewButton} onPress={handleAddNew} activeOpacity={0.95}>
-              <Text style={styles.addNewText}>+ Add Vehicle +</Text>
+              <Text style={styles.addNewText}>
+                + Add Vehicle {vehicles.length}/{getNormalizedSlotLimit()} +
+              </Text>
             </TouchableOpacity>
           </SafeAreaView>
         </Animated.View>
@@ -793,77 +893,85 @@ export default function VehicleSelector({
       />
 
       {/* Add Vehicle modal */}
-      <Modal visible={showVinModal} animationType="none" transparent onRequestClose={() => setShowVinModal(false)}>
-        <Animated.View style={[styles.vinModalContainer, animatedModalStyle]}>
-          <SafeAreaView style={styles.vinModalContent}>
-            <ScrollView ref={scrollRef} contentContainerStyle={styles.vinScrollContent} keyboardShouldPersistTaps="handled">
-              <TouchableOpacity onPress={() => setShowVinModal(false)} style={styles.closeIcon}>
-                <Text style={styles.closeIconText}>✖</Text>
-              </TouchableOpacity>
+      <Modal visible={showVinModal} animationType="slide" onRequestClose={() => setShowVinModal(false)}>
+        <SafeAreaView style={styles.vinModalScreen}>
+          <View style={styles.vinHeaderRow}>
+            <View style={{ width: 44 }} />
+            <Text style={styles.modalTitle}>Add Your Vehicle</Text>
+            <TouchableOpacity onPress={() => setShowVinModal(false)} style={styles.closePill} activeOpacity={0.9}>
+              <Text style={styles.closePillText}>✕</Text>
+            </TouchableOpacity>
+          </View>
 
-              <Text style={styles.modalTitle}>Add Your Vehicle</Text>
+          <ScrollView ref={scrollRef} contentContainerStyle={styles.vinScrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            <View style={styles.vinHeroCard}>
+              <Text style={styles.vinHeroTitle}>Let Torque build your garage</Text>
+              <Text style={styles.vinHeroText}>
+                Snap the VIN for the fastest setup, or type it manually. Your saved vehicle powers better service tracking and diagnostics.
+              </Text>
+            </View>
 
-              {/* Camera option */}
+            {/* Camera option */}
+            <TouchableOpacity
+              style={[styles.optionButton, (adLoading || overlay === 'thinking') && { opacity: 0.7 }]}
+              onPress={handleCaptureVin}
+              disabled={adLoading || overlay === 'thinking'}
+              activeOpacity={0.9}
+            >
+              {adLoading || overlay === 'thinking' ? (
+                <ActivityIndicator color="#0f172a" />
+              ) : (
+                <>
+                  <Text style={styles.optionButtonText}>📷 Snap VIN Photo</Text>
+                  <Text style={styles.optionSubText}>
+                    {gateCameraWithAd ? 'Watch an ad, then use the VIN camera.' : 'Fastest way to add your car.'}
+                  </Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            {/* Typed VIN entry */}
+            <View style={styles.vinSectionCard}>
+              <Text style={styles.sectionTitle}>Or Type Your VIN</Text>
+              <Text style={styles.helperText}>Enter the full 17-character VIN. Torque will verify it before decoding.</Text>
+              <TextInput
+                value={typedVin}
+                onChangeText={setTypedVin}
+                placeholder="e.g., 1HGCM82633A004352"
+                placeholderTextColor="#7b8794"
+                autoCapitalize="characters"
+                autoCorrect={false}
+                style={[styles.input, styles.vinInput]}
+                maxLength={25}
+              />
               <TouchableOpacity
-                style={[styles.optionButton, (adLoading || overlay === 'thinking') && { opacity: 0.7 }]}
-                onPress={handleCaptureVin}
-                disabled={adLoading || overlay === 'thinking'}
+                style={[
+                  styles.decodeBtn,
+                  (!typedVinReady || decoding || overlay === 'thinking') && styles.decodeBtnDisabled,
+                ]}
+                onPress={handleDecodeTypedVin}
+                disabled={!typedVinReady || decoding || overlay === 'thinking'}
                 activeOpacity={0.9}
               >
-                {adLoading || overlay === 'thinking' ? (
-                  <ActivityIndicator color="#0f172a" />
+                {decoding || overlay === 'thinking' ? (
+                  <Text style={styles.decodeBtnText}>Decoding…</Text>
                 ) : (
-                  <>
-                    <Text style={styles.optionButtonText}>📷 Snap VIN Photo</Text>
-                    <Text style={styles.optionSubText}>
-                      {gateCameraWithAd ? 'Watch an ad, then use the VIN camera.' : 'Fastest way to add your car.'}
-                    </Text>
-                  </>
+                  <Text style={styles.decodeBtnText}>🎟️ Watch Ad & Decode</Text>
                 )}
               </TouchableOpacity>
 
-              {/* Typed VIN entry */}
-              <View style={{ width: '100%', marginTop: 10 }}>
-                <Text style={styles.sectionTitle}>Or Type Your VIN</Text>
-                <Text style={styles.helperText}>Enter the full 17-character VIN (no I/O/Q). We’ll verify it after an ad.</Text>
-                <TextInput
-                  value={typedVin}
-                  onChangeText={setTypedVin}
-                  placeholder="e.g., 1HGCM82633A004352"
-                  placeholderTextColor="#7b8794"
-                  autoCapitalize="characters"
-                  autoCorrect={false}
-                  style={[styles.input, { letterSpacing: 1.2, textAlign: 'center', fontSize: 16 }]}
-                  maxLength={25}
-                />
-                <TouchableOpacity
-                  style={[
-                    styles.decodeBtn,
-                    (!typedVinReady || decoding || overlay === 'thinking') && styles.decodeBtnDisabled,
-                  ]}
-                  onPress={handleDecodeTypedVin}
-                  disabled={!typedVinReady || decoding || overlay === 'thinking'}
-                  activeOpacity={0.9}
-                >
-                  {decoding || overlay === 'thinking' ? (
-                    <Text style={styles.decodeBtnText}>Decoding…</Text>
-                  ) : (
-                    <Text style={styles.decodeBtnText}>🎟️ Watch Ad & Decode</Text>
-                  )}
-                </TouchableOpacity>
+              {!typedVinReady && normalizeVin(typedVin).length > 0 && (
+                <Text style={[styles.helperText, { marginTop: 8 }]}> 
+                  Normalized: <Text style={{ fontWeight: '900', color: '#cbd5e1' }}>{normalizeVin(typedVin)}</Text>
+                </Text>
+              )}
+            </View>
 
-                {/* tiny helper for debugging/UX clarity */}
-                {!typedVinReady && normalizeVin(typedVin).length > 0 && (
-                  <Text style={[styles.helperText, { marginTop: 8 }]}>
-                    Normalized: <Text style={{ fontWeight: '900', color: '#cbd5e1' }}>{normalizeVin(typedVin)}</Text>
-                  </Text>
-                )}
-              </View>
-
-              {/* VIN help & locations */}
+            {/* VIN help & locations */}
+            <View style={styles.vinSectionCard}>
               <Text style={styles.modalSubtitle}>What’s a VIN?</Text>
               <Text style={styles.helperText}>
-                A VIN (Vehicle Identification Number) is a unique 17-digit code that identifies your car.
+                A VIN is the unique 17-character ID for your vehicle. You can usually find it on documents, the driver door sticker, or the windshield corner.
               </Text>
 
               <Text style={styles.sectionTitle}>Where to Find Your VIN</Text>
@@ -875,11 +983,9 @@ export default function VehicleSelector({
                   </View>
                 </View>
               ))}
-              <Text style={[styles.helperText, { marginTop: 12 }]}>
-                Snap a clear photo of any of these VIN locations, and we’ll do the rest. 🚗
-              </Text>
-            </ScrollView>
-          </SafeAreaView>
+              <Text style={[styles.helperText, { marginTop: 12 }]}>Snap a clear photo of any of these VIN locations, and Torque will do the rest. 🚗</Text>
+            </View>
+          </ScrollView>
 
           {/* THINKING OVERLAY */}
           {overlay === 'thinking' && (
@@ -893,7 +999,7 @@ export default function VehicleSelector({
               </View>
             </View>
           )}
-        </Animated.View>
+        </SafeAreaView>
       </Modal>
 
       {/* Edit modal */}
@@ -994,6 +1100,9 @@ export default function VehicleSelector({
 const BLUE = '#3b82f6';
 const GREEN = '#22c55e';
 
+// Expo ImagePicker: avoid deprecated ImagePicker.MediaTypeOptions warning.
+const IMAGE_MEDIA_TYPES = ImagePicker.MediaType?.Images ? [ImagePicker.MediaType.Images] : ['images'];
+
 const styles = StyleSheet.create({
   container: { width: '100%', paddingVertical: 10, alignSelf: 'center' },
 
@@ -1047,7 +1156,7 @@ const styles = StyleSheet.create({
   selectedSub: { fontSize: 14, color: '#e5e7eb', marginVertical: 4, fontWeight: '700' },
   stats: { fontSize: 12.5, color: '#cbd5e1', opacity: 0.9 },
 
-  modalContainer: { flex: 1, backgroundColor: '#0b0b0b', paddingHorizontal: 16, paddingTop: 10 },
+  modalContainer: { flex: 1, backgroundColor: '#101010', paddingHorizontal: 16, paddingTop: 10 },
   modalHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1071,11 +1180,36 @@ const styles = StyleSheet.create({
   },
   closePillText: { color: '#fff', fontSize: 20, fontWeight: '900' },
 
-  garageListContent: { paddingTop: 10, paddingBottom: 18, paddingHorizontal: 10 },
+  garageIntroCard: {
+    backgroundColor: '#2a2a2a',
+    borderRadius: 22,
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+    marginHorizontal: 10,
+    marginTop: 8,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  garageIntroTitle: { color: '#fff', fontSize: 18, fontWeight: '900', textAlign: 'center' },
+  garageIntroText: { color: '#b8c0cc', fontSize: 13.5, textAlign: 'center', lineHeight: 19, marginTop: 6 },
+  slotPill: {
+    alignSelf: 'center',
+    marginTop: 12,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  slotPillText: { color: '#e5e7eb', fontSize: 12.5, fontWeight: '900' },
+
+  garageListContent: { paddingTop: 2, paddingBottom: 18, paddingHorizontal: 10 },
 
   vehicleCard: {
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    paddingVertical: 14,
+    backgroundColor: '#2a2a2a',
+    paddingVertical: 16,
     paddingHorizontal: 14,
     marginBottom: 12,
     borderRadius: 22,
@@ -1124,7 +1258,15 @@ const styles = StyleSheet.create({
   rowDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.08)', marginVertical: 12 },
 
   inlineBtns: { flexDirection: 'row', gap: 10, justifyContent: 'flex-end' },
-  rowBtn: { height: 40, paddingHorizontal: 14, borderRadius: 999, alignItems: 'center', justifyContent: 'center', borderWidth: 1, minWidth: 96 },
+  rowBtn: {
+    height: 40,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    minWidth: 96,
+  },
   rowBtnNeutral: { backgroundColor: 'rgba(0,0,0,0.22)', borderColor: 'rgba(255,255,255,0.12)' },
   rowBtnDanger: { backgroundColor: 'rgba(255,102,102,0.10)', borderColor: 'rgba(255,102,102,0.45)' },
   rowBtnText: { color: '#fff', fontWeight: '900', fontSize: 15 },
@@ -1148,53 +1290,102 @@ const styles = StyleSheet.create({
   },
   addNewText: { color: '#07110a', fontSize: 18, fontWeight: '900', letterSpacing: 0.2 },
 
-  vinModalContainer: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', justifyContent: 'center', alignItems: 'center', paddingTop: 50 },
+  vinModalScreen: {
+    flex: 1,
+    backgroundColor: '#101010',
+    paddingHorizontal: 16,
+    paddingTop: 10,
+  },
+  vinHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+    paddingTop: 8,
+    paddingBottom: 10,
+  },
+  vinModalContainer: {
+    flex: 1,
+    backgroundColor: '#101010',
+  },
   vinModalContent: {
-    backgroundColor: '#121212',
+    flex: 1,
+    backgroundColor: '#101010',
+  },
+  vinScrollContent: { paddingBottom: 70, alignItems: 'center', paddingHorizontal: 6 },
+  closeIcon: {
+    position: 'absolute',
+    right: 16,
+    zIndex: 10,
+    backgroundColor: '#fff',
     borderRadius: 20,
-    width: '92%',
-    maxHeight: '94%',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  closeIconText: { fontSize: 22, color: '#000', fontWeight: 'bold' },
+
+  vinHeroCard: {
+    width: '100%',
+    backgroundColor: '#2a2a2a',
+    borderRadius: 26,
     paddingVertical: 24,
-    paddingHorizontal: 20,
+    paddingHorizontal: 18,
+    marginTop: 8,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
+  },
+  vinHeroTitle: { color: '#fff', fontSize: 24, fontWeight: '900', textAlign: 'center', letterSpacing: 0.2 },
+  vinHeroText: { color: '#b8c0cc', fontSize: 14, textAlign: 'center', lineHeight: 21, marginTop: 8, fontWeight: '700' },
+
+  vinSectionCard: {
+    width: '100%',
+    backgroundColor: '#242424',
+    borderRadius: 24,
+    padding: 16,
+    marginBottom: 14,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
   },
-  vinScrollContent: { paddingBottom: 60, alignItems: 'center' },
-  closeIcon: { position: 'absolute', right: 16, zIndex: 10, backgroundColor: '#fff', borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4 },
-  closeIconText: { fontSize: 22, color: '#000', fontWeight: 'bold' },
 
   optionButton: {
     backgroundColor: GREEN,
-    paddingVertical: 20,
-    paddingHorizontal: 24,
-    borderRadius: 14,
-    marginBottom: 18,
+    paddingVertical: 18,
+    paddingHorizontal: 22,
+    borderRadius: 22,
+    marginBottom: 14,
     width: '100%',
     alignItems: 'center',
     shadowColor: '#000',
-    shadowOpacity: 0.1,
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 4,
-    elevation: 3,
+    shadowOpacity: 0.18,
+    shadowOffset: { width: 0, height: 7 },
+    shadowRadius: 10,
+    elevation: 5,
   },
-  optionButtonText: { color: '#0f172a', fontSize: 16, fontWeight: '900' },
-  optionSubText: { color: '#14532d', fontSize: 13, marginTop: 4, textAlign: 'center', fontWeight: '700' },
+  optionButtonText: { color: '#0f172a', fontSize: 17, fontWeight: '900' },
+  optionSubText: { color: '#14532d', fontSize: 13, marginTop: 5, textAlign: 'center', fontWeight: '800' },
 
-  helperText: { color: '#94a3b8', fontSize: 14, textAlign: 'center', marginVertical: 10, lineHeight: 20 },
-  sectionTitle: { fontSize: 18, color: '#eee', fontWeight: '900', marginTop: 6, marginBottom: 8, textAlign: 'center' },
+  helperText: { color: '#aeb7c4', fontSize: 14, textAlign: 'center', marginVertical: 10, lineHeight: 20, fontWeight: '600' },
+  sectionTitle: { fontSize: 18, color: '#fff', fontWeight: '900', marginTop: 2, marginBottom: 8, textAlign: 'center' },
+  vinInput: { letterSpacing: 1.2, textAlign: 'center', fontSize: 16, minHeight: 48 },
   vinCardWrapper: { width: '100%' },
   vinCardStacked: {
     alignItems: 'center',
-    backgroundColor: '#1e293b',
-    padding: 20,
-    borderRadius: 16,
-    marginBottom: 20,
+    backgroundColor: '#303030',
+    padding: 16,
+    borderRadius: 20,
+    marginBottom: 14,
     width: '100%',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
+    borderColor: 'rgba(255,255,255,0.08)',
   },
-  vinImageLarge: { width: '100%', height: 180, resizeMode: 'contain', marginTop: 12, borderRadius: 8 },
-  vinLabelLarge: { fontSize: 16, fontWeight: '800', color: '#e2e8f0', textAlign: 'center' },
+  vinImageLarge: { width: '100%', height: 170, resizeMode: 'contain', marginTop: 12, borderRadius: 12 },
+  vinLabelLarge: { fontSize: 16, fontWeight: '900', color: '#f8fafc', textAlign: 'center' },
 
   editField: {
     marginBottom: 12,
@@ -1229,7 +1420,16 @@ const styles = StyleSheet.create({
   transmissionButtonText: { color: '#fff', fontSize: 14, fontWeight: '800' },
   transmissionButtonTextSelected: { color: '#07110a', fontWeight: '900' },
 
-  saveButton: { marginTop: 10, height: 56, borderRadius: 18, backgroundColor: BLUE, alignItems: 'center', justifyContent: 'center', width: '92%', alignSelf: 'center' },
+  saveButton: {
+    marginTop: 10,
+    height: 56,
+    borderRadius: 18,
+    backgroundColor: BLUE,
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '92%',
+    alignSelf: 'center',
+  },
   saveButtonText: { color: '#fff', fontSize: 17, fontWeight: '900' },
 
   EditModalContainer: { width: '100%', height: '100%' },
@@ -1274,17 +1474,63 @@ const styles = StyleSheet.create({
   thinkingTitle: { color: '#fff', fontSize: 18, fontWeight: '900' },
   thinkingSub: { color: '#9aa5b1', fontSize: 13, textAlign: 'center', marginTop: 6 },
 
-  chooserBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.80)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14 },
-  chooserSheet: { width: '100%', maxWidth: 520, backgroundColor: '#121212', borderRadius: 22, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', padding: 16 },
+  chooserBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.80)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+  },
+  chooserSheet: {
+    width: '100%',
+    maxWidth: 520,
+    backgroundColor: '#121212',
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    padding: 16,
+  },
   chooserHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   chooserTitle: { color: '#fff', fontSize: 18, fontWeight: '900' },
-  chooserClose: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.10)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.10)' },
+  chooserClose: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
   chooserCloseText: { color: '#fff', fontSize: 18, fontWeight: '900' },
   chooserSub: { color: '#94a3b8', fontSize: 13, marginTop: 10, textAlign: 'center', lineHeight: 18 },
 
-  chooserBtnPrimary: { marginTop: 12, backgroundColor: GREEN, borderRadius: 16, paddingVertical: 14, paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 10, shadowOffset: { width: 0, height: 6 }, elevation: 5 },
+  chooserBtnPrimary: {
+    marginTop: 12,
+    backgroundColor: GREEN,
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.22,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 5,
+  },
   chooserBtnPrimaryText: { color: '#0f172a', fontWeight: '900', fontSize: 14 },
 
-  chooserBtnSecondary: { marginTop: 10, backgroundColor: 'rgba(255,255,255,0.10)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.14)', borderRadius: 16, paddingVertical: 14, paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center' },
+  chooserBtnSecondary: {
+    marginTop: 10,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   chooserBtnSecondaryText: { color: '#fff', fontWeight: '900', fontSize: 14 },
 });

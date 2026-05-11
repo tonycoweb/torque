@@ -1,11 +1,16 @@
-// App.js (FULL FILE) — updated for ServiceBox backend integration (minimal deltas)
+// App.js (FULL FILE) — App owns /me + all authed backend calls (minimal cost)
 //
-// ✅ ADDED IN THIS REVISION (keeps your current flow intact)
-// 1) Adds API_GENERATE_SERVICE_URL constant
-// 2) Adds authed helper: generateServiceRecommendations({ vehicle, currentMileage })
-// 3) Adds onGenerateServiceRecs + onRefreshEnergy props to <ServiceBox />
-//    - ServiceBox can call the backend directly through App (auth + energy + consistent errors)
-// 4) Passes selectedVehicle + mileage hint (from vehicle.mileage if present) safely
+// ✅ THIS REVISION (minimal deltas, big wins)
+// - App.js is the single source of truth for:
+//   • JWT retrieval + authedFetch
+//   • /me caching + in-flight lock + TTL (kills duplicate /me spam)
+//   • centralized API wrappers: /chat, /audio-diagnose, /image-diagnose, /decode-vin, /decode-vin-text, /generate-service-recommendations
+// - Safer payload handling:
+//   • base64 size guards (audio + images) to avoid giant uploads + 413s
+//   • consistent JSON parse helpers (no double body reads)
+//   • attachment flow prevents “double-send” + locks while sending
+//
+// NOTE: Keeps your UI flow intact. No new screens, no removed features.
 
 import React, { useState, useRef, useEffect } from 'react';
 import {
@@ -23,6 +28,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import Purchases, { LOG_LEVEL } from 'react-native-purchases';
 
 import HomeHeader from './components/HomeHeader';
 import ServiceBox from './components/ServiceBox';
@@ -34,6 +40,7 @@ import VehicleSelector from './components/VehicleSelector';
 import VehiclePhotoModal from './components/VehiclePhotoModal';
 import LoginScreen from './components/LoginScreen';
 import SettingsModal from './components/SettingsModal';
+import TorqueStoreModal from './components/TorqueStoreModal';
 
 import VinCamera from './components/VinCamera';
 import VinPreview from './components/VinPreview';
@@ -48,9 +55,9 @@ import * as SecureStore from 'expo-secure-store';
 import EnergyPill from './components/EnergyPill';
 
 import mobileAds, { RewardedAd, RewardedAdEventType, AdEventType } from 'react-native-google-mobile-ads';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 // ===================== BACKEND =====================
-// ✅ LIVE deployed SAM API (HTTP API)
 const BACKEND_BASE = 'https://rd9gvjuco8.execute-api.us-east-2.amazonaws.com';
 
 const API_CHAT_URL = `${BACKEND_BASE}/chat`;
@@ -59,15 +66,49 @@ const API_IMAGE_URL = `${BACKEND_BASE}/image-diagnose`;
 const API_DECODE_VIN_URL = `${BACKEND_BASE}/decode-vin`;
 const API_DECODE_VIN_TEXT_URL = `${BACKEND_BASE}/decode-vin-text`;
 const API_ME_URL = `${BACKEND_BASE}/me`;
-
-// ✅ NEW: Service recs endpoint (matches Lambda route you pasted)
 const API_GENERATE_SERVICE_URL = `${BACKEND_BASE}/generate-service-recommendations`;
+const API_IAP_GRANT_URL = `${BACKEND_BASE}/iap/revenuecat/grant`;
+
+// ===================== REVENUECAT =====================
+// Replace these with the public SDK keys from RevenueCat → API keys → SDK API keys.
+// Do NOT put your secret sk_ key here. That stays in AWS Secrets Manager only.
+const RC_IOS_API_KEY = 'appl_zonSPBcyfNPeLvqMyaAcxrCEhch';
+const RC_ANDROID_API_KEY = 'PASTE_REVENUECAT_TORQUE_ANDROID_PUBLIC_SDK_KEY_HERE';
+
+let revenueCatConfiguredFor = null;
+async function configureRevenueCatForUser(appUserId) {
+  const cleanUserId = String(appUserId || '').trim();
+  if (!cleanUserId) return;
+  if (revenueCatConfiguredFor === cleanUserId) return;
+
+  const apiKey = Platform.OS === 'ios' ? RC_IOS_API_KEY : RC_ANDROID_API_KEY;
+  if (!apiKey || apiKey.includes('PASTE_REVENUECAT')) {
+    console.warn('RevenueCat SDK key is missing. Paste your public SDK key into App.js.');
+    return;
+  }
+
+  Purchases.setLogLevel(__DEV__ ? LOG_LEVEL.VERBOSE : LOG_LEVEL.WARN);
+
+  try {
+    await Purchases.configure({ apiKey, appUserID: cleanUserId });
+  } catch (e) {
+    // If the SDK was already configured earlier in the same JS session, logIn keeps the customer aligned.
+    try {
+      await Purchases.logIn(cleanUserId);
+    } catch (inner) {
+      console.warn('RevenueCat configure/logIn failed:', inner?.message || e?.message || e);
+      return;
+    }
+  }
+
+  revenueCatConfiguredFor = cleanUserId;
+}
 
 // ===================== TOKENS =====================
-// Legacy single-JSON key (your older LoginScreen)
+// Legacy single-JSON key (older LoginScreen)
 const LEGACY_TOKEN_KEY = 'cognito_tokens_v1';
 
-// New split keys (your updated LoginScreen fix)
+// New split keys (current LoginScreen)
 const KEY_ID = 'pm_id_token_v1';
 const KEY_ACCESS = 'pm_access_token_v1';
 const KEY_REFRESH = 'pm_refresh_token_v1';
@@ -83,6 +124,13 @@ const adUnitId = __DEV__
 // ===================== HELPERS =====================
 const LAST_CHAT_ID_KEY = 'last_chat_id';
 const LAST_CHAT_BY_VEHICLE_KEY = 'last_chat_id_by_vehicle';
+
+// These align with your SAM defaults (string env vars).
+const MAX_AUDIO_BASE64_CHARS = 12_000_000;
+const MAX_IMAGE_BASE64_CHARS = 6_000_000; // keep conservative; backend may allow more
+
+// Expo ImagePicker: avoid deprecated ImagePicker.MediaTypeOptions warning.
+const IMAGE_MEDIA_TYPES = ImagePicker.MediaType?.Images ? [ImagePicker.MediaType.Images] : ['images'];
 
 const trimTurns = (history, maxTurns = 6) => {
   const out = [];
@@ -100,6 +148,40 @@ const normalizeVehicle = (v = {}) => {
     [v.year, v.make, v.model].filter(Boolean).join('-') ||
     Math.random().toString(36).slice(2);
   return { ...v, id };
+};
+
+// ✅ What gets sent to Torque as the current/default vehicle context.
+// Keep this small enough for token cost, but complete enough that Torque does not “forget”
+// the vehicle selected in VehicleSelector.
+const normalizeVehicleForApi = (v = null) => {
+  if (!v || typeof v !== 'object') return null;
+
+  const clean = {
+    id: v.id ? String(v.id) : undefined,
+    vin: v.vin ? String(v.vin).toUpperCase().trim() : undefined,
+    year: v.year != null ? String(v.year) : undefined,
+    make: v.make ? String(v.make) : undefined,
+    model: v.model ? String(v.model) : undefined,
+    trim: v.trim ? String(v.trim) : undefined,
+    engine: v.engine ? String(v.engine) : undefined,
+    transmission: v.transmission ? String(v.transmission) : undefined,
+    drive_type: v.drive_type ? String(v.drive_type) : undefined,
+    body_style: v.body_style ? String(v.body_style) : undefined,
+    fuel_type: v.fuel_type ? String(v.fuel_type) : undefined,
+    mileage: v.mileage != null ? String(v.mileage) : undefined,
+    horsepower_hp: v.horsepower_hp != null ? String(v.horsepower_hp) : v.hp != null ? String(v.hp) : undefined,
+    gvw_lbs: v.gvw_lbs != null ? String(v.gvw_lbs) : v.gvw != null ? String(v.gvw) : undefined,
+    mpg_city: v.mpg_city != null ? String(v.mpg_city) : undefined,
+    mpg_highway: v.mpg_highway != null ? String(v.mpg_highway) : undefined,
+    mpg_combined: v.mpg_combined != null ? String(v.mpg_combined) : undefined,
+  };
+
+  Object.keys(clean).forEach((k) => {
+    if (clean[k] == null || clean[k] === '') delete clean[k];
+  });
+
+  if (!clean.year && !clean.make && !clean.model && !clean.vin) return null;
+  return clean;
 };
 
 const getVehicleKey = (v) => {
@@ -192,7 +274,9 @@ const inferAudioMeta = (uri = '') => {
     m4a: { mimeType: 'audio/mp4', filename: 'audio.m4a' },
     mp4: { mimeType: 'audio/mp4', filename: 'audio.mp4' },
     aac: { mimeType: 'audio/aac', filename: 'audio.aac' },
-    caf: { mimeType: 'audio/x-caf', filename: 'audio.caf' },
+    // OpenAI does not accept .caf. AudioRecorderModal now records real .m4a/AAC.
+    // If an old .caf URI sneaks through, label it as m4a, but the real fix is the recorder.
+    caf: { mimeType: 'audio/mp4', filename: 'audio.m4a' },
     wav: { mimeType: 'audio/wav', filename: 'audio.wav' },
     mp3: { mimeType: 'audio/mpeg', filename: 'audio.mp3' },
   };
@@ -218,6 +302,37 @@ const normalizeFileUri = (input) => {
   return uri;
 };
 
+// -------- Robust fetch body parsing (prevents double-read bugs) --------
+async function readJsonOrText(resp) {
+  const contentType = resp?.headers?.get?.('content-type') || '';
+  const rawText = await resp.text().catch(() => '');
+  let json = null;
+
+  if (rawText && (contentType.includes('application/json') || rawText.trim().startsWith('{'))) {
+    try {
+      json = JSON.parse(rawText);
+    } catch {
+      json = null;
+    }
+  }
+
+  return { json, text: rawText };
+}
+
+function shortErr(msg) {
+  return (msg || '').toString().slice(0, 300);
+}
+
+function enforceBase64Limit(base64, maxChars, label) {
+  const s = stripDataUrl(base64) || '';
+  if (!s) return;
+  if (s.length > maxChars) {
+    throw new Error(
+      `${label} is too large to upload (${s.length.toLocaleString()} chars). Try a shorter clip / lower quality / retake closer.`
+    );
+  }
+}
+
 // ===================== TOKEN HELPERS =====================
 async function clearAllTokens() {
   await SecureStore.deleteItemAsync(KEY_ID).catch(() => {});
@@ -229,7 +344,6 @@ async function clearAllTokens() {
 
 // ✅ reads split tokens first, falls back to legacy JSON, returns idToken||accessToken
 async function getJwtForApi() {
-  // 1) new split format
   const [idToken, accessToken] = await Promise.all([
     SecureStore.getItemAsync(KEY_ID).catch(() => null),
     SecureStore.getItemAsync(KEY_ACCESS).catch(() => null),
@@ -239,9 +353,9 @@ async function getJwtForApi() {
     return idToken || accessToken || null;
   }
 
-  // 2) legacy JSON blob (fallback)
   const raw = await SecureStore.getItemAsync(LEGACY_TOKEN_KEY).catch(() => null);
   if (!raw) return null;
+
   try {
     const tokens = JSON.parse(raw);
     return tokens?.idToken || tokens?.accessToken || null;
@@ -250,6 +364,7 @@ async function getJwtForApi() {
   }
 }
 
+// ✅ App-owned authed fetch with centralized 401 behavior
 async function authedFetch(url, options = {}) {
   const token = await getJwtForApi();
   if (!token) {
@@ -265,10 +380,9 @@ async function authedFetch(url, options = {}) {
 
   const resp = await fetch(url, { ...options, headers });
 
-  // centralized 401 handling so callers don’t forget
   if (resp.status === 401) {
-    const txt = await resp.text().catch(() => '');
-    const err = new Error(`UNAUTHORIZED: ${txt || 'Token rejected/expired'}`);
+    const { text } = await readJsonOrText(resp);
+    const err = new Error(`UNAUTHORIZED: ${shortErr(text || 'Token rejected/expired')}`);
     err.code = 'UNAUTHORIZED';
     throw err;
   }
@@ -281,16 +395,18 @@ async function chatWithBackend({ messages, vehicle }) {
   const resp = await authedFetch(API_CHAT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, vehicle: vehicle || null, convoId: 'default' }),
+    body: JSON.stringify({ messages, vehicle: normalizeVehicleForApi(vehicle), convoId: 'default' }),
   });
 
-  let data = null;
-  try {
-    data = await resp.json();
-  } catch {}
-
-  if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-  return data;
+  const { json, text } = await readJsonOrText(resp);
+  if (!resp.ok) {
+    const err = new Error(json?.error || shortErr(text) || `HTTP ${resp.status}`);
+    err.status = resp.status;
+    err.code = json?.error === 'Insufficient energy' ? 'INSUFFICIENT_ENERGY' : 'CHAT_FAILED';
+    err.data = json || { raw: text };
+    throw err;
+  }
+  return json || {};
 }
 
 async function sendAudioToBackend({ uri, prompt, vehicle, mimeType, filename }) {
@@ -304,74 +420,98 @@ async function sendAudioToBackend({ uri, prompt, vehicle, mimeType, filename }) 
     encoding: FileSystem.EncodingType.Base64,
   });
 
+  // ✅ safety guard to match backend MAX_AUDIO_BASE64_CHARS
+  enforceBase64Limit(base64, MAX_AUDIO_BASE64_CHARS, 'Audio clip');
+
+  const inferredAudioMeta = inferAudioMeta(cleanUri);
+  const chosenFilename = filename || inferredAudioMeta.filename || 'audio.m4a';
+  const chosenMimeType = mimeType || inferredAudioMeta.mimeType || 'audio/mp4';
+
+  // OpenAI transcription does not accept .caf. The recorder now returns real .m4a/AAC.
+  // This guard prevents accidentally sending an unsupported .caf filename/mime.
+  const safeFilename = String(chosenFilename).toLowerCase().endsWith('.caf') ? 'audio.m4a' : chosenFilename;
+  const safeMimeType = String(chosenMimeType).toLowerCase().includes('caf') ? 'audio/mp4' : chosenMimeType;
+
+  // backend expects raw base64 (not data URL)
   const resp = await authedFetch(API_AUDIO_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      audioBase64: base64,
+      audioBase64: stripDataUrl(base64),
       prompt: prompt || 'Diagnose this sound.',
-      vehicle: vehicle || null,
-      mimeType: mimeType || 'audio/mp4',
-      filename: filename || 'audio.m4a',
+      vehicle: normalizeVehicleForApi(vehicle),
+      mimeType: safeMimeType,
+      filename: safeFilename,
     }),
   });
 
-  let data = null;
-  try {
-    data = await resp.json();
-  } catch {}
-
-  if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-  return data;
+  const { json, text } = await readJsonOrText(resp);
+  if (!resp.ok) throw new Error(json?.error || shortErr(text) || `HTTP ${resp.status}`);
+  return json || {};
 }
 
 async function sendImageToBackend({ base64, text, vehicle }) {
+  const raw = stripDataUrl(base64);
+  if (!raw) throw new Error('Image data missing.');
+
+  // ✅ safety guard to prevent huge payloads
+  enforceBase64Limit(raw, MAX_IMAGE_BASE64_CHARS, 'Image');
+
   const resp = await authedFetch(API_IMAGE_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      imageBase64: asDataUrlJpeg(stripDataUrl(base64)),
+      imageBase64: asDataUrlJpeg(raw), // backend accepts data-url too
       text: (text || '').trim(),
-      vehicle: vehicle || null,
+      vehicle: normalizeVehicleForApi(vehicle),
     }),
   });
 
-  let data = null;
-  try {
-    data = await resp.json();
-  } catch {}
-
-  if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-  return data;
+  const { json, text: t } = await readJsonOrText(resp);
+  if (!resp.ok) throw new Error(json?.error || shortErr(t) || `HTTP ${resp.status}`);
+  return json || {};
 }
 
-// ✅ NEW: service recommendations (authed, centralized errors, matches Lambda response)
-// expected response (from your updated lambda):
-// { compact:[15], result:[15], flags, usage, mileage_used }
 async function generateServiceRecommendations({ vehicle, currentMileage }) {
   const resp = await authedFetch(API_GENERATE_SERVICE_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      vehicle: vehicle || null,
+      vehicle: normalizeVehicleForApi(vehicle),
       currentMileage: currentMileage ?? null,
     }),
   });
 
-  let data = null;
-  try {
-    data = await resp.json();
-  } catch {}
+  const { json, text } = await readJsonOrText(resp);
 
   if (!resp.ok) {
-    const msg = data?.error || `Service recs failed (HTTP ${resp.status})`;
+    const msg = json?.error || shortErr(text) || `Service recs failed (HTTP ${resp.status})`;
     const err = new Error(msg);
-    err.code = data?.error === 'Insufficient energy' ? 'INSUFFICIENT_ENERGY' : 'SERVICE_RECS_FAILED';
-    err.data = data;
+    err.code = json?.error === 'Insufficient energy' ? 'INSUFFICIENT_ENERGY' : 'SERVICE_RECS_FAILED';
+    err.data = json || { raw: text };
     throw err;
   }
 
-  return data;
+  return json || {};
+}
+
+
+async function grantRevenueCatPurchaseToBackend(payload = {}) {
+  const resp = await authedFetch(API_IAP_GRANT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  const { json, text } = await readJsonOrText(resp);
+  if (!resp.ok) {
+    const err = new Error(json?.error || shortErr(text) || `Purchase grant failed (HTTP ${resp.status})`);
+    err.status = resp.status;
+    err.code = 'IAP_GRANT_FAILED';
+    err.data = json || { raw: text };
+    throw err;
+  }
+  return json || {};
 }
 
 // ===================== AD HELPERS =====================
@@ -401,7 +541,6 @@ const runRewardedAd = async (unitId, { timeoutMs = 20000 } = {}) => {
 
     const timeoutId = setTimeout(() => resolveOnce(false), timeoutMs);
 
-    // Rewarded-specific events (these exist)
     unsubs.push(
       rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
         try {
@@ -420,7 +559,6 @@ const runRewardedAd = async (unitId, { timeoutMs = 20000 } = {}) => {
       })
     );
 
-    // Generic ad lifecycle events (use AdEventType, not RewardedAdEventType)
     if (AdEventType?.CLOSED) {
       unsubs.push(
         rewarded.addAdEventListener(AdEventType.CLOSED, () => {
@@ -451,6 +589,7 @@ const runRewardedAd = async (unitId, { timeoutMs = 20000 } = {}) => {
 export default function App() {
   const [energyBalance, setEnergyBalance] = useState(null);
   const [energyLoading, setEnergyLoading] = useState(false);
+  const [carSlotBonus, setCarSlotBonus] = useState(0);
 
   const [vehicle, setVehicle] = useState(null);
   const [garageName, setGarageName] = useState('');
@@ -461,22 +600,20 @@ export default function App() {
   const [isChatting, setIsChatting] = useState(false);
   const [showSavedChats, setShowSavedChats] = useState(false);
 
-  // null = loading, false = show login, true = app
   const [isLoggedIn, setIsLoggedIn] = useState(null);
 
   const [loading, setLoading] = useState(false);
   const [chatID, setChatID] = useState(null);
 
   const [showSettings, setShowSettings] = useState(false);
+  const [showTorqueStore, setShowTorqueStore] = useState(false);
 
-  // Attachments
   const [attachedImage, setAttachedImage] = useState(null);
   const [attachedAudio, setAttachedAudio] = useState(null);
   const [attachmentLocked, setAttachmentLocked] = useState(false);
 
   const [showAudioRecorder, setShowAudioRecorder] = useState(false);
 
-  // VIN camera flow
   const [showCamera, setShowCamera] = useState(false);
   const [vinPhoto, setVinPhoto] = useState(null);
   const [showDecodingModal, setShowDecodingModal] = useState(false);
@@ -487,34 +624,101 @@ export default function App() {
   const [threadKey, setThreadKey] = useState('new');
   const [threadVehicleKey, setThreadVehicleKey] = useState(null);
 
-  // ✅ prevent energy spam
-  const lastEnergyFetchRef = useRef(0);
-  // ✅ prevent multiple simultaneous VIN decodes (camera or typed)
+  // ✅ /me anti-spam: TTL cache + in-flight lock (prevents double calls from multiple places)
+  const meCacheRef = useRef({
+    ts: 0,
+    data: null,
+    inFlight: null,
+  });
+
+  // ✅ prevent multiple simultaneous VIN decodes
   const decodeVinInFlightRef = useRef(false);
 
-  // ✅ FIX A: remember user’s selected vehicle when a saved chat temporarily switches it
   const chatVehicleRestoreRef = useRef({
     shouldRestore: false,
     vehicleObj: null,
     vehicleKey: null,
   });
 
-  const refreshEnergy = async ({ force = false } = {}) => {
+  // ✅ App-owned /me fetcher
+  const getMe = async ({ force = false } = {}) => {
+    const TTL_MS = 60_000; // 60s cache (cheap + avoids spam)
     const now = Date.now();
-    if (!force && now - lastEnergyFetchRef.current < 8000) return; // 8s cooldown
-    lastEnergyFetchRef.current = now;
+
+    if (!force && meCacheRef.current.data && now - meCacheRef.current.ts < TTL_MS) {
+      return meCacheRef.current.data;
+    }
+
+    if (meCacheRef.current.inFlight) {
+      return meCacheRef.current.inFlight;
+    }
+
+    meCacheRef.current.inFlight = (async () => {
+      const r = await authedFetch(API_ME_URL, { method: 'GET' });
+      const { json, text } = await readJsonOrText(r);
+
+      if (!r.ok) {
+        const err = new Error(`ME_FAILED: HTTP ${r.status} ${shortErr(json?.error || text)}`.trim());
+        err.code = 'ME_FAILED';
+        throw err;
+      }
+
+      meCacheRef.current.ts = Date.now();
+      meCacheRef.current.data = json || {};
+      return meCacheRef.current.data;
+    })();
 
     try {
+      return await meCacheRef.current.inFlight;
+    } finally {
+      meCacheRef.current.inFlight = null;
+    }
+  };
+
+  // ✅ Energy refresh uses /me cache; only forces when explicitly needed.
+  // Most app actions now use the live energy_balance returned by Lambda, so /me
+  // stays cached and cheap. force:true is only a fallback when a route does not
+  // return a fresh balance.
+  const refreshEnergy = async ({ force = false } = {}) => {
+    try {
       setEnergyLoading(true);
-      const r = await authedFetch(API_ME_URL, { method: 'GET' });
-      const data = await r.json().catch(() => null);
-      if (r.ok && data && typeof data.energy_balance === 'number') {
-        setEnergyBalance(data.energy_balance);
+      const me = await getMe({ force });
+      if (me && typeof me.energy_balance === 'number') {
+        setEnergyBalance(me.energy_balance);
       }
-    } catch (e) {
-      // auth failures handled elsewhere
+      if (me && typeof me.car_slot_bonus === 'number') {
+        setCarSlotBonus(me.car_slot_bonus);
+      }
+    } catch {
+      // ignore; auth failures handled in callers
     } finally {
       setEnergyLoading(false);
+    }
+  };
+
+  // ✅ Updates the EnergyPill immediately from route responses without doing
+  // extra /me calls. Falls back to a forced /me only if needed.
+  const applyEnergyFromResponse = async (data, { forceFallback = false } = {}) => {
+    const nextBalance = Number(data?.energy_balance);
+    const nextCarSlotBonus = Number(data?.car_slot_bonus);
+
+    if (Number.isFinite(nextCarSlotBonus)) {
+      setCarSlotBonus(nextCarSlotBonus);
+    }
+
+    if (Number.isFinite(nextBalance)) {
+      setEnergyBalance(nextBalance);
+      meCacheRef.current.ts = Date.now();
+      meCacheRef.current.data = {
+        ...(meCacheRef.current.data || {}),
+        energy_balance: nextBalance,
+        ...(Number.isFinite(nextCarSlotBonus) ? { car_slot_bonus: nextCarSlotBonus } : {}),
+      };
+      return;
+    }
+
+    if (forceFallback) {
+      await refreshEnergy({ force: true });
     }
   };
 
@@ -538,7 +742,7 @@ export default function App() {
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: IMAGE_MEDIA_TYPES,
         allowsEditing: false,
         quality: 0.9,
       });
@@ -564,7 +768,6 @@ export default function App() {
       const updated = normalizeVehicle({ ...target, photoUri: uri });
       await saveVehicle(updated);
 
-      // ✅ Update home-selected vehicle instantly if it matches
       const selectedKey = getVehicleKey(vehicle);
       const updatedKey = getVehicleKey(updated);
       if (selectedKey && updatedKey && selectedKey === updatedKey) {
@@ -598,23 +801,23 @@ export default function App() {
       try {
         const jwt = await getJwtForApi();
 
-        // No tokens saved → must login
         if (!jwt) {
           setIsLoggedIn(false);
           return;
         }
 
-        // Tokens exist → verify they're accepted by API Gateway (/me)
         try {
-          await authedFetch(API_ME_URL, { method: 'GET' });
+          // single call: /me verifies the token AND hydrates energy/tier
+          const me = await getMe({ force: true });
           setIsLoggedIn(true);
-          refreshEnergy({ force: true });
-        } catch (e) {
-          // Token rejected/expired/audience mismatch → wipe + show login
+          if (me && typeof me.energy_balance === 'number') setEnergyBalance(me.energy_balance);
+          if (me && typeof me.car_slot_bonus === 'number') setCarSlotBonus(me.car_slot_bonus);
+          await configureRevenueCatForUser(me?.userId);
+        } catch {
           await clearAllTokens();
           setIsLoggedIn(false);
         }
-      } catch (e) {
+      } catch {
         setIsLoggedIn(false);
       }
     })();
@@ -839,6 +1042,14 @@ export default function App() {
         return;
       }
 
+      // keep UX fast: guard early
+      try {
+        enforceBase64Limit(b64, MAX_IMAGE_BASE64_CHARS, 'Image');
+      } catch (e) {
+        Alert.alert('Photo too large', e?.message || 'Try taking a closer shot (less background).');
+        return;
+      }
+
       setAttachedImage({ uri: asset.uri, base64: b64 });
     } catch (e) {
       Alert.alert('Camera error', e?.message || 'Could not open camera.');
@@ -916,7 +1127,15 @@ export default function App() {
     setChatHistory(newHistory);
 
     const trimmedHistory = trimTurns(newHistory);
-    const vehicleForChat = activeChatVehicle?.source === 'overridden' ? activeChatVehicle : vehicle;
+
+    // ✅ VehicleSelector is the source of truth. Torque should default to the currently
+    // selected garage vehicle every time unless the user explicitly asks about another car.
+    // Only use an overridden vehicle when loading an old saved chat whose vehicle is not
+    // currently in the garage.
+    const selectedVehicleForApi = normalizeVehicleForApi(vehicle);
+    const overrideVehicleForApi =
+      activeChatVehicle?.source === 'overridden' ? normalizeVehicleForApi(activeChatVehicle) : null;
+    const vehicleForChat = overrideVehicleForApi || selectedVehicleForApi;
 
     try {
       let replyText = '';
@@ -930,6 +1149,7 @@ export default function App() {
           filename: audioSnap?.filename,
         });
         replyText = data?.reply || '⚠️ No response from audio endpoint.';
+        await applyEnergyFromResponse(data, { forceFallback: true });
       } else if (hasImg) {
         const data = await sendImageToBackend({
           base64: imgSnap?.base64,
@@ -937,13 +1157,16 @@ export default function App() {
           vehicle: vehicleForChat,
         });
         replyText = data?.reply || '⚠️ No response from image endpoint.';
+        await applyEnergyFromResponse(data, { forceFallback: true });
       } else {
         const data = await chatWithBackend({
           messages: trimmedHistory,
           vehicle: vehicleForChat,
         });
         replyText = data?.reply || '';
-        if (data?.vehicle_used) setActiveChatVehicle(data.vehicle_used);
+        // Do not switch the app's active vehicle based on model metadata.
+        // VehicleSelector remains the source of truth for the default car.
+        await applyEnergyFromResponse(data, { forceFallback: true });
       }
 
       const updatedHistory = [...newHistory, { role: 'assistant', content: replyText }];
@@ -974,7 +1197,6 @@ export default function App() {
       }
 
       setAttachmentLocked(false);
-      refreshEnergy();
     } catch (e) {
       if (String(e?.code) === 'NOT_LOGGED_IN' || String(e?.code) === 'UNAUTHORIZED') {
         Alert.alert('Session expired', 'Please sign in again.');
@@ -985,10 +1207,33 @@ export default function App() {
         return;
       }
 
-      if (imgSnap) setAttachedImage(imgSnap);
-      if (audioSnap) setAttachedAudio(audioSnap);
+      if (e?.status === 402 || String(e?.code) === 'INSUFFICIENT_ENERGY' || e?.data?.error === 'Insufficient energy') {
+        const bal = e?.data?.energy_balance;
+        const required = e?.data?.required || 3000;
 
-      setMessages((prev) => [...prev, { sender: 'api', text: `⚠️ ${e?.message || 'Error sending message.'}` }]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            sender: 'api',
+            text:
+              `⚠️ Not enough Torque energy. You need at least ${required.toLocaleString()} energy to start a chat request` +
+              `${typeof bal === 'number' ? `, but you only have ${bal.toLocaleString()}.` : '.'}`,
+          },
+        ]);
+
+        setAttachmentLocked(false);
+        return;
+      }
+
+      // Restore photo retry, but do NOT restore audio.
+      // Audio files can get stuck in the chip area after a failed transcription because the chip is driven by attachedAudio.
+      // The user can re-record a fresh clip, which is safer than retrying a possibly unsupported/expired local file URI.
+      if (imgSnap) setAttachedImage(imgSnap);
+
+      setMessages((prev) => [
+        ...prev,
+        { sender: 'api', text: `⚠️ ${e?.message || 'Error sending message.'}` },
+      ]);
       setAttachmentLocked(false);
     } finally {
       setLoading(false);
@@ -1011,48 +1256,34 @@ export default function App() {
     setAttachedAudio(null);
     setAttachmentLocked(false);
 
-    // ✅ FIX A: restore the user’s selected vehicle if we temporarily switched it to match a saved chat
     if (chatVehicleRestoreRef.current?.shouldRestore && chatVehicleRestoreRef.current?.vehicleObj) {
       setVehicle(chatVehicleRestoreRef.current.vehicleObj);
     }
     chatVehicleRestoreRef.current = { shouldRestore: false, vehicleObj: null, vehicleKey: null };
   };
 
-  // ✅ UPDATED: don’t overwrite a newer object (ex: selector updated photoUri)
   const handleSelectVehicle = async (v) => {
     const normalized = normalizeVehicle(v || {});
     await saveVehicle(normalized);
     setVehicle(normalized);
     setActiveChatVehicle(null);
-
-    // ✅ If user manually selects a vehicle, do NOT restore later on exit
     chatVehicleRestoreRef.current = { shouldRestore: false, vehicleObj: null, vehicleKey: null };
   };
 
-  // ✅ NEW: wrapper so ServiceBox can call backend safely (with auth + energy refresh)
+  // ✅ ServiceBox backend wrapper (auth + energy update)
   const handleGenerateServiceRecs = async ({ vehicle: vIn, currentMileage } = {}) => {
     const v = vIn || vehicle;
     if (!v) throw new Error('No vehicle selected.');
 
-    // Mileage hint:
-    // - prefer explicit currentMileage
-    // - else use v.mileage if present
-    const mileageHint =
-      currentMileage != null
-        ? currentMileage
-        : v?.mileage != null
-          ? v.mileage
-          : null;
+    const mileageHint = currentMileage != null ? currentMileage : v?.mileage != null ? v.mileage : null;
 
     const res = await generateServiceRecommendations({
       vehicle: v,
       currentMileage: mileageHint,
     });
 
-    // Keep energy pill accurate after spend
-    refreshEnergy();
-
-    return res; // {compact,result,flags,usage,mileage_used}
+    await applyEnergyFromResponse(res, { forceFallback: true });
+    return res;
   };
 
   // ===================== VIN decode flow =====================
@@ -1069,17 +1300,24 @@ export default function App() {
         return;
       }
 
+      const p = stripDataUrl(primaryBase64);
+      const f = fullBase64 ? stripDataUrl(fullBase64) : null;
+
+      if (!p) throw new Error('VIN image missing.');
+      // conservative guard to avoid giant uploads
+      enforceBase64Limit(p, MAX_IMAGE_BASE64_CHARS, 'VIN photo');
+
       const resp1 = await authedFetch(API_DECODE_VIN_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          base64Image: stripDataUrl(primaryBase64),
-          fullBase64: fullBase64 ? stripDataUrl(fullBase64) : null,
+          base64Image: p,
+          fullBase64: f,
         }),
       });
 
-      const data1 = await resp1.json().catch(() => null);
-      if (!resp1.ok) throw new Error(data1?.error || `VIN decode failed (HTTP ${resp1.status})`);
+      const { json: data1, text: t1 } = await readJsonOrText(resp1);
+      if (!resp1.ok) throw new Error(data1?.error || shortErr(t1) || `VIN decode failed (HTTP ${resp1.status})`);
 
       const vin = data1?.vin || data1?.vin_extracted;
 
@@ -1095,8 +1333,10 @@ export default function App() {
         body: JSON.stringify({ vin }),
       });
 
-      const data2 = await resp2.json().catch(() => null);
-      if (!resp2.ok) throw new Error(data2?.error || `VIN text decode failed (HTTP ${resp2.status})`);
+      const { json: data2, text: t2 } = await readJsonOrText(resp2);
+      if (!resp2.ok) {
+        throw new Error(data2?.error || shortErr(t2) || `VIN text decode failed (HTTP ${resp2.status})`);
+      }
 
       const decoded =
         (data2?.vehicle && typeof data2.vehicle === 'object' && data2.vehicle) ||
@@ -1115,10 +1355,12 @@ export default function App() {
       setActiveChatVehicle(null);
       setVinPhoto(null);
 
-      const name = `${vehicleFromPhoto.year || ''} ${vehicleFromPhoto.make || ''} ${vehicleFromPhoto.model || ''}`.trim();
+      const name = `${vehicleFromPhoto.year || ''} ${vehicleFromPhoto.make || ''} ${
+        vehicleFromPhoto.model || ''
+      }`.trim();
       Alert.alert(`✅ ${name} added to garage`, vehicleFromPhoto.engine || '');
 
-      refreshEnergy();
+      await applyEnergyFromResponse(data2, { forceFallback: true });
     } catch (err) {
       if (String(err?.code) === 'NOT_LOGGED_IN' || String(err?.code) === 'UNAUTHORIZED') {
         Alert.alert('Session expired', 'Please sign in again.');
@@ -1136,6 +1378,7 @@ export default function App() {
 
   const devResetLogin = async () => {
     await clearAllTokens();
+    meCacheRef.current = { ts: 0, data: null, inFlight: null };
     setIsLoggedIn(false);
   };
 
@@ -1151,17 +1394,26 @@ export default function App() {
     if (!isLoggedIn) {
       return (
         <LoginScreen
-          onLogin={async () => {
+          onLogin={async (meFromLogin) => {
             try {
-              const r = await authedFetch(API_ME_URL, { method: 'GET' });
-              if (!r.ok) {
-                const t = await r.text().catch(() => '');
-                throw new Error(`ME_FAILED: HTTP ${r.status} ${t}`);
+              // LoginScreen already called /me — so we just hydrate cache + state.
+              // If it passed me, trust it; else force one /me call.
+              if (meFromLogin && typeof meFromLogin === 'object') {
+                meCacheRef.current.ts = Date.now();
+                meCacheRef.current.data = meFromLogin;
+                if (typeof meFromLogin.energy_balance === 'number') setEnergyBalance(meFromLogin.energy_balance);
+                if (typeof meFromLogin.car_slot_bonus === 'number') setCarSlotBonus(meFromLogin.car_slot_bonus);
+                await configureRevenueCatForUser(meFromLogin.userId);
+              } else {
+                const me = await getMe({ force: true });
+                if (typeof me?.energy_balance === 'number') setEnergyBalance(me.energy_balance);
+                if (typeof me?.car_slot_bonus === 'number') setCarSlotBonus(me.car_slot_bonus);
+                await configureRevenueCatForUser(me?.userId);
               }
+
               setIsLoggedIn(true);
-              refreshEnergy({ force: true });
             } catch (e) {
-              console.warn('Login success but /me failed:', e?.message || e);
+              console.warn('Login success but /me hydrate failed:', e?.message || e);
               Alert.alert(
                 'Signed in, but server setup failed',
                 `Your token was issued, but /me failed.\n\n${e?.message || 'Unknown error'}`
@@ -1177,8 +1429,19 @@ export default function App() {
     return (
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
         <View style={styles.pageContent}>
-          <HomeHeader garageName={garageName} setGarageName={setGarageName} onSettingsPress={() => setShowSettings(true)} />
-          <SettingsModal visible={showSettings} onClose={() => setShowSettings(false)} />
+          <HomeHeader
+            garageName={garageName}
+            setGarageName={setGarageName}
+            onSettingsPress={() => setShowSettings(true)}
+          />
+          <SettingsModal
+            visible={showSettings}
+            onClose={() => setShowSettings(false)}
+            onOpenShop={() => {
+              setShowSettings(false);
+              setShowTorqueStore(true);
+            }}
+          />
 
           {!isChatting && (
             <>
@@ -1189,6 +1452,8 @@ export default function App() {
                 gateCameraWithAd={false}
                 triggerVinCamera={() => setShowCamera(true)}
                 onOpenVehiclePhoto={openVehiclePhoto}
+                vehicleSlotLimit={1 + Number(carSlotBonus || 0)}
+                onOpenShop={() => setShowTorqueStore(true)}
                 onDecodeVinTyped={async (vin) => {
                   const resp = await authedFetch(API_DECODE_VIN_TEXT_URL, {
                     method: 'POST',
@@ -1196,8 +1461,8 @@ export default function App() {
                     body: JSON.stringify({ vin }),
                   });
 
-                  const data = await resp.json().catch(() => null);
-                  if (!resp.ok) throw new Error(data?.error || `VIN text decode failed (HTTP ${resp.status})`);
+                  const { json: data, text: t } = await readJsonOrText(resp);
+                  if (!resp.ok) throw new Error(data?.error || shortErr(t) || `VIN text decode failed (HTTP ${resp.status})`);
 
                   const decoded =
                     (data?.vehicle && typeof data.vehicle === 'object' && data.vehicle) ||
@@ -1213,14 +1478,15 @@ export default function App() {
                   setVehicle(vehicleFromVin);
                   setActiveChatVehicle(null);
 
-                  refreshEnergy?.();
+                  await applyEnergyFromResponse(data, { forceFallback: true });
 
-                  const name = `${vehicleFromVin.year || ''} ${vehicleFromVin.make || ''} ${vehicleFromVin.model || ''}`.trim();
+                  const name = `${vehicleFromVin.year || ''} ${vehicleFromVin.make || ''} ${
+                    vehicleFromVin.model || ''
+                  }`.trim();
                   Alert.alert(`✅ ${name} added to garage`, vehicleFromVin.engine || '');
                 }}
               />
 
-              {/* ✅ UPDATED: ServiceBox gets backend hook + energy refresh */}
               <ServiceBox
                 selectedVehicle={vehicle}
                 onGenerateServiceRecs={handleGenerateServiceRecs}
@@ -1268,7 +1534,13 @@ export default function App() {
 
           {isChatting && (
             <View style={styles.chatMessagesArea}>
-              <ChatMessages messages={messages} loading={loading} focusTick={focusTick} bottomInset={120} threadKey={threadKey} />
+              <ChatMessages
+                messages={messages}
+                loading={loading}
+                focusTick={focusTick}
+                bottomInset={120}
+                threadKey={threadKey}
+              />
             </View>
           )}
 
@@ -1393,7 +1665,7 @@ export default function App() {
   };
 
   return (
-    <>
+    <GestureHandlerRootView style={styles.gestureRoot}>
       {showCamera ? (
         <VinCamera
           onCapture={(photo) => {
@@ -1449,7 +1721,6 @@ export default function App() {
         renderContent()
       )}
 
-      {/* ✅ Vehicle Photo Modal hosted at App root */}
       <VehiclePhotoModal
         visible={photoModalVisible}
         onClose={() => setPhotoModalVisible(false)}
@@ -1473,11 +1744,25 @@ export default function App() {
           setAttachedAudio({
             uri: cleanUri,
             durationMs: payload?.durationMs ?? null,
-            mimeType: meta.mimeType,
-            filename: meta.filename,
+            // Prefer the recorder's explicit metadata. This keeps the backend on the
+            // intended audio.m4a / audio/mp4 path instead of guessing from the URI.
+            mimeType: payload?.mimeType || meta.mimeType,
+            filename: payload?.filename || meta.filename,
           });
 
           setFocusTick((x) => x + 1);
+        }}
+      />
+
+      <TorqueStoreModal
+        visible={showTorqueStore}
+        onClose={() => setShowTorqueStore(false)}
+        currentEnergy={energyBalance}
+        carSlotBonus={carSlotBonus}
+        onGrantPurchase={async (payload) => {
+          const data = await grantRevenueCatPurchaseToBackend(payload);
+          await applyEnergyFromResponse(data, { forceFallback: true });
+          return data;
         }}
       />
 
@@ -1492,11 +1777,12 @@ export default function App() {
           </View>
         </Modal>
       )}
-    </>
+    </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
+  gestureRoot: { flex: 1 },
   container: { flex: 1, backgroundColor: '#121212' },
   loading: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 

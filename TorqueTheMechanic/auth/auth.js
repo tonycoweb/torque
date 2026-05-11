@@ -1,8 +1,8 @@
-// api/auth.js
+// auth/auth.js
 import * as SecureStore from 'expo-secure-store';
 
-const KEY_ID_TOKEN = 'pm_id_token';
-const KEY_ACCESS_TOKEN = 'pm_access_token';
+const KEY_ID_TOKEN = 'pm_id_token_v1';
+const KEY_ACCESS_TOKEN = 'pm_access_token_v1';
 
 export async function setTokens({ idToken, accessToken }) {
   if (idToken) await SecureStore.setItemAsync(KEY_ID_TOKEN, idToken);

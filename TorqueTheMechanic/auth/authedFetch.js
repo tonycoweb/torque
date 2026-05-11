@@ -1,4 +1,4 @@
-// api/authedFetch.js
+// auth/authedFetch.js
 import { getIdToken, clearTokens } from './auth';
 
 export async function authedFetch(url, options = {}) {
