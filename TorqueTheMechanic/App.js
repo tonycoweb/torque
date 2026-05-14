@@ -40,6 +40,7 @@ import VehicleSelector from './components/VehicleSelector';
 import VehiclePhotoModal from './components/VehiclePhotoModal';
 import LoginScreen from './components/LoginScreen';
 import SettingsModal from './components/SettingsModal';
+import UserAccountModal from './components/UserAccountModal';
 import TorqueStoreModal from './components/TorqueStoreModal';
 
 import VinCamera from './components/VinCamera';
@@ -53,6 +54,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import * as SecureStore from 'expo-secure-store';
 import EnergyPill from './components/EnergyPill';
+import TorqueModeToggle from './components/TorqueModeToggle';
 
 import mobileAds, { RewardedAd, RewardedAdEventType, AdEventType } from 'react-native-google-mobile-ads';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -61,6 +63,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 const BACKEND_BASE = 'https://rd9gvjuco8.execute-api.us-east-2.amazonaws.com';
 
 const API_CHAT_URL = `${BACKEND_BASE}/chat`;
+const API_TORQUE_SEARCH_URL = `${BACKEND_BASE}/torque-search`;
 const API_AUDIO_URL = `${BACKEND_BASE}/audio-diagnose`;
 const API_IMAGE_URL = `${BACKEND_BASE}/image-diagnose`;
 const API_DECODE_VIN_URL = `${BACKEND_BASE}/decode-vin`;
@@ -124,6 +127,19 @@ const adUnitId = __DEV__
 // ===================== HELPERS =====================
 const LAST_CHAT_ID_KEY = 'last_chat_id';
 const LAST_CHAT_BY_VEHICLE_KEY = 'last_chat_id_by_vehicle';
+const USER_PROFILE_KEY = 'pm_user_profile_v1';
+const USER_INTRO_SEEN_KEY = 'pm_user_intro_seen_v1';
+const DEFAULT_EXPERTISE_LEVEL = 'basic_owner';
+const CHAT_MODE_LITE = 'lite';
+const CHAT_MODE_TORQUE_SEARCH = 'torque_search';
+const CHAT_MODE_LABELS = {
+  [CHAT_MODE_LITE]: 'Regular Lite',
+  [CHAT_MODE_TORQUE_SEARCH]: 'Torque Search',
+};
+const CHAT_MODE_ESTIMATES = {
+  [CHAT_MODE_LITE]: '≈1k–3k energy',
+  [CHAT_MODE_TORQUE_SEARCH]: '≈6k+ energy',
+};
 
 // These align with your SAM defaults (string env vars).
 const MAX_AUDIO_BASE64_CHARS = 12_000_000;
@@ -182,6 +198,23 @@ const normalizeVehicleForApi = (v = null) => {
 
   if (!clean.year && !clean.make && !clean.model && !clean.vin) return null;
   return clean;
+};
+
+
+const EXPERTISE_LABELS = {
+  brand_new: 'Brand New',
+  basic_owner: 'Basic Owner',
+  diy_beginner: 'DIY Beginner',
+  advanced_diy: 'Advanced DIY',
+  pro_tech: 'Pro / Technician',
+};
+
+const normalizeUserProfileForApi = (expertiseLevel) => {
+  const key = expertiseLevel || DEFAULT_EXPERTISE_LEVEL;
+  return {
+    automotive_expertise_level: key,
+    automotive_expertise_label: EXPERTISE_LABELS[key] || EXPERTISE_LABELS[DEFAULT_EXPERTISE_LEVEL],
+  };
 };
 
 const getVehicleKey = (v) => {
@@ -391,11 +424,16 @@ async function authedFetch(url, options = {}) {
 }
 
 // ===================== API CALLS =====================
-async function chatWithBackend({ messages, vehicle }) {
+async function chatWithBackend({ messages, vehicle, userProfile }) {
   const resp = await authedFetch(API_CHAT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, vehicle: normalizeVehicleForApi(vehicle), convoId: 'default' }),
+    body: JSON.stringify({
+      messages,
+      vehicle: normalizeVehicleForApi(vehicle),
+      userProfile: userProfile || null,
+      convoId: 'default',
+    }),
   });
 
   const { json, text } = await readJsonOrText(resp);
@@ -409,7 +447,32 @@ async function chatWithBackend({ messages, vehicle }) {
   return json || {};
 }
 
-async function sendAudioToBackend({ uri, prompt, vehicle, mimeType, filename }) {
+
+async function torqueSearchWithBackend({ message, messages, vehicle, userProfile }) {
+  const resp = await authedFetch(API_TORQUE_SEARCH_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: String(message || '').trim(),
+      messages: Array.isArray(messages) ? messages : [],
+      vehicle: normalizeVehicleForApi(vehicle),
+      userProfile: userProfile || null,
+      depth: 'standard',
+    }),
+  });
+
+  const { json, text } = await readJsonOrText(resp);
+  if (!resp.ok) {
+    const err = new Error(json?.error || shortErr(text) || `HTTP ${resp.status}`);
+    err.status = resp.status;
+    err.code = json?.error === 'Insufficient energy' ? 'INSUFFICIENT_ENERGY' : 'TORQUE_SEARCH_FAILED';
+    err.data = json || { raw: text };
+    throw err;
+  }
+  return json || {};
+}
+
+async function sendAudioToBackend({ uri, prompt, vehicle, userProfile, mimeType, filename }) {
   const cleanUri = normalizeFileUri(uri);
   if (!cleanUri) throw new Error('Audio URI is missing/invalid (could not normalize).');
 
@@ -440,6 +503,7 @@ async function sendAudioToBackend({ uri, prompt, vehicle, mimeType, filename }) 
       audioBase64: stripDataUrl(base64),
       prompt: prompt || 'Diagnose this sound.',
       vehicle: normalizeVehicleForApi(vehicle),
+      userProfile: userProfile || null,
       mimeType: safeMimeType,
       filename: safeFilename,
     }),
@@ -450,7 +514,7 @@ async function sendAudioToBackend({ uri, prompt, vehicle, mimeType, filename }) 
   return json || {};
 }
 
-async function sendImageToBackend({ base64, text, vehicle }) {
+async function sendImageToBackend({ base64, text, vehicle, userProfile }) {
   const raw = stripDataUrl(base64);
   if (!raw) throw new Error('Image data missing.');
 
@@ -464,6 +528,7 @@ async function sendImageToBackend({ base64, text, vehicle }) {
       imageBase64: asDataUrlJpeg(raw), // backend accepts data-url too
       text: (text || '').trim(),
       vehicle: normalizeVehicleForApi(vehicle),
+      userProfile: userProfile || null,
     }),
   });
 
@@ -606,7 +671,13 @@ export default function App() {
   const [chatID, setChatID] = useState(null);
 
   const [showSettings, setShowSettings] = useState(false);
+  const [showAccountModal, setShowAccountModal] = useState(false);
+  const [showFirstRunIntro, setShowFirstRunIntro] = useState(false);
+  const [userExpertiseLevel, setUserExpertiseLevel] = useState(DEFAULT_EXPERTISE_LEVEL);
   const [showTorqueStore, setShowTorqueStore] = useState(false);
+  const [chatMode, setChatMode] = useState(CHAT_MODE_LITE);
+  const [modeFlashText, setModeFlashText] = useState('');
+  const modeFlashOpacity = useRef(new Animated.Value(0)).current;
 
   const [attachedImage, setAttachedImage] = useState(null);
   const [attachedAudio, setAttachedAudio] = useState(null);
@@ -639,6 +710,82 @@ export default function App() {
     vehicleObj: null,
     vehicleKey: null,
   });
+
+
+  const getCurrentUserProfileForApi = () => normalizeUserProfileForApi(userExpertiseLevel);
+
+  const hydrateUserAccountProfile = async ({ showIntroIfNeeded = true } = {}) => {
+    try {
+      const [rawProfile, introSeen] = await Promise.all([
+        AsyncStorage.getItem(USER_PROFILE_KEY),
+        AsyncStorage.getItem(USER_INTRO_SEEN_KEY),
+      ]);
+
+      let nextLevel = DEFAULT_EXPERTISE_LEVEL;
+      if (rawProfile) {
+        try {
+          const parsed = JSON.parse(rawProfile);
+          if (parsed?.automotive_expertise_level) nextLevel = parsed.automotive_expertise_level;
+          else if (parsed?.expertiseLevel) nextLevel = parsed.expertiseLevel;
+        } catch {}
+      }
+
+      setUserExpertiseLevel(nextLevel);
+
+      if (showIntroIfNeeded && introSeen !== 'true') {
+        setShowFirstRunIntro(true);
+      }
+    } catch {
+      if (showIntroIfNeeded) setShowFirstRunIntro(true);
+    }
+  };
+
+  const saveUserExpertiseLevel = async (level, { introComplete = false } = {}) => {
+    const safeLevel = level || DEFAULT_EXPERTISE_LEVEL;
+    setUserExpertiseLevel(safeLevel);
+
+    await AsyncStorage.setItem(
+      USER_PROFILE_KEY,
+      JSON.stringify({
+        automotive_expertise_level: safeLevel,
+        automotive_expertise_label: EXPERTISE_LABELS[safeLevel] || EXPERTISE_LABELS[DEFAULT_EXPERTISE_LEVEL],
+        updatedAt: new Date().toISOString(),
+      })
+    );
+
+    if (introComplete) {
+      await AsyncStorage.setItem(USER_INTRO_SEEN_KEY, 'true');
+      setShowFirstRunIntro(false);
+    }
+  };
+
+  const handleDeleteLocalAccount = async () => {
+    try {
+      await clearAllTokens();
+      await AsyncStorage.multiRemove([
+        USER_PROFILE_KEY,
+        USER_INTRO_SEEN_KEY,
+        LAST_CHAT_ID_KEY,
+        LAST_CHAT_BY_VEHICLE_KEY,
+        'selectedVehicle',
+      ]).catch(() => {});
+
+      setShowAccountModal(false);
+      setShowSettings(false);
+      setShowFirstRunIntro(false);
+      setMessages([]);
+      setChatHistory([]);
+      setChatID(null);
+      setThreadKey('new');
+      setVehicle(null);
+      setEnergyBalance(null);
+      setCarSlotBonus(0);
+      meCacheRef.current = { ts: 0, data: null, inFlight: null };
+      setIsLoggedIn(false);
+    } catch (e) {
+      Alert.alert('Account Error', e?.message || 'Could not remove the local account.');
+    }
+  };
 
   // ✅ App-owned /me fetcher
   const getMe = async ({ force = false } = {}) => {
@@ -823,6 +970,15 @@ export default function App() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+
+  // ===================== User profile / first-run intro =====================
+  useEffect(() => {
+    if (isLoggedIn === true) {
+      hydrateUserAccountProfile({ showIntroIfNeeded: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoggedIn]);
 
   // ===================== Load vehicles =====================
   useEffect(() => {
@@ -1076,6 +1232,40 @@ export default function App() {
     setAttachedAudio(null);
   };
 
+
+  const flashModeEnergy = (mode) => {
+    const label = CHAT_MODE_LABELS[mode] || 'Mode';
+    const estimate = CHAT_MODE_ESTIMATES[mode] || '';
+    setModeFlashText(`${label} • ${estimate}`);
+    modeFlashOpacity.stopAnimation?.();
+    modeFlashOpacity.setValue(0);
+    Animated.sequence([
+      Animated.timing(modeFlashOpacity, { toValue: 1, duration: 160, useNativeDriver: true }),
+      Animated.delay(1350),
+      Animated.timing(modeFlashOpacity, { toValue: 0, duration: 260, useNativeDriver: true }),
+    ]).start();
+  };
+
+  const toggleChatMode = () => {
+    if (loading || attachmentLocked) return;
+    const next = chatMode === CHAT_MODE_TORQUE_SEARCH ? CHAT_MODE_LITE : CHAT_MODE_TORQUE_SEARCH;
+    setChatMode(next);
+    flashModeEnergy(next);
+    openChat();
+    setShowSavedChats(false);
+
+    const notice =
+      next === CHAT_MODE_TORQUE_SEARCH
+        ? '🔎 **Torque Search mode is on.** Ask an automotive question and I’ll search live forums, videos, repair references, and known-fix reports. This uses more energy because I’m checking live sources.'
+        : '⚡ **Regular Lite mode is on.** I’ll answer fast using your selected vehicle and the current chat context, without live web search.';
+
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last?.modeNotice === next) return prev;
+      return [...prev, { sender: 'api', text: notice, modeNotice: next }];
+    });
+  };
+
   // ===================== Sending =====================
   const handleSend = async (textOrPayload) => {
     if (loading) return;
@@ -1139,12 +1329,15 @@ export default function App() {
 
     try {
       let replyText = '';
+      let responseSources = [];
+      let responseSearchMeta = null;
 
       if (hasAudio) {
         const data = await sendAudioToBackend({
           uri: audioSnap?.uri,
           prompt: hasText ? text.trim() : 'Diagnose this sound.',
           vehicle: vehicleForChat,
+          userProfile: getCurrentUserProfileForApi(),
           mimeType: audioSnap?.mimeType,
           filename: audioSnap?.filename,
         });
@@ -1155,23 +1348,52 @@ export default function App() {
           base64: imgSnap?.base64,
           text: hasText ? text.trim() : '',
           vehicle: vehicleForChat,
+          userProfile: getCurrentUserProfileForApi(),
         });
         replyText = data?.reply || '⚠️ No response from image endpoint.';
         await applyEnergyFromResponse(data, { forceFallback: true });
       } else {
-        const data = await chatWithBackend({
-          messages: trimmedHistory,
-          vehicle: vehicleForChat,
-        });
-        replyText = data?.reply || '';
-        // Do not switch the app's active vehicle based on model metadata.
-        // VehicleSelector remains the source of truth for the default car.
-        await applyEnergyFromResponse(data, { forceFallback: true });
+        if (chatMode === CHAT_MODE_TORQUE_SEARCH) {
+          const data = await torqueSearchWithBackend({
+            message: text.trim(),
+            messages: trimmedHistory,
+            vehicle: vehicleForChat,
+            userProfile: getCurrentUserProfileForApi(),
+          });
+          replyText = data?.reply || '';
+          responseSources = Array.isArray(data?.sources) ? data.sources : [];
+          responseSearchMeta = {
+            mode: 'torque_search',
+            queries_used: Array.isArray(data?.queries_used) ? data.queries_used : [],
+            token_usage_total: Number(data?.token_usage_total || data?.usage?.total_tokens || 0),
+            energy_charged: Number(data?.energy_charged || 0),
+            linkup_calls: Number(data?.linkup_calls || 0),
+          };
+          await applyEnergyFromResponse(data, { forceFallback: true });
+        } else {
+          const data = await chatWithBackend({
+            messages: trimmedHistory,
+            vehicle: vehicleForChat,
+            userProfile: getCurrentUserProfileForApi(),
+          });
+          replyText = data?.reply || '';
+          // Do not switch the app's active vehicle based on model metadata.
+          // VehicleSelector remains the source of truth for the default car.
+          await applyEnergyFromResponse(data, { forceFallback: true });
+        }
       }
 
-      const updatedHistory = [...newHistory, { role: 'assistant', content: replyText }];
+      const assistantHistoryMessage = {
+        role: 'assistant',
+        content: replyText,
+        ...(responseSources?.length ? { sources: responseSources, searchMeta: responseSearchMeta } : {}),
+      };
+      const updatedHistory = [...newHistory, assistantHistoryMessage];
       setChatHistory(updatedHistory);
-      setMessages((prev) => [...prev, { sender: 'api', text: replyText }]);
+      setMessages((prev) => [
+        ...prev,
+        { sender: 'api', text: replyText, sources: responseSources || [], searchMeta: responseSearchMeta || null },
+      ]);
 
       const id = chatID || Date.now().toString();
       setChatID(id);
@@ -1184,6 +1406,7 @@ export default function App() {
         vehicleYear: vehicleForChat?.year ? String(vehicleForChat.year) : null,
         vehicleMake: vehicleForChat?.make ? String(vehicleForChat.make) : null,
         vehicleModel: vehicleForChat?.model ? String(vehicleForChat.model) : null,
+        chatMode,
       });
 
       setThreadVehicleKey(vKey || null);
@@ -1437,10 +1660,31 @@ export default function App() {
           <SettingsModal
             visible={showSettings}
             onClose={() => setShowSettings(false)}
+            onOpenAccount={() => {
+              setShowSettings(false);
+              setShowAccountModal(true);
+            }}
             onOpenShop={() => {
               setShowSettings(false);
               setShowTorqueStore(true);
             }}
+          />
+
+          <UserAccountModal
+            visible={showAccountModal}
+            mode="account"
+            expertiseLevel={userExpertiseLevel}
+            onSaveExpertise={saveUserExpertiseLevel}
+            onClose={() => setShowAccountModal(false)}
+            onDeleteLocalAccount={handleDeleteLocalAccount}
+          />
+
+          <UserAccountModal
+            visible={showFirstRunIntro}
+            mode="intro"
+            expertiseLevel={userExpertiseLevel}
+            onSaveExpertise={saveUserExpertiseLevel}
+            onClose={() => setShowFirstRunIntro(false)}
           />
 
           {!isChatting && (
@@ -1583,6 +1827,8 @@ export default function App() {
                 history.map((m) => ({
                   sender: m.role === 'user' ? 'user' : 'api',
                   text: normalizeMsgContent(m.content),
+                  sources: Array.isArray(m.sources) ? m.sources : [],
+                  searchMeta: m.searchMeta || null,
                 }))
               );
 
@@ -1633,8 +1879,35 @@ export default function App() {
           />
         </View>
 
-        <View style={{ marginTop: 10 }}>
-          <EnergyPill energy={energyBalance} loading={energyLoading} />
+        <View style={styles.energyModeRow}>
+          <View style={styles.energyPillSlot}>
+            <EnergyPill energy={energyBalance} loading={energyLoading} />
+          </View>
+
+          <View style={styles.modeToggleWrap}>
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.modeEnergyFlash,
+                {
+                  opacity: modeFlashOpacity,
+                  transform: [
+                    {
+                      translateY: modeFlashOpacity.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [8, -6],
+                      }),
+                    },
+                  ],
+                },
+              ]}
+            >
+              <MaterialCommunityIcons name="flash" size={14} color="#22c55e" />
+              <Text style={styles.modeEnergyFlashText}>{modeFlashText}</Text>
+            </Animated.View>
+
+            <TorqueModeToggle mode={chatMode} onToggle={toggleChatMode} disabled={loading || attachmentLocked} />
+          </View>
         </View>
 
         <View style={styles.chatDock}>
@@ -1793,7 +2066,7 @@ const styles = StyleSheet.create({
     paddingBottom: 33,
   },
 
-  chatMessagesArea: { flex: 1 },
+  chatMessagesArea: { flex: 1, marginHorizontal: -20 },
   robotWrapper: { alignItems: 'center' },
 
   chatTopBar: {
@@ -1839,6 +2112,46 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   decodeTitle: { color: '#fff', fontSize: 18, marginBottom: 5 },
+
+
+  energyModeRow: {
+    marginTop: 10,
+    paddingHorizontal: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  energyPillSlot: {
+    flex: 1,
+    alignItems: 'flex-start',
+  },
+  modeToggleWrap: {
+    position: 'relative',
+    alignItems: 'flex-end',
+  },
+  modeEnergyFlash: {
+    position: 'absolute',
+    bottom: 54,
+    right: 0,
+    minWidth: 170,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: '#1f1f1f',
+    borderWidth: 1,
+    borderColor: 'rgba(34,197,94,0.45)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    zIndex: 999,
+  },
+  modeEnergyFlashText: {
+    color: '#dcfce7',
+    fontSize: 11,
+    fontWeight: '900',
+  },
 
   chatDock: {
     left: 0,

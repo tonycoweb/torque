@@ -26,6 +26,15 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { showRewardedAd, preloadRewardedAd } from '../components/RewardedAdManager';
 import { exportServicesToPdf } from '../utils/servicePdfExporter';
 
+// Expo SDK 53+ deprecates ImagePicker.MediaTypeOptions.
+// This keeps the file compatible with newer and older ImagePicker versions.
+const IMAGE_PICKER_MEDIA_TYPES = ImagePicker.MediaType?.Images
+  ? [ImagePicker.MediaType.Images]
+  : ['images'];
+
+// Saved in your assets folder. Used by the Service Tracker info button.
+const SERVICE_INSTRUCTIONS_IMAGE = require('../assets/serviceInstructions.png');
+
 // Tiny helper to animate "..." without extra libs
 function AnimatedEllipsis({ style }) {
   const [dots, setDots] = React.useState('');
@@ -66,7 +75,7 @@ export default function ServiceBox({
   const headerMilesRef = useRef(null);
 
   // overlays
-  const [overlay, setOverlay] = useState(null); // 'prompt' | 'thinking' | 'edit' | 'image' | 'custom' | 'editMonths' | null
+  const [overlay, setOverlay] = useState(null); // 'prompt' | 'thinking' | 'edit' | 'image' | 'custom' | 'editMonths' | 'instructions' | null
   const [isGenerating, setIsGenerating] = useState(false);
 
   // export state
@@ -122,6 +131,8 @@ export default function ServiceBox({
 
   const { width } = useWindowDimensions();
   const sheetWidth = Math.min(width - 24, 720);
+  const instructionImageWidth = Math.min(sheetWidth - 32, 560);
+  const instructionImageHeight = Math.round(instructionImageWidth * (1672 / 941));
 
   // ---------- helpers ----------
   const digitsOnly = (s) => String(s ?? '').replace(/[^\d]/g, '');
@@ -595,7 +606,7 @@ export default function ServiceBox({
           const cam = await requestCameraPermission();
           if (!cam.granted) return Alert.alert('Camera permission required');
           const result = await ImagePicker.launchCameraAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            mediaTypes: IMAGE_PICKER_MEDIA_TYPES,
             quality: 0.7,
           });
           if (!result.canceled && result.assets?.[0]?.uri) {
@@ -609,7 +620,7 @@ export default function ServiceBox({
           const lib = await requestMediaPermission();
           if (!lib.granted) return Alert.alert('Photo library permission required');
           const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            mediaTypes: IMAGE_PICKER_MEDIA_TYPES,
             quality: 0.7,
           });
           if (!result.canceled && result.assets?.[0]?.uri) {
@@ -920,7 +931,7 @@ export default function ServiceBox({
 
   // Static offsets + padding (your approach)
   const kvo = Platform.OS === 'ios' ? 12 : StatusBar.currentHeight || 0;
-  const topPad = Platform.OS === 'ios' ? 48 : StatusBar.currentHeight || 24;
+  const topPad = Platform.OS === 'ios' ? 44 : StatusBar.currentHeight || 24;
 
   const recommendedText =
     services.find((s) => !s.completed && s.priority === 'high' && s.applies)?.text ||
@@ -939,9 +950,9 @@ export default function ServiceBox({
         >
           <View style={styles.entryTopRow}>
             <View style={styles.entryPill}>
-              <MaterialCommunityIcons name="wrench-outline" size={16} color="#cbd5e1" />
+              <MaterialCommunityIcons name="wrench-outline" size={14} color="#cbd5e1" />
               <Text style={styles.entryPillText}>Service Tracker</Text>
-              <MaterialCommunityIcons name="wrench-outline" size={16} color="#cbd5e1" />
+              <MaterialCommunityIcons name="wrench-outline" size={14} color="#cbd5e1" />
             </View>
           </View>
 
@@ -950,7 +961,7 @@ export default function ServiceBox({
           </Text>
 
           <Text style={styles.entrySub} numberOfLines={1}>
-            Tap to manage service records
+            Recommended Service
           </Text>
         </TouchableOpacity>
       ) : (
@@ -1000,7 +1011,7 @@ export default function ServiceBox({
               {/* Header */}
               <View style={styles.headerRow}>
                 <TouchableOpacity
-                  onPress={() => Alert.alert('Info', `Managing services for your ${vehicleLabel}.`)}
+                  onPress={() => setOverlay('instructions')}
                   style={styles.headerIconBtn}
                   activeOpacity={0.85}
                 >
@@ -1448,6 +1459,46 @@ export default function ServiceBox({
                     </View>
                     <Text style={styles.thinkingTitle}>Torque is thinking</Text>
                     <AnimatedEllipsis style={styles.thinkingSub} />
+                  </View>
+                </View>
+              )}
+
+              {/* INSTRUCTIONS */}
+              {overlay === 'instructions' && (
+                <View style={styles.overlay}>
+                  <View style={[styles.instructionsSheet, { width: sheetWidth }]}>
+                    <View style={styles.sheetHeader}>
+                      <View style={{ flex: 1, paddingRight: 10 }}>
+                    
+                        <Text style={styles.instructionsSubtitle}>Information</Text>
+                      </View>
+                      <TouchableOpacity onPress={() => setOverlay(null)} style={styles.sheetClose} activeOpacity={0.85}>
+                        <Text style={styles.sheetCloseText}>×</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    <ScrollView
+                      showsVerticalScrollIndicator={false}
+                      contentContainerStyle={styles.instructionsScroll}
+                      maximumZoomScale={2.5}
+                      minimumZoomScale={1}
+                      bouncesZoom
+                    >
+                      <Image
+                        source={SERVICE_INSTRUCTIONS_IMAGE}
+                        style={[
+                          styles.instructionsImage,
+                          { width: instructionImageWidth, height: instructionImageHeight },
+                        ]}
+                        resizeMode="contain"
+                      />
+
+                      <Text style={styles.instructionsFooterText}>
+                        Keep your mileage updated whenever you can. Torque uses the latest saved mileage to judge urgency,
+                        due miles, and what should be watched next. Always confirm maintenance needs with your owner’s
+                        manual or a qualified technician.
+                      </Text>
+                    </ScrollView>
                   </View>
                 </View>
               )}
@@ -1913,95 +1964,133 @@ export default function ServiceBox({
 
 /* ===================== THEME ===================== */
 const UI = {
-  bg: '#0b0f17',
-  panel: '#0f1623',
-  card: '#111a2a',
-  card2: '#0e1626',
-  border: 'rgba(255,255,255,0.08)',
-  border2: 'rgba(255,255,255,0.12)',
-  text: '#e5e7eb',
-  text2: '#cbd5e1',
-  muted: '#94a3b8',
-  muted2: '#64748b',
+  bg: '#121212',
+  panel: '#202020',
+  card: '#2a2a2a',
+  card2: '#2f2f2f',
+  border: 'rgba(255,255,255,0.10)',
+  border2: 'rgba(255,255,255,0.16)',
+  text: '#ffffff',
+  text2: '#e5e7eb',
+  muted: '#b8bec8',
+  muted2: '#8f97a3',
   textDark: '#0b1220',
   blue: '#3b82f6',
   green: '#22c55e',
   purple: '#8b5cf6',
+  danger: '#ef4444',
+  soft: 'rgba(255,255,255,0.06)',
 };
 
 const styles = StyleSheet.create({
   /* ===== Entry Tile ===== */
   entryCard: {
     backgroundColor: '#2a2a2a',
-    paddingVertical: 40,
+    paddingVertical: 30,
     paddingHorizontal: 18,
     borderRadius: 16,
     alignItems: 'center',
+    justifyContent: 'center',
     borderColor: 'rgba(255,255,255,0.10)',
     borderWidth: 1,
     marginVertical: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.14,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
   },
   entryCardDisabled: {
-    backgroundColor: '#0c1320',
-    borderColor: 'rgba(255,255,255,0.06)',
-    opacity: 0.95,
+    backgroundColor: '#242424',
+    borderColor: 'rgba(255,255,255,0.08)',
+    opacity: 0.96,
   },
   entryTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
+    width: '100%',
   },
   entryPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    justifyContent: 'center',
+    gap: 10,
     paddingHorizontal: 12,
   },
-  entryPillText: { fontSize: 20, fontWeight: '900', color: '#fff' },
-  entryTitle: { fontSize: 14, color: '#e5e7eb', marginVertical: 4, fontWeight: '700' },
-  entrySub: { fontSize: 12.5, color: '#cbd5e1', opacity: 0.9 },
+  entryPillText: { fontSize: 20, fontWeight: '900', color: '#fff', letterSpacing: 0.2 },
+  recommendationBadge: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: 'rgba(34,197,94,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(34,197,94,0.25)',
+  },
+  recommendationBadgeText: { color: '#bbf7d0', fontSize: 12, fontWeight: '900', letterSpacing: 0.2 },
+  entryTitle: { fontSize: 18, color: '#fff', marginTop: 8, marginBottom: 4, fontWeight: '900', textAlign: 'center' },
+  entrySub: { fontSize: 13, color: '#b8bec8', opacity: 0.95, fontWeight: '800', textAlign: 'center' },
 
   /* ===== Modal Shell ===== */
-  modalWrapper: { flex: 1, backgroundColor: UI.bg },
+  modalWrapper: {
+    flex: 1,
+    backgroundColor: UI.bg,
+    paddingHorizontal: 0,
+  },
   modalBox: {
     backgroundColor: UI.bg,
-    borderRadius: 22,
-    marginHorizontal: 14,
-    paddingBottom: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.04)',
+    borderRadius: 0,
+    marginHorizontal: 0,
+    paddingBottom: 0,
+    borderWidth: 0,
+    borderColor: 'transparent',
     flex: 1,
+    overflow: 'hidden',
   },
-  scrollContent: { flexGrow: 1, paddingBottom: 120, paddingTop: 10, paddingHorizontal: 2 },
-
+  scrollContent: {
+    flexGrow: 1,
+    paddingBottom: 140,
+    paddingTop: 8,
+    paddingHorizontal: 14,
+  },
   headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingTop: 6,
-    paddingBottom: 10,
-    gap: 8,
+    paddingHorizontal: 16,
+    paddingTop: 4,
+    paddingBottom: 14,
+    gap: 10,
+    backgroundColor: UI.bg,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
   },
   headerIconBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.10)',
+    borderColor: 'rgba(255,255,255,0.12)',
   },
   modalSubtitle: {
-    color: UI.muted2,
+    color: UI.text,
     fontSize: 20,
-    fontWeight: '800',
+    fontWeight: '900',
     textAlign: 'center',
-    marginTop: 2,
+    marginTop: 1,
   },
   modalCloseText: { color: UI.text, fontSize: 24, fontWeight: '900', lineHeight: 24 },
-
-  topPadBlock: { paddingHorizontal: 14, marginTop: 6, marginBottom: 6 },
+  topPadBlock: {
+    paddingHorizontal: 16,
+    marginTop: 16,
+    marginBottom: 12,
+  },
 
   /* ===== CTAs ===== */
   ctaBtnPrimary: {
@@ -2051,16 +2140,20 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.10)',
   },
   ctaBtnSoftText: { color: UI.text, fontSize: 14, fontWeight: '900' },
-
-  topActionRow: { flexDirection: 'row', gap: 10, paddingHorizontal: 14, marginBottom: 10 },
+  topActionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 16,
+    marginBottom: 12,
+  },
 
   /* ===== Mileage Card ===== */
   mileageCard: {
-    marginHorizontal: 14,
-    marginTop: 6,
-    marginBottom: 10,
-    backgroundColor: UI.panel,
-    borderRadius: 18,
+    marginHorizontal: 16,
+    marginTop: 14,
+    marginBottom: 12,
+    backgroundColor: UI.card,
+    borderRadius: 20,
     padding: 14,
     borderWidth: 1,
     borderColor: UI.border,
@@ -2084,14 +2177,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginHorizontal: 14,
-    marginBottom: 10,
-    backgroundColor: UI.panel,
-    borderRadius: 14,
+    marginHorizontal: 16,
+    marginBottom: 12,
+    backgroundColor: UI.card,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: UI.border,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
   },
   searchInput: { flex: 1, color: UI.text, fontSize: 14.5, paddingVertical: 0, fontWeight: '700' },
   searchClear: {
@@ -2104,16 +2197,20 @@ const styles = StyleSheet.create({
   },
 
   /* ===== Service Cards ===== */
-  serviceItem: { borderRadius: 18, padding: 16, marginBottom: 14 },
+  serviceItem: {
+    borderRadius: 22,
+    padding: 16,
+    marginBottom: 14,
+  },
   serviceCard: {
-    backgroundColor: UI.panel,
+    backgroundColor: UI.card,
     borderWidth: 1,
     borderColor: UI.border,
     shadowColor: '#000',
-    shadowOpacity: 0.18,
+    shadowOpacity: 0.16,
     shadowRadius: 14,
     shadowOffset: { width: 0, height: 8 },
-    elevation: 6,
+    elevation: 5,
     position: 'relative',
     overflow: 'hidden',
   },
@@ -2290,31 +2387,45 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     zIndex: 99999,
     elevation: 99999,
-    backgroundColor: 'rgba(0,0,0,0.78)',
+    backgroundColor: 'rgba(0,0,0,0.82)',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 20,
   },
   sheet: {
     backgroundColor: UI.panel,
-    borderRadius: 18,
+    borderRadius: 24,
     borderWidth: 1,
     borderColor: UI.border,
-    padding: 14,
+    padding: 16,
+    maxHeight: '88%',
     shadowColor: '#000',
     shadowOpacity: 0.35,
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 10 },
   },
-  sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
-  sheetTitle: { color: UI.text, fontSize: 16, fontWeight: '900' },
+  sheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+  },
+  sheetTitle: {
+    color: UI.text,
+    fontSize: 18,
+    fontWeight: '900',
+  },
   sheetClose: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
   },
@@ -2322,15 +2433,14 @@ const styles = StyleSheet.create({
 
   labelStrong: { color: UI.text, fontWeight: '900', marginTop: 6 },
   helperText: { color: UI.muted, fontSize: 12, marginTop: 6, fontWeight: '700' },
-
   inputLg: {
     marginTop: 10,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'rgba(0,0,0,0.22)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 14,
+    borderRadius: 16,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 13,
     color: UI.text,
     fontSize: 16,
     fontWeight: '900',
@@ -2373,12 +2483,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     marginTop: 8,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'rgba(0,0,0,0.22)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 14,
+    borderRadius: 16,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingVertical: 11,
   },
   input: { color: UI.text, fontWeight: '800' },
   inputRowButton: {
@@ -2386,26 +2496,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     marginTop: 8,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'rgba(0,0,0,0.22)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 14,
+    borderRadius: 16,
     paddingHorizontal: 12,
-    paddingVertical: 12,
+    paddingVertical: 13,
   },
   inputRowButtonText: { color: UI.text, fontWeight: '900' },
-
   inputMultiline: {
     marginTop: 8,
-    minHeight: 90,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    minHeight: 100,
+    backgroundColor: 'rgba(0,0,0,0.22)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 14,
+    borderRadius: 16,
     paddingHorizontal: 12,
     paddingVertical: 12,
     color: UI.text,
     fontWeight: '800',
+    textAlignVertical: 'top',
   },
 
   segmentRow: { flexDirection: 'row', gap: 10, marginTop: 8 },
@@ -2422,15 +2532,48 @@ const styles = StyleSheet.create({
   segmentText: { color: UI.text, fontWeight: '900' },
   segmentTextActive: { color: UI.textDark },
 
+  instructionsSheet: {
+    backgroundColor: UI.panel,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: UI.border,
+    padding: 16,
+    maxHeight: '92%',
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+  },
+  instructionsSubtitle: { color: UI.muted, fontSize: 12, marginTop: 4, fontWeight: '800' },
+  instructionsScroll: { alignItems: 'center', paddingBottom: 12 },
+  instructionsImage: {
+    borderRadius: 18,
+    backgroundColor: '#0b0b0b',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  instructionsFooterText: {
+    color: UI.muted,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '700',
+    marginTop: 12,
+    textAlign: 'center',
+  },
+
   // Thinking overlay
   thinkingCard: {
-    width: 300,
+    width: 310,
     backgroundColor: UI.panel,
-    borderRadius: 18,
-    padding: 18,
+    borderRadius: 24,
+    padding: 22,
     borderWidth: 1,
     borderColor: UI.border,
     alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
   },
   spinnerRow: { marginBottom: 10 },
   thinkingTitle: { color: UI.text, fontSize: 16, fontWeight: '900' },
@@ -2449,7 +2592,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.65)',
+    backgroundColor: '#121212',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.10)',
   },
   viewerTopBtn: {
     flexDirection: 'row',

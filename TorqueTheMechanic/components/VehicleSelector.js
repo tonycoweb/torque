@@ -27,6 +27,7 @@ import mobileAds, { RewardedAd, RewardedAdEventType, AdEventType } from 'react-n
 import { getAllVehicles, deleteVehicleByVin, saveVehicle } from '../utils/VehicleStorage';
 import VehiclePhotoModal from './VehiclePhotoModal';
 import * as ImagePicker from 'expo-image-picker';
+import { MaterialIcons } from '@expo/vector-icons';
 
 // ---------- ADS ----------
 const adUnitId = __DEV__
@@ -289,6 +290,7 @@ export default function VehicleSelector({
 
   // ✅ chooser modal (choose vs snap)
   const [photoChooserVisible, setPhotoChooserVisible] = useState(false);
+  const [showGarageInfo, setShowGarageInfo] = useState(false);
 
   // Garage state
   const [vehicles, setVehicles] = useState([]);
@@ -327,10 +329,10 @@ export default function VehicleSelector({
   }, [modalVisible]);
 
   useEffect(() => {
-    const isOpen = modalVisible || showVinModal || editMode || photoModalVisible || photoChooserVisible;
+    const isOpen = modalVisible || showVinModal || editMode || photoModalVisible || photoChooserVisible || showGarageInfo;
     modalOpacity.value = withTiming(isOpen ? 1 : 0, { duration: 220 });
     modalTranslateY.value = withSpring(isOpen ? 0 : 100, { damping: 18, stiffness: 130 });
-  }, [modalVisible, showVinModal, editMode, photoModalVisible, photoChooserVisible, modalOpacity, modalTranslateY]);
+  }, [modalVisible, showVinModal, editMode, photoModalVisible, photoChooserVisible, showGarageInfo, modalOpacity, modalTranslateY]);
 
   useEffect(() => {
     if (showVinModal && scrollRef.current) {
@@ -522,6 +524,18 @@ export default function VehicleSelector({
     return seen.size;
   };
 
+  const openShopForSlots = () => {
+    setModalVisible(false);
+    setShowVinModal(false);
+    setShowGarageInfo(false);
+
+    if (onOpenShop) {
+      onOpenShop({ reason: 'vehicle_slots', focus: 'car_slots' });
+    } else {
+      Alert.alert('Shop Not Connected', 'The store screen is not connected here yet.');
+    }
+  };
+
   const showGarageFullAlert = ({ currentCount, limit }) => {
     const slotWord = limit === 1 ? 'slot' : 'slots';
 
@@ -532,16 +546,7 @@ export default function VehicleSelector({
         { text: 'Not Now', style: 'cancel' },
         {
           text: 'Unlock Slots',
-          onPress: () => {
-            setModalVisible(false);
-            setShowVinModal(false);
-
-            if (onOpenShop) {
-              onOpenShop({ reason: 'vehicle_slots' });
-            } else {
-              Alert.alert('Shop Not Connected', 'The store screen is not connected here yet.');
-            }
-          },
+          onPress: openShopForSlots,
         },
       ]
     );
@@ -812,39 +817,76 @@ export default function VehicleSelector({
         <Animated.View style={[styles.EditModalContainer, animatedModalStyle]}>
           <SafeAreaView style={styles.modalContainer}>
             <View style={styles.modalHeaderRow}>
-              <View style={{ width: 44 }} />
+              <TouchableOpacity style={styles.infoPill} onPress={() => setShowGarageInfo(true)} activeOpacity={0.9}>
+                <MaterialIcons name="info-outline" size={24} color="#e5e7eb" />
+              </TouchableOpacity>
               <Text style={styles.modalTitle}>Your Garage</Text>
               <TouchableOpacity style={styles.closePill} onPress={() => setModalVisible(false)} activeOpacity={0.9}>
                 <Text style={styles.closePillText}>✕</Text>
               </TouchableOpacity>
             </View>
 
-            <View style={styles.garageIntroCard}>
-              <Text style={styles.garageIntroTitle}>Saved Vehicles</Text>
-              <Text style={styles.garageIntroText}>
-                Tap a vehicle to make it active. Use Edit or Delete to manage your garage.
-              </Text>
-              <View style={styles.slotPill}>
-                <Text style={styles.slotPillText}>Slots used: {vehicles.length}/{getNormalizedSlotLimit()}</Text>
-              </View>
-            </View>
-
             <FlatList
               data={vehicles}
               keyExtractor={(item) => ensureId(item).id}
               renderItem={({ item }) => <VehicleRow item={item} />}
+              ListHeaderComponent={(
+                <View style={styles.garageQuickRow}>
+                  <TouchableOpacity style={styles.slotUpgradePill} onPress={openShopForSlots} activeOpacity={0.9}>
+                    <Text style={styles.slotUpgradeText}>Slots used {vehicles.length}/{getNormalizedSlotLimit()}</Text>
+                    <Text style={styles.slotUpgradeSub}>Tap to add slots</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.garageHintText}>Tap a vehicle to make it active</Text>
+                </View>
+              )}
               contentContainerStyle={styles.garageListContent}
               showsVerticalScrollIndicator={false}
             />
 
             <TouchableOpacity style={styles.addNewButton} onPress={handleAddNew} activeOpacity={0.95}>
-              <Text style={styles.addNewText}>
-                + Add Vehicle {vehicles.length}/{getNormalizedSlotLimit()} +
-              </Text>
+              <Text style={styles.addNewText}>+ Add Vehicle +</Text>
             </TouchableOpacity>
+
+            {showGarageInfo && (
+              <View style={styles.infoBackdropInModal} pointerEvents="auto">
+                <View style={styles.infoSheet}>
+                  <View style={styles.infoHeaderRow}>
+                    <Text style={styles.infoTitle}>How Your Garage Works</Text>
+                    <TouchableOpacity style={styles.chooserClose} onPress={() => setShowGarageInfo(false)} activeOpacity={0.9}>
+                      <Text style={styles.chooserCloseText}>✕</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={styles.infoLead}>
+                    Your Garage tells Torque which vehicle you are working on, so you do not have to repeat the year, make, model, and engine every time.
+                  </Text>
+
+                  <View style={styles.infoBulletCard}>
+                    <Text style={styles.infoBulletTitle}>Set the active vehicle</Text>
+                    <Text style={styles.infoBulletText}>Tap any saved vehicle in the list to make it active. Torque will automatically reference that vehicle in chat, service tracking, and diagnostics.</Text>
+                  </View>
+
+                  <View style={styles.infoBulletCard}>
+                    <Text style={styles.infoBulletTitle}>Manage saved vehicles</Text>
+                    <Text style={styles.infoBulletText}>Use Edit to fix details like engine, MPG, horsepower, or transmission. Use Delete to remove a vehicle and free up a garage slot.</Text>
+                  </View>
+
+                  <View style={styles.infoBulletCard}>
+                    <Text style={styles.infoBulletTitle}>Ask about a different car</Text>
+                    <Text style={styles.infoBulletText}>If your question is not about the active vehicle, tell Torque which car you mean. Otherwise, he will assume you are talking about the active vehicle shown on the home screen.</Text>
+                  </View>
+
+                  <TouchableOpacity style={styles.infoSlotButton} onPress={openShopForSlots} activeOpacity={0.92}>
+                    <Text style={styles.infoSlotButtonText}>Add More Vehicle Slots</Text>
+                    <Text style={styles.infoSlotButtonSub}>Current slots used: {vehicles.length}/{getNormalizedSlotLimit()}</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
           </SafeAreaView>
         </Animated.View>
       </Modal>
+
 
       {/* Photo chooser modal */}
       <Modal
@@ -1137,6 +1179,7 @@ const styles = StyleSheet.create({
   homeBg: { width: '110%', height: '110%', position: 'absolute', top: '-5%', left: '-5%' },
   homeBgOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
 
+
   homePhotoBtn: {
     position: 'absolute',
     top: 12,
@@ -1179,6 +1222,104 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.10)',
   },
   closePillText: { color: '#fff', fontSize: 20, fontWeight: '900' },
+
+  infoPill: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  infoPillText: { color: '#fff', fontSize: 19, fontWeight: '900' },
+
+  garageQuickRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingTop: 4,
+    paddingBottom: 12,
+  },
+  slotUpgradePill: {
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+    paddingVertical: 9,
+    paddingHorizontal: 13,
+    borderRadius: 18,
+    backgroundColor: 'rgba(34,197,94,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(34,197,94,0.34)',
+    minWidth: 132,
+  },
+  slotUpgradeText: { color: '#dcfce7', fontSize: 12.5, fontWeight: '900' },
+  slotUpgradeSub: { color: '#86efac', fontSize: 11, fontWeight: '800', marginTop: 2 },
+  garageHintText: {
+    flex: 1,
+    color: '#aeb7c4',
+    fontSize: 12.5,
+    fontWeight: '800',
+    textAlign: 'right',
+    lineHeight: 17,
+  },
+
+  infoBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.84)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+  },
+  infoBackdropInModal: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 9999,
+    elevation: 9999,
+    backgroundColor: 'rgba(0,0,0,0.86)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+  },
+  infoSheet: {
+    width: '100%',
+    maxWidth: 520,
+    backgroundColor: '#121212',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+    padding: 16,
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 8,
+  },
+  infoHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  infoTitle: { flex: 1, color: '#fff', fontSize: 20, fontWeight: '900', paddingRight: 12 },
+  infoLead: { color: '#cbd5e1', fontSize: 13.5, lineHeight: 20, marginTop: 12, fontWeight: '700' },
+  infoBulletCard: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.09)',
+    borderRadius: 18,
+    paddingVertical: 12,
+    paddingHorizontal: 13,
+    marginTop: 10,
+  },
+  infoBulletTitle: { color: '#fff', fontSize: 14.5, fontWeight: '900', marginBottom: 4 },
+  infoBulletText: { color: '#aeb7c4', fontSize: 13, lineHeight: 18, fontWeight: '700' },
+  infoSlotButton: {
+    marginTop: 13,
+    backgroundColor: GREEN,
+    borderRadius: 18,
+    paddingVertical: 13,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  infoSlotButtonText: { color: '#07110a', fontSize: 15, fontWeight: '900' },
+  infoSlotButtonSub: { color: '#14532d', fontSize: 12, fontWeight: '900', marginTop: 3 },
 
   garageIntroCard: {
     backgroundColor: '#2a2a2a',
